@@ -24,13 +24,16 @@ func NewAnnotator(vrpStore *store.VRPStore) *Annotator {
 //  2. If no covering VRPs exist → NotFound.
 //  3. If any covering VRP matches the origin ASN AND the route's
 //     prefix length ≤ VRP's maxLength → Valid.
-//  4. Otherwise → Invalid.
+//  4. Otherwise → Invalid, classified by ReasonCode as invalid_length when a
+//     covering VRP does authorise the origin AS but the route is more specific
+//     than that VRP's maxLength, or invalid_asn when none authorises it.
 func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 	originASN := route.OriginASN()
 	if originASN == 0 {
 		return types.ROVResult{
-			State:  types.ROVNotFound,
-			Reason: "no origin ASN in AS_PATH",
+			State:      types.ROVNotFound,
+			Reason:     "no origin ASN in AS_PATH",
+			ReasonCode: types.ROVReasonNoOriginASN,
 		}
 	}
 
@@ -38,20 +41,43 @@ func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 
 	if len(covering) == 0 {
 		return types.ROVResult{
-			State:  types.ROVNotFound,
-			Reason: "no covering VRPs found",
+			State:      types.ROVNotFound,
+			Reason:     "no covering VRPs found",
+			ReasonCode: types.ROVReasonNoCoveringVRP,
 		}
 	}
 
 	routePrefixLen := route.Prefix.Bits()
 
-	for _, vrp := range covering {
-		if vrp.ASN == originASN && routePrefixLen <= int(vrp.MaxLength) {
+	// asnMatch is the first covering VRP that authorises the origin AS, whatever
+	// its maxLength. It is what separates a wrong origin from a too-specific
+	// prefix once the loop finds no fully valid VRP.
+	var asnMatch *types.VRP
+
+	for i, vrp := range covering {
+		if vrp.ASN != originASN {
+			continue
+		}
+		if routePrefixLen <= int(vrp.MaxLength) {
 			return types.ROVResult{
 				State:       types.ROVValid,
 				MatchedVRPs: covering,
 				Reason:      fmt.Sprintf("matches VRP {%s, AS%d, /%d}", vrp.Prefix, vrp.ASN, vrp.MaxLength),
+				ReasonCode:  types.ROVReasonMatchedVRP,
 			}
+		}
+		if asnMatch == nil {
+			asnMatch = &covering[i]
+		}
+	}
+
+	if asnMatch != nil {
+		return types.ROVResult{
+			State:       types.ROVInvalid,
+			MatchedVRPs: covering,
+			Reason: fmt.Sprintf("origin AS%d is authorized by VRP {%s, AS%d, /%d} but /%d is more specific than its maxLength",
+				originASN, asnMatch.Prefix, asnMatch.ASN, asnMatch.MaxLength, routePrefixLen),
+			ReasonCode: types.ROVReasonInvalidLength,
 		}
 	}
 
@@ -59,5 +85,6 @@ func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 		State:       types.ROVInvalid,
 		MatchedVRPs: covering,
 		Reason:      fmt.Sprintf("origin AS%d not authorized by any covering VRP", originASN),
+		ReasonCode:  types.ROVReasonInvalidASN,
 	}
 }

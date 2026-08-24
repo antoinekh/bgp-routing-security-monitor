@@ -261,3 +261,77 @@ func TestWebhookPayloadProtectedASNsOmittedWhenEmpty(t *testing.T) {
 		t.Errorf("expected protected_asns to be omitted from JSON, but it was present")
 	}
 }
+
+// TestWebhookPayloadCarriesROAData checks the alert names the ROA that produced
+// the verdict. protected_asns alone gives the ASN but not the prefix or the
+// maxLength, which is what separates a wrong origin from a too-specific route.
+func TestWebhookPayloadCarriesROAData(t *testing.T) {
+	vrp := types.VRP{Prefix: netip.MustParsePrefix("80.12.0.0/18"), ASN: 3215, MaxLength: 32}
+	event := Event{
+		ID:        "evt-roa",
+		Timestamp: time.Now(),
+		Type:      EventTypePostureChange,
+		Route: &types.Route{
+			Prefix:   netip.MustParsePrefix("80.12.10.128/28"),
+			PeerAddr: netip.MustParseAddr("193.251.127.50"),
+			PeerASN:  3215,
+			ASPath:   []uint32{28708},
+			ROV: types.ROVResult{
+				State:       types.ROVInvalid,
+				Reason:      "origin AS28708 not authorized by any covering VRP",
+				ReasonCode:  types.ROVReasonInvalidASN,
+				MatchedVRPs: []types.VRP{vrp},
+			},
+			ASPA: types.ASPAResult{State: types.ASPAUnknown},
+		},
+		OldPosture: types.PostureSecured,
+		NewPosture: types.PostureOriginInvalid,
+	}
+
+	var got webhookPayload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &got) //nolint:errcheck
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := newWebhookAction(srv.URL, "", "alert-as3215-prefix-hijacked", 1, 5*time.Second, nil, slog.Default())
+	if err := a.Execute(context.Background(), event); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if got.ROVReasonCode != string(types.ROVReasonInvalidASN) {
+		t.Errorf("rov_reason_code: got %q, want %q", got.ROVReasonCode, types.ROVReasonInvalidASN)
+	}
+	if got.ROVReason == "" {
+		t.Error("rov_reason: got empty, want the ROV reason string")
+	}
+	if len(got.MatchedVRPs) != 1 {
+		t.Fatalf("matched_vrps: got %d entries, want 1", len(got.MatchedVRPs))
+	}
+	want := PayloadVRP{Prefix: "80.12.0.0/18", ASN: 3215, MaxLength: 32}
+	if got.MatchedVRPs[0] != want {
+		t.Errorf("matched_vrps[0]: got %+v, want %+v", got.MatchedVRPs[0], want)
+	}
+}
+
+// TestWebhookPayloadMatchedVRPsOmittedWhenEmpty keeps the payload unchanged for
+// consumers when the route has no covering VRP.
+func TestWebhookPayloadMatchedVRPsOmittedWhenEmpty(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := newWebhookAction(srv.URL, "", "my-rule", 1, 5*time.Second, nil, slog.Default())
+	if err := a.Execute(context.Background(), makeWebhookEvent()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if bytes.Contains(body, []byte("matched_vrps")) {
+		t.Errorf("expected matched_vrps to be omitted from JSON, but it was present: %s", body)
+	}
+}

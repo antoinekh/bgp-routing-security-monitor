@@ -148,7 +148,28 @@ type ROVResult struct {
 	State       ROVState
 	MatchedVRPs []VRP
 	Reason      string
+	// ReasonCode is the machine-readable form of Reason. It splits the single
+	// RFC 6811 Invalid state into the two faults operators act on differently:
+	// a wrong origin AS, and a prefix more specific than the ROA's maxLength.
+	ReasonCode ROVReasonCode
 }
+
+// ROVReasonCode classifies a ROV result beyond its RFC 6811 state.
+type ROVReasonCode string
+
+const (
+	// ROVReasonMatchedVRP: a covering VRP authorises the origin at this length.
+	ROVReasonMatchedVRP ROVReasonCode = "matched_vrp"
+	// ROVReasonInvalidASN: covering VRPs exist, none authorises the origin AS.
+	ROVReasonInvalidASN ROVReasonCode = "invalid_asn"
+	// ROVReasonInvalidLength: a covering VRP authorises the origin AS, but the
+	// route is more specific than that VRP's maxLength.
+	ROVReasonInvalidLength ROVReasonCode = "invalid_length"
+	// ROVReasonNoCoveringVRP: no VRP covers the prefix.
+	ROVReasonNoCoveringVRP ROVReasonCode = "no_covering_vrp"
+	// ROVReasonNoOriginASN: the AS_PATH is empty, so there is no origin to check.
+	ROVReasonNoOriginASN ROVReasonCode = "no_origin_asn"
+)
 
 type VRP struct {
 	Prefix    netip.Prefix

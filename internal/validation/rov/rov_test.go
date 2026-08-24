@@ -216,3 +216,127 @@ func TestROVMultipleVRPs(t *testing.T) {
 		t.Errorf("expected Valid (second VRP matches), got %s: %s", result.State, result.Reason)
 	}
 }
+
+// ─── ReasonCode classification ───
+
+// TestROVReasonCodes pins the machine-readable classification for every branch
+// of Validate. The invalid_asn vs invalid_length split is the point of the
+// field: both are RFC 6811 Invalid, but they need different operator actions.
+func TestROVReasonCodes(t *testing.T) {
+	vrp := types.VRP{Prefix: netip.MustParsePrefix("198.51.100.0/24"), ASN: 13335, MaxLength: 24}
+
+	tests := []struct {
+		name     string
+		vrps     []types.VRP
+		prefix   string
+		asPath   []uint32
+		wantStat types.ROVState
+		wantCode types.ROVReasonCode
+	}{
+		{
+			name:     "authorised origin within maxLength",
+			vrps:     []types.VRP{vrp},
+			prefix:   "198.51.100.0/24",
+			asPath:   []uint32{64501, 13335},
+			wantStat: types.ROVValid,
+			wantCode: types.ROVReasonMatchedVRP,
+		},
+		{
+			name:     "origin not authorised by any covering VRP",
+			vrps:     []types.VRP{vrp},
+			prefix:   "198.51.100.0/24",
+			asPath:   []uint32{64501, 64666},
+			wantStat: types.ROVInvalid,
+			wantCode: types.ROVReasonInvalidASN,
+		},
+		{
+			name:     "authorised origin but more specific than maxLength",
+			vrps:     []types.VRP{vrp},
+			prefix:   "198.51.100.0/25",
+			asPath:   []uint32{64501, 13335},
+			wantStat: types.ROVInvalid,
+			wantCode: types.ROVReasonInvalidLength,
+		},
+		{
+			name:     "no covering VRP",
+			vrps:     nil,
+			prefix:   "10.0.0.0/8",
+			asPath:   []uint32{64501, 64502},
+			wantStat: types.ROVNotFound,
+			wantCode: types.ROVReasonNoCoveringVRP,
+		},
+		{
+			name:     "empty AS_PATH",
+			vrps:     []types.VRP{vrp},
+			prefix:   "198.51.100.0/24",
+			asPath:   nil,
+			wantStat: types.ROVNotFound,
+			wantCode: types.ROVReasonNoOriginASN,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := store.NewVRPStore()
+			s.ReplaceAll(tt.vrps, 1, 1)
+			result := NewAnnotator(s).Validate(&types.Route{
+				Prefix: netip.MustParsePrefix(tt.prefix),
+				ASPath: tt.asPath,
+			})
+			if result.State != tt.wantStat {
+				t.Errorf("state: got %s, want %s", result.State, tt.wantStat)
+			}
+			if result.ReasonCode != tt.wantCode {
+				t.Errorf("reason code: got %q, want %q (reason: %s)", result.ReasonCode, tt.wantCode, result.Reason)
+			}
+		})
+	}
+}
+
+// TestROVInvalidLengthPrefersASNMatchingVRP checks that a covering VRP naming a
+// different AS does not mask the maxLength fault of the VRP that does name the
+// origin. Ordering inside the covering set must not change the verdict.
+func TestROVInvalidLengthPrefersASNMatchingVRP(t *testing.T) {
+	s := store.NewVRPStore()
+	s.ReplaceAll([]types.VRP{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), ASN: 64666, MaxLength: 32},
+		{Prefix: netip.MustParsePrefix("198.51.0.0/16"), ASN: 13335, MaxLength: 16},
+	}, 1, 1)
+
+	result := NewAnnotator(s).Validate(&types.Route{
+		Prefix: netip.MustParsePrefix("198.51.100.0/24"),
+		ASPath: []uint32{64501, 13335},
+	})
+
+	if result.State != types.ROVInvalid {
+		t.Fatalf("state: got %s, want Invalid", result.State)
+	}
+	if result.ReasonCode != types.ROVReasonInvalidLength {
+		t.Errorf("reason code: got %q, want %q (reason: %s)", result.ReasonCode, types.ROVReasonInvalidLength, result.Reason)
+	}
+}
+
+// TestROVMatchedVRPsPopulated checks the covering set is carried on the result,
+// since the API and the webhook payload both surface it.
+func TestROVMatchedVRPsPopulated(t *testing.T) {
+	s := store.NewVRPStore()
+	s.ReplaceAll([]types.VRP{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), ASN: 13335, MaxLength: 24},
+	}, 1, 1)
+
+	invalid := NewAnnotator(s).Validate(&types.Route{
+		Prefix: netip.MustParsePrefix("198.51.100.0/24"),
+		ASPath: []uint32{64666},
+	})
+	if len(invalid.MatchedVRPs) != 1 || invalid.MatchedVRPs[0].ASN != 13335 {
+		t.Errorf("invalid route matched VRPs: got %v, want one VRP for AS13335", invalid.MatchedVRPs)
+	}
+
+	notFound := NewAnnotator(store.NewVRPStore()).Validate(&types.Route{
+		Prefix: netip.MustParsePrefix("10.0.0.0/8"),
+		ASPath: []uint32{64666},
+	})
+	if len(notFound.MatchedVRPs) != 0 {
+		t.Errorf("not-found route matched VRPs: got %v, want none", notFound.MatchedVRPs)
+	}
+}

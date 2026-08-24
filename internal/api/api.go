@@ -27,9 +27,23 @@ type RouteResponse struct {
 	NextHop   string   `json:"next_hop"`
 	ROV       string   `json:"rov"`
 	ROVReason string   `json:"rov_reason,omitempty"`
-	ASPA      string   `json:"aspa"`
-	Posture   string   `json:"posture"`
-	Timestamp string   `json:"timestamp"`
+	// ROVReasonCode is the machine-readable form of ROVReason, notably
+	// invalid_asn vs invalid_length for an Invalid route.
+	ROVReasonCode string `json:"rov_reason_code,omitempty"`
+	// MatchedVRPs are the VRPs covering the prefix, from the RTR cache. Empty
+	// for NotFound routes, which have no covering VRP by definition.
+	MatchedVRPs []VRPResponse `json:"matched_vrps,omitempty"`
+	ASPA        string        `json:"aspa"`
+	Posture     string        `json:"posture"`
+	Timestamp   string        `json:"timestamp"`
+}
+
+// VRPResponse is one Validated ROA Payload covering a prefix, as delivered by
+// the RTR cache. It is what tells an operator which ROA produced the verdict.
+type VRPResponse struct {
+	Prefix    string `json:"prefix"`
+	ASN       uint32 `json:"asn"`
+	MaxLength uint8  `json:"max_length"`
 }
 
 // PeerResponse is a BMP peer in API output.
@@ -280,18 +294,37 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// vrpsToResponse converts the covering VRPs kept on a route. It returns nil for
+// an empty input so the field is omitted from the JSON rather than sent as [].
+func vrpsToResponse(vrps []types.VRP) []VRPResponse {
+	if len(vrps) == 0 {
+		return nil
+	}
+	out := make([]VRPResponse, 0, len(vrps))
+	for _, v := range vrps {
+		out = append(out, VRPResponse{
+			Prefix:    v.Prefix.String(),
+			ASN:       v.ASN,
+			MaxLength: v.MaxLength,
+		})
+	}
+	return out
+}
+
 func routeToResponse(r *types.Route) RouteResponse {
 	return RouteResponse{
-		Prefix:    r.Prefix.String(),
-		PeerAddr:  r.PeerAddr.String(),
-		PeerASN:   r.PeerASN,
-		OriginASN: r.OriginASN(),
-		ASPath:    r.ASPath,
-		NextHop:   r.NextHop.String(),
-		ROV:       r.ROV.State.String(),
-		ROVReason: r.ROV.Reason,
-		ASPA:      r.ASPA.State.String(),
-		Posture:   string(r.SecurityPosture),
+		Prefix:        r.Prefix.String(),
+		PeerAddr:      r.PeerAddr.String(),
+		PeerASN:       r.PeerASN,
+		OriginASN:     r.OriginASN(),
+		ASPath:        r.ASPath,
+		NextHop:       r.NextHop.String(),
+		ROV:           r.ROV.State.String(),
+		ROVReason:     r.ROV.Reason,
+		ROVReasonCode: string(r.ROV.ReasonCode),
+		MatchedVRPs:   vrpsToResponse(r.ROV.MatchedVRPs),
+		ASPA:          r.ASPA.State.String(),
+		Posture:       string(r.SecurityPosture),
 	}
 }
 

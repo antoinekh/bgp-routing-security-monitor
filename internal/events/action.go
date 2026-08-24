@@ -62,6 +62,13 @@ func (a *LogAction) Execute(ctx context.Context, event Event) error {
 	return nil
 }
 
+// PayloadVRP is one Validated ROA Payload carried in a webhook payload.
+type PayloadVRP struct {
+	Prefix    string `json:"prefix"`
+	ASN       uint32 `json:"asn"`
+	MaxLength uint8  `json:"max_length"`
+}
+
 // webhookPayload is the JSON body posted to the configured endpoint.
 type webhookPayload struct {
 	ID            string   `json:"id"`
@@ -77,8 +84,15 @@ type webhookPayload struct {
 	OldPosture    string   `json:"old_posture"`
 	NewPosture    string   `json:"new_posture"`
 	ROVState      string   `json:"rov_state"`
-	ASPAState     string   `json:"aspa_state"`
-	CacheName     string   `json:"cache_name"`
+	// ROVReason and ROVReasonCode say why ROV reached that state. The code is
+	// the stable form to branch on: invalid_asn vs invalid_length.
+	ROVReason     string `json:"rov_reason,omitempty"`
+	ROVReasonCode string `json:"rov_reason_code,omitempty"`
+	// MatchedVRPs are the VRPs covering the prefix, so a consumer can name the
+	// ROA that produced the verdict without querying an external service.
+	MatchedVRPs []PayloadVRP `json:"matched_vrps,omitempty"`
+	ASPAState   string       `json:"aspa_state"`
+	CacheName   string       `json:"cache_name"`
 }
 
 // WebhookAction delivers the event payload to an HTTP endpoint.
@@ -226,9 +240,16 @@ func (a *WebhookAction) buildPayload(event Event) webhookPayload {
 		p.PeerASN = event.Route.PeerASN
 		p.OriginASN = event.Route.OriginASN()
 		p.ROVState = event.Route.ROV.State.String()
+		p.ROVReason = event.Route.ROV.Reason
+		p.ROVReasonCode = string(event.Route.ROV.ReasonCode)
 		p.ASPAState = event.Route.ASPA.State.String()
 		for _, vrp := range event.Route.ROV.MatchedVRPs {
 			p.ProtectedASNs = append(p.ProtectedASNs, vrp.ASN)
+			p.MatchedVRPs = append(p.MatchedVRPs, PayloadVRP{
+				Prefix:    vrp.Prefix.String(),
+				ASN:       vrp.ASN,
+				MaxLength: vrp.MaxLength,
+			})
 		}
 	}
 	return p

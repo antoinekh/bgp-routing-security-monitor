@@ -5,6 +5,20 @@ All notable changes to RAVEN are recorded here.
 ## Unreleased
 
 ### Added
+- ROA visibility in results: `rov_reason_code` and `matched_vrps` on the
+  `/api/v1/routes` response and on the webhook payload. The covering VRPs
+  were already computed and kept on every validated route, but no consumer
+  could see them, so an operator had to query an external RPKI service to
+  learn which ROA produced a verdict. Both fields are `omitempty`, so a
+  route with no covering VRP serialises exactly as before. The webhook
+  payload also gains `rov_reason`.
+- ROV reason codes splitting the single RFC 6811 `Invalid` state into the
+  two faults that need different operator actions: `invalid_asn` when no
+  covering VRP authorises the origin AS, and `invalid_length` when one does
+  authorise it but the route is more specific than that VRP's maxLength.
+  `matched_vrp`, `no_covering_vrp` and `no_origin_asn` cover the other
+  branches. The `invalid_length` reason string now names the VRP and both
+  prefix lengths instead of claiming the origin is unauthorised.
 - RTR anomaly detection: adaptive median/MAD-based detector for RTR sync
   telemetry (interval, duration, VRP/ASPA churn) with per-cache rolling
   baselines, hard-trip and correlated-trip classification.
