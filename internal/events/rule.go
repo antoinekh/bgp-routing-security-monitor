@@ -15,6 +15,9 @@ type Rule struct {
 	Trigger Trigger
 	// Actions are executed concurrently when the trigger matches.
 	Actions []Action
+	// Enrichers annotate the event before Actions run. They are populated
+	// from the same YAML actions list; buildRule partitions them out.
+	Enrichers []Enricher
 	// Cooldown prevents the same rule from firing more than once per
 	// prefix+peer pair within this duration. Zero means no cooldown.
 	Cooldown    time.Duration
@@ -23,9 +26,13 @@ type Rule struct {
 	cooldownMap map[string]time.Time // key: "prefix|peerAddr" or event type
 }
 
-// Evaluate checks the trigger, enforces the cooldown, then calls every action
-// concurrently in its own goroutine. Action errors are logged but do not
-// interrupt other actions.
+// Evaluate checks the trigger, enforces the cooldown, runs any enrichers,
+// then calls every action concurrently in its own goroutine. Action errors
+// are logged but do not interrupt other actions.
+//
+// The engine calls Evaluate from its own goroutine, so everything here —
+// including an enricher's outbound HTTP call — is already off the BMP ingest
+// and validation path.
 func (r *Rule) Evaluate(ctx context.Context, event Event) {
 	if !r.Trigger.Matches(event) {
 		return
@@ -33,6 +40,15 @@ func (r *Rule) Evaluate(ctx context.Context, event Event) {
 	if !r.checkCooldown(event) {
 		return
 	}
+
+	// Enrichers run to completion before the actions so that every action
+	// sees the same fully annotated event. They mutate a local copy; the
+	// event the engine holds is untouched, so one rule's enrichment cannot
+	// leak into another rule's evaluation of the same event.
+	for _, enricher := range r.Enrichers {
+		enricher.Enrich(ctx, &event)
+	}
+
 	var wg sync.WaitGroup
 	for _, action := range r.Actions {
 		wg.Add(1)

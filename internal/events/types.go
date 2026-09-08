@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/nokia/bgp-routing-security-monitor/internal/external"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
@@ -41,6 +42,12 @@ type Event struct {
 	CacheName string
 	// RouterID is the router that sourced this event.
 	RouterID string
+	// GlobalVisibility is attached by the global-correlate action when a
+	// matching rule includes one. Nil when no correlation ran, which is the
+	// case for every rule that does not opt in.
+	//
+	// It is a standalone annotation and does not affect NewPosture.
+	GlobalVisibility *external.GlobalVisibilityResult
 }
 
 // NewID returns a random UUID v4 string suitable for use as an event identifier.

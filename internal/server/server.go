@@ -18,6 +18,7 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/bmp"
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 	"github.com/nokia/bgp-routing-security-monitor/internal/events"
+	"github.com/nokia/bgp-routing-security-monitor/internal/external/ripestat"
 	"github.com/nokia/bgp-routing-security-monitor/internal/flowspec"
 	"github.com/nokia/bgp-routing-security-monitor/internal/metrics"
 	otelexporter "github.com/nokia/bgp-routing-security-monitor/internal/otel"
@@ -125,7 +126,32 @@ func (s *Server) Run() error {
 	// Build event engine before starting any goroutines so that routeIngestLoop
 	// sees a non-nil s.eventEngine from the start.
 	if len(s.cfg.Events.Rules) > 0 {
-		eng, mgrs, err := events.BuildEngine(s.cfg.Events, s.log)
+		var opts []events.Option
+
+		// External global-visibility correlation is opt-in and defaults to
+		// disabled. When off, no provider is injected and a rule that asks
+		// for a global-correlate action fails the build with a clear
+		// message rather than silently doing nothing.
+		if rs := s.cfg.External.RIPEstat; rs.Enabled {
+			client, err := ripestat.New(ripestat.Config{
+				BaseURL:         rs.BaseURL,
+				Timeout:         rs.Timeout,
+				CacheTTL:        rs.CacheTTL,
+				RateLimitPerMin: rs.RateLimitPerMin,
+			})
+			if err != nil {
+				return fmt.Errorf("external.ripestat: %w", err)
+			}
+			opts = append(opts, events.WithGlobalVisibility(client, rs.CacheTTL))
+			s.log.Info("external global-visibility correlation enabled",
+				"source", client.Name(),
+				"base_url", rs.BaseURL,
+				"cache_ttl", rs.CacheTTL,
+				"rate_limit_per_min", rs.RateLimitPerMin,
+			)
+		}
+
+		eng, mgrs, err := events.BuildEngine(s.cfg.Events, s.log, opts...)
 		if err != nil {
 			return fmt.Errorf("event engine: %w", err)
 		}

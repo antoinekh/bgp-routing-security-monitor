@@ -127,6 +127,11 @@ type ActionConfig struct {
 	ApprovalWebhook string `mapstructure:"approval_webhook"`
 	// ApprovalTimeout is a Go duration string for the approval webhook HTTP timeout.
 	ApprovalTimeout string `mapstructure:"approval_timeout"`
+	// CacheTTL is a Go duration string used by the global-correlate action
+	// as its freshness requirement: a cached provider result younger than
+	// this is reused instead of re-querying. Empty falls back to
+	// external.ripestat.cache-ttl.
+	CacheTTL string `mapstructure:"cache_ttl"`
 }
 
 // WebhookActionConfig collects the webhook-specific fields from ActionConfig.
