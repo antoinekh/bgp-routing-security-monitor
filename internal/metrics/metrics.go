@@ -65,4 +65,20 @@ var (
 		Name: "raven_route_table_size",
 		Help: "Total number of pre-policy routes in the route table.",
 	})
+
+	// External global-visibility correlations. Labels: source (e.g.
+	// "ripestat"), result (match, divergent, local_only, inconclusive).
+	GlobalCheckTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_global_check_total",
+		Help: "Total external global-visibility correlations, by source and consensus result.",
+	}, []string{"source", "result"})
+
+	// End-to-end latency of a global-visibility correlation. Cache hits land
+	// in the smallest buckets, so this is a distribution over both cached and
+	// live lookups.
+	GlobalCheckLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "raven_global_check_latency_seconds",
+		Help:    "Latency of external global-visibility correlations in seconds.",
+		Buckets: []float64{.001, .005, .025, .1, .25, .5, 1, 2.5, 5, 10},
+	})
 )

@@ -1,0 +1,9 @@
+{
+ "messages": [["error", "invalid resource"]],
+ "version": "2.1",
+ "data_call_name": "looking-glass",
+ "data_call_status": "supported",
+ "status": "error",
+ "status_code": 400,
+ "data": null
+}
