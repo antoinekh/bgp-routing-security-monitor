@@ -2,6 +2,7 @@ package external
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"time"
 
@@ -15,6 +16,11 @@ import (
 // rate-limit rejection or a malformed response all resolve to
 // ConsensusInconclusive with the cause in Error, so callers on the CLI path
 // and in the Event Engine can attach the result unconditionally.
+//
+// The two cases where no provider was actually reached — a nil provider and a
+// rate-limit rejection — leave Queried false, record no latency, and stay off
+// raven_global_check_total; the latter is counted on
+// raven_global_check_rate_limited_total instead.
 //
 // maxAge is passed through to the provider as a freshness requirement; zero
 // means the provider's configured default.
@@ -37,12 +43,28 @@ func Correlate(
 		return result
 	}
 
-	result.Queried = true
 	result.Source = provider.Name()
 
 	start := time.Now()
 	summary, err := provider.GlobalOrigins(ctx, prefix, maxAge)
-	result.Latency = time.Since(start)
+	elapsed := time.Since(start)
+
+	// A lookup the provider's own rate limiter suppressed never reached the
+	// network. Nothing was consulted, so Queried stays false, and elapsed is
+	// the sub-microsecond cost of rejecting the call rather than a
+	// measurement — feeding it to the latency histogram would pull the
+	// distribution toward zero and hide real query latency. It gets its own
+	// counter so this policy decision stays distinguishable from a provider
+	// RAVEN could not reach.
+	if errors.Is(err, ErrRateLimited) {
+		result.Consensus = ConsensusInconclusive
+		result.Error = err.Error()
+		metrics.GlobalCheckRateLimited.WithLabelValues(result.Source).Inc()
+		return result
+	}
+
+	result.Queried = true
+	result.Latency = elapsed
 
 	if err != nil {
 		result.Consensus = ConsensusInconclusive

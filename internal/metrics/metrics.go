@@ -73,9 +73,22 @@ var (
 		Help: "Total external global-visibility correlations, by source and consensus result.",
 	}, []string{"source", "result"})
 
+	// Global-visibility lookups suppressed by the local rate limiter before
+	// any provider was contacted. Label: source (e.g. "ripestat").
+	//
+	// Separate from raven_global_check_total on purpose: a rate-limit
+	// rejection is a policy decision costing no network call, and folding it
+	// into the inconclusive result label made it indistinguishable from a
+	// provider RAVEN genuinely could not reach.
+	GlobalCheckRateLimited = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_global_check_rate_limited_total",
+		Help: "Total external global-visibility lookups suppressed by the local rate limiter, by source.",
+	}, []string{"source"})
+
 	// End-to-end latency of a global-visibility correlation. Cache hits land
 	// in the smallest buckets, so this is a distribution over both cached and
-	// live lookups.
+	// live lookups. Rate-limited lookups are excluded: no provider was
+	// contacted, so there is no latency to describe.
 	GlobalCheckLatency = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "raven_global_check_latency_seconds",
 		Help:    "Latency of external global-visibility correlations in seconds.",

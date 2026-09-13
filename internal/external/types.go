@@ -16,9 +16,24 @@ package external
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"time"
 )
+
+// ErrRateLimited is the sentinel a provider returns when its own rate limiter
+// suppressed a lookup before any network call was made.
+//
+// Correlate recognises it and accounts for it apart from a failed query:
+// nothing was consulted, so the result is not marked Queried, no latency is
+// recorded, and the check lands on raven_global_check_rate_limited_total
+// rather than raven_global_check_total. A local policy decision and a
+// provider RAVEN could not reach are different operational problems and must
+// not share a metric.
+//
+// It lives here, not in a provider package, so Correlate can test for it
+// without importing any provider.
+var ErrRateLimited = errors.New("suppressed by local rate limit")
 
 // GlobalConsensus is the verdict of comparing the local BMP-observed origin
 // against externally observed origins. The string values double as the
@@ -73,7 +88,9 @@ type GlobalOriginSummary struct {
 // types.SecurityPosture, which stays a pure local ROV x ASPA product.
 type GlobalVisibilityResult struct {
 	// Queried is true when a provider was actually consulted (including a
-	// cache hit). It is false when no provider was configured.
+	// cache hit). It is false when no provider was configured, and when the
+	// lookup was suppressed by the rate limiter before the provider was
+	// reached — see ErrRateLimited.
 	Queried bool `json:"queried"`
 	// Source is the provider identifier, e.g. "ripestat".
 	Source string `json:"source,omitempty"`
@@ -89,6 +106,8 @@ type GlobalVisibilityResult struct {
 	// CollectorCount is the total distinct collector peers reporting.
 	CollectorCount int `json:"collector_count"`
 	// Latency is how long the correlation took, in nanoseconds on the wire.
+	// Zero when nothing was consulted, including a rate-limited lookup:
+	// the time spent rejecting a call is not a latency measurement.
 	Latency time.Duration `json:"latency_ns"`
 	// Error explains a ConsensusInconclusive verdict. Empty otherwise.
 	Error string `json:"error,omitempty"`

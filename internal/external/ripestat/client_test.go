@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nokia/bgp-routing-security-monitor/internal/external"
 )
 
 // stubServer serves a fixture from an httptest server and counts requests.
@@ -367,6 +369,12 @@ func TestGlobalOriginsRateLimited(t *testing.T) {
 		_, err := c.GlobalOrigins(context.Background(), mustPrefix(t, p), 0)
 		if errors.Is(err, ErrRateLimited) {
 			rejected++
+			// The sentinel must also be recognisable as the package-neutral
+			// one, which is what lets Correlate account for it without
+			// importing this package.
+			if !errors.Is(err, external.ErrRateLimited) {
+				t.Errorf("GlobalOrigins(%s): error does not match external.ErrRateLimited", p)
+			}
 			continue
 		}
 		if err != nil {
@@ -379,6 +387,48 @@ func TestGlobalOriginsRateLimited(t *testing.T) {
 	}
 	if got := srv.requests.Load(); got != 3 {
 		t.Errorf("HTTP requests = %d, want 3 — rate-limited lookups must not reach the API", got)
+	}
+}
+
+// A correlation the rate limiter suppressed must not be reported as a query.
+// This drives the real client rather than a fake, so it covers the whole path
+// from the token bucket to the annotation an operator reads.
+func TestCorrelateRateLimitedIsNotQueried(t *testing.T) {
+	srv := newStubServer(t, serveFixture(t, "looking-glass-empty.json"))
+	clock := newFakeClock()
+	c, err := New(Config{
+		BaseURL:         srv.URL,
+		CacheTTL:        time.Nanosecond, // effectively disable the cache
+		RateLimitPerMin: 1,
+		Clock:           clock.Now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Spend the single-lookup budget, then correlate an uncached prefix so
+	// the limiter is guaranteed to fire.
+	first := external.Correlate(context.Background(), c, mustPrefix(t, "203.0.113.0/24"), 64511, 0)
+	if !first.Queried {
+		t.Fatalf("first correlation Queried = false, want true — it consumed the budget: %+v", first)
+	}
+
+	got := external.Correlate(context.Background(), c, mustPrefix(t, "198.51.100.0/24"), 64511, 0)
+
+	if got.Queried {
+		t.Error("Queried = true, want false — the rate limiter fired, so RIPEstat was never contacted")
+	}
+	if got.Latency != 0 {
+		t.Errorf("Latency = %v, want 0 — no request was made, so the elapsed time is not a measurement", got.Latency)
+	}
+	if got.Consensus != external.ConsensusInconclusive {
+		t.Errorf("Consensus = %q, want %q", got.Consensus, external.ConsensusInconclusive)
+	}
+	if got.Source != ProviderName {
+		t.Errorf("Source = %q, want %q — the operator needs to know whose budget ran out", got.Source, ProviderName)
+	}
+	if got := srv.requests.Load(); got != 1 {
+		t.Errorf("HTTP requests = %d, want 1 — only the first correlation may reach the API", got)
 	}
 }
 

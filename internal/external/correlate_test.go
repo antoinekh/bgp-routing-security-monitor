@@ -3,6 +3,7 @@ package external
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -172,6 +173,47 @@ func TestCorrelateFailsOpen(t *testing.T) {
 		}
 		if !got.Queried {
 			t.Error("Queried = false, want true — a provider was consulted")
+		}
+	})
+
+	// A rate-limited lookup never reached the provider, so it must not look
+	// like one that did: Queried stays false and Latency stays zero. The
+	// old behaviour reported queried:true with a sub-microsecond latency,
+	// which read as a suspiciously fast successful query.
+	t.Run("rate limited", func(t *testing.T) {
+		p := &fakeProvider{name: "ripestat", err: ErrRateLimited}
+		got := Correlate(context.Background(), p, prefix, 64511, 0)
+
+		if got.Consensus != ConsensusInconclusive {
+			t.Errorf("Consensus = %q, want %q", got.Consensus, ConsensusInconclusive)
+		}
+		if got.Queried {
+			t.Error("Queried = true, want false — the rate limiter fired before any lookup")
+		}
+		if got.Latency != 0 {
+			t.Errorf("Latency = %v, want 0 — no call was made, so there is nothing to time", got.Latency)
+		}
+		// Source is still recorded: the operator needs to know which
+		// provider's budget was exhausted, and it is the metric label.
+		if got.Source != "ripestat" {
+			t.Errorf("Source = %q, want ripestat", got.Source)
+		}
+		if got.Error == "" {
+			t.Error("Error is empty, want the suppression recorded")
+		}
+	})
+
+	// Wrapping must not hide the sentinel — providers are free to add
+	// context to it.
+	t.Run("wrapped rate limit error", func(t *testing.T) {
+		p := &fakeProvider{name: "ripestat", err: fmt.Errorf("ripestat: %w", ErrRateLimited)}
+		got := Correlate(context.Background(), p, prefix, 64511, 0)
+
+		if got.Queried {
+			t.Error("Queried = true, want false for a wrapped ErrRateLimited")
+		}
+		if got.Latency != 0 {
+			t.Errorf("Latency = %v, want 0 for a wrapped ErrRateLimited", got.Latency)
 		}
 	})
 

@@ -12,7 +12,6 @@ package ripestat
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,7 +49,11 @@ const (
 // ErrRateLimited is returned when the local token bucket rejects a lookup.
 // It is a local decision, not a RIPEstat response, and resolves to
 // ConsensusInconclusive upstream.
-var ErrRateLimited = errors.New("suppressed by local rate limit")
+//
+// It aliases external.ErrRateLimited so Correlate can recognise the
+// suppression without importing this package, and so callers may keep
+// matching on either name.
+var ErrRateLimited = external.ErrRateLimited
 
 // Config configures a Client. Zero fields take the package defaults.
 type Config struct {

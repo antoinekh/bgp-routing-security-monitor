@@ -40,6 +40,29 @@ func counterValue(t *testing.T, source, result string) float64 {
 	return 0
 }
 
+// rateLimitedValue reads raven_global_check_rate_limited_total for one source
+// off the default gatherer. Returns 0 before the series exists.
+func rateLimitedValue(t *testing.T, source string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != "raven_global_check_rate_limited_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "source" && l.GetValue() == source {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
 // histogramCount returns the observation count of
 // raven_global_check_latency_seconds, or -1 if the metric is absent.
 func histogramCount(t *testing.T) int64 {
@@ -121,6 +144,37 @@ func TestCorrelateRecordsMetrics(t *testing.T) {
 				t.Errorf("raven_global_check_latency_seconds count = %d, want %d", got, startHist+1)
 			}
 		})
+	}
+}
+
+// ─── TestCorrelateRateLimitedMetrics ───
+
+// A rate-limited lookup gets its own counter and touches nothing else.
+// Folding it into raven_global_check_total{result="inconclusive"} made a
+// policy decision — near-zero cost, no network call — indistinguishable from
+// a provider RAVEN could not reach, and its sub-microsecond timing dragged
+// the latency histogram toward zero.
+func TestCorrelateRateLimitedMetrics(t *testing.T) {
+	prefix := mustPrefix(t, "203.0.113.0/24")
+	p := &fakeProvider{name: "ripestat", err: ErrRateLimited}
+
+	// The metrics are process-global, so assert on deltas.
+	startRateLimited := rateLimitedValue(t, "ripestat")
+	startInconclusive := counterValue(t, "ripestat", "inconclusive")
+	startHist := histogramCount(t)
+
+	Correlate(context.Background(), p, prefix, 64511, 0)
+
+	if got := rateLimitedValue(t, "ripestat") - startRateLimited; got != 1 {
+		t.Errorf("raven_global_check_rate_limited_total{source=\"ripestat\"} delta = %v, want 1", got)
+	}
+	if got := counterValue(t, "ripestat", "inconclusive"); got != startInconclusive {
+		t.Errorf("raven_global_check_total{result=\"inconclusive\"} moved from %v to %v, want no change — "+
+			"a rate-limit rejection is not a check result", startInconclusive, got)
+	}
+	if got := histogramCount(t); got != startHist {
+		t.Errorf("raven_global_check_latency_seconds count moved from %d to %d, want no change — "+
+			"no network call was made, so there is no latency to observe", startHist, got)
 	}
 }
 
