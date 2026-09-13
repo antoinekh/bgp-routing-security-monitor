@@ -85,10 +85,24 @@ var (
 		Help: "Total external global-visibility lookups suppressed by the local rate limiter, by source.",
 	}, []string{"source"})
 
-	// End-to-end latency of a global-visibility correlation. Cache hits land
-	// in the smallest buckets, so this is a distribution over both cached and
-	// live lookups. Rate-limited lookups are excluded: no provider was
-	// contacted, so there is no latency to describe.
+	// Global-visibility lookups the provider served from its in-process cache
+	// without a network round-trip. Label: source (e.g. "ripestat").
+	//
+	// Like the rate-limited counter, this keeps a non-network event off
+	// raven_global_check_latency_seconds while leaving cache activity
+	// visible: rate(cache_hits) / rate(check_total) is the cache hit ratio.
+	GlobalCheckCacheHits = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_global_check_cache_hits_total",
+		Help: "Total global-visibility lookups served from the in-process cache, by source.",
+	}, []string{"source"})
+
+	// Latency of a global-visibility correlation that actually went to the
+	// provider, successful or not.
+	//
+	// Cache hits and rate-limited lookups are both excluded: neither made a
+	// network round-trip, and their near-zero timings would pull p50/p95
+	// toward zero whenever the cache is warm, masking exactly the provider
+	// latency degradation an operator alerts on.
 	GlobalCheckLatency = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "raven_global_check_latency_seconds",
 		Help:    "Latency of external global-visibility correlations in seconds.",

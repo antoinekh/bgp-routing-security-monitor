@@ -11,6 +11,11 @@ import (
 
 // fakeProvider is a GlobalVisibilityProvider stand-in. It records the calls it
 // received so tests can assert on maxAge propagation without any network.
+//
+// It returns summary verbatim, so a test simulates a cache hit by setting
+// GlobalOriginSummary.CacheHit on it — the same field the real client sets in
+// lookupCache. Leaving it unset models a live fetch, which is what every test
+// here other than the cache-hit cases wants.
 type fakeProvider struct {
 	name    string
 	summary GlobalOriginSummary
@@ -138,6 +143,27 @@ func TestCorrelate(t *testing.T) {
 		}
 		if got.GlobalOrigins[0].ASN != 64511 {
 			t.Errorf("GlobalOrigins[0].ASN = %d, want 64511", got.GlobalOrigins[0].ASN)
+		}
+	})
+
+	// A cache hit is still a query against the provider — it just cost no
+	// round-trip. The verdict must be identical to the live-fetch case.
+	t.Run("cache hit correlates like a live fetch", func(t *testing.T) {
+		p := &fakeProvider{name: "ripestat", summary: GlobalOriginSummary{
+			Origins:        []GlobalOriginObservation{{ASN: 64511, CollectorCount: 20}},
+			CollectorCount: 20,
+			CacheHit:       true,
+		}}
+		got := Correlate(context.Background(), p, prefix, 64511, 0)
+
+		if got.Consensus != ConsensusMatch {
+			t.Errorf("Consensus = %q, want %q", got.Consensus, ConsensusMatch)
+		}
+		if !got.Queried {
+			t.Error("Queried = false, want true — a cache hit is still a provider answer")
+		}
+		if got.CollectorCount != 20 {
+			t.Errorf("CollectorCount = %d, want 20", got.CollectorCount)
 		}
 	})
 

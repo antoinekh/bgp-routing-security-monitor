@@ -19,6 +19,10 @@ import (
 
 // fakeGlobalProvider is an external.GlobalVisibilityProvider stand-in so the
 // event tests never touch the network.
+//
+// It returns summary verbatim, so a test that wants to model a cache hit sets
+// GlobalOriginSummary.CacheHit on it. Unset means a live fetch, which is what
+// these tests want: none of them is about cache accounting.
 type fakeGlobalProvider struct {
 	summary external.GlobalOriginSummary
 	err     error

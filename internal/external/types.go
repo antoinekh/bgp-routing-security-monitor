@@ -81,6 +81,19 @@ type GlobalOriginSummary struct {
 	// reported an observation, in the same unit as
 	// GlobalOriginObservation.CollectorCount.
 	CollectorCount int
+	// CacheHit reports that the provider served this answer from its own
+	// store without a network round-trip. It describes how the caller
+	// obtained the summary, not the data itself: the same observations are a
+	// cache hit on one lookup and a live fetch on another.
+	//
+	// False is the right zero value — a summary nobody flagged came off the
+	// wire, or is the empty summary returned beside an error.
+	//
+	// Correlate uses it to keep an in-process map read out of
+	// raven_global_check_latency_seconds, which would otherwise pull p50/p95
+	// toward zero whenever the cache is warm and hide real provider latency
+	// degradation.
+	CacheHit bool
 }
 
 // GlobalVisibilityResult is the annotation produced by a correlation. It is a
@@ -139,5 +152,9 @@ type GlobalVisibilityProvider interface {
 	// A prefix with no observations is not an error: implementations return
 	// an empty summary and a nil error. Errors are reserved for query
 	// failures, and callers translate them into ConsensusInconclusive.
+	//
+	// Implementations that cache must set GlobalOriginSummary.CacheHit on
+	// answers they served without a network call, so callers can account for
+	// them apart from real round-trips.
 	GlobalOrigins(ctx context.Context, prefix netip.Prefix, maxAge time.Duration) (GlobalOriginSummary, error)
 }

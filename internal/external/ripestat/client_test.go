@@ -205,10 +205,60 @@ func TestGlobalOriginsCacheSuppressesDuplicateCalls(t *testing.T) {
 		if summary.CollectorCount != 5 {
 			t.Errorf("lookup %d: CollectorCount = %d, want 5", i, summary.CollectorCount)
 		}
+		// Only the first lookup goes to the network; the rest are served from
+		// the cache and must say so, which is what keeps them out of the
+		// latency histogram.
+		if wantCacheHit := i > 0; summary.CacheHit != wantCacheHit {
+			t.Errorf("lookup %d: CacheHit = %v, want %v", i, summary.CacheHit, wantCacheHit)
+		}
 	}
 
 	if got := srv.requests.Load(); got != 1 {
 		t.Errorf("HTTP requests = %d, want 1 (4 later lookups should be cache hits)", got)
+	}
+}
+
+// CacheHit describes the lookup, not the stored data: an entry that was
+// handed out as a cache hit must not come back flagged from the live fetch
+// that replaces it once it expires.
+func TestGlobalOriginsCacheHitFlagTracksTheLookup(t *testing.T) {
+	srv := newStubServer(t, serveFixture(t, "looking-glass-moas.json"))
+	clock := newFakeClock()
+	c, err := New(Config{
+		BaseURL:         srv.URL,
+		CacheTTL:        60 * time.Second,
+		RateLimitPerMin: 100,
+		Clock:           clock.Now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	prefix := mustPrefix(t, "203.0.113.0/24")
+	lookup := func(what string) external.GlobalOriginSummary {
+		t.Helper()
+		summary, err := c.GlobalOrigins(context.Background(), prefix, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		return summary
+	}
+
+	if got := lookup("first fetch"); got.CacheHit {
+		t.Error("first lookup: CacheHit = true, want false — it went to the API")
+	}
+	clock.Advance(10 * time.Second)
+	if got := lookup("cached"); !got.CacheHit {
+		t.Error("second lookup: CacheHit = false, want true — it was inside the TTL")
+	}
+
+	// Past the TTL the entry is stale, so this is a real fetch again.
+	clock.Advance(61 * time.Second)
+	if got := lookup("refetch after expiry"); got.CacheHit {
+		t.Error("post-expiry lookup: CacheHit = true, want false — the entry aged out and was refetched")
+	}
+	if got := srv.requests.Load(); got != 2 {
+		t.Errorf("HTTP requests = %d, want 2", got)
 	}
 }
 
@@ -271,16 +321,24 @@ func TestGlobalOriginsMaxAgeOverridesCache(t *testing.T) {
 	clock.Advance(20 * time.Second)
 
 	// Relaxed requirement: still a hit.
-	if _, err := c.GlobalOrigins(context.Background(), prefix, 30*time.Second); err != nil {
+	relaxed, err := c.GlobalOrigins(context.Background(), prefix, 30*time.Second)
+	if err != nil {
 		t.Fatalf("lookup with 30s maxAge: %v", err)
+	}
+	if !relaxed.CacheHit {
+		t.Error("lookup with 30s maxAge: CacheHit = false, want true")
 	}
 	if got := srv.requests.Load(); got != 1 {
 		t.Fatalf("HTTP requests with 30s maxAge = %d, want 1", got)
 	}
 
 	// Stricter requirement than the entry's 20s age: refetch.
-	if _, err := c.GlobalOrigins(context.Background(), prefix, 10*time.Second); err != nil {
+	strict, err := c.GlobalOrigins(context.Background(), prefix, 10*time.Second)
+	if err != nil {
 		t.Fatalf("lookup with 10s maxAge: %v", err)
+	}
+	if strict.CacheHit {
+		t.Error("lookup with 10s maxAge: CacheHit = true, want false — the entry was too old to reuse")
 	}
 	if got := srv.requests.Load(); got != 2 {
 		t.Errorf("HTTP requests with 10s maxAge = %d, want 2", got)
@@ -303,7 +361,7 @@ func TestGlobalOriginsCachesEmptyResult(t *testing.T) {
 	}
 
 	prefix := mustPrefix(t, "203.0.113.0/24")
-	for range 3 {
+	for i := range 3 {
 		clock.Advance(time.Second)
 		summary, err := c.GlobalOrigins(context.Background(), prefix, 0)
 		if err != nil {
@@ -311,6 +369,11 @@ func TestGlobalOriginsCachesEmptyResult(t *testing.T) {
 		}
 		if len(summary.Origins) != 0 {
 			t.Errorf("Origins = %+v, want empty", summary.Origins)
+		}
+		// An empty answer is cached like any other, so it must be flagged
+		// like any other — an empty summary is not the same as a missing one.
+		if wantCacheHit := i > 0; summary.CacheHit != wantCacheHit {
+			t.Errorf("lookup %d: CacheHit = %v, want %v", i, summary.CacheHit, wantCacheHit)
 		}
 	}
 	if got := srv.requests.Load(); got != 1 {
@@ -429,6 +492,44 @@ func TestCorrelateRateLimitedIsNotQueried(t *testing.T) {
 	}
 	if got := srv.requests.Load(); got != 1 {
 		t.Errorf("HTTP requests = %d, want 1 — only the first correlation may reach the API", got)
+	}
+}
+
+// The whole chain, from the client's cache through to the annotation: a
+// second correlation inside the TTL is still a query with a verdict, but it
+// reached no network, so Correlate must see CacheHit and keep it out of the
+// latency histogram.
+func TestCorrelateCacheHitEndToEnd(t *testing.T) {
+	srv := newStubServer(t, serveFixture(t, "looking-glass-moas.json"))
+	clock := newFakeClock()
+	c, err := New(Config{
+		BaseURL:         srv.URL,
+		CacheTTL:        60 * time.Second,
+		RateLimitPerMin: 100,
+		Clock:           clock.Now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	prefix := mustPrefix(t, "203.0.113.0/24")
+
+	first := external.Correlate(context.Background(), c, prefix, 64511, 0)
+	if !first.Queried {
+		t.Fatalf("first correlation Queried = false, want true: %+v", first)
+	}
+
+	clock.Advance(10 * time.Second)
+	second := external.Correlate(context.Background(), c, prefix, 64511, 0)
+
+	if !second.Queried {
+		t.Error("cached correlation Queried = false, want true — a cache hit is still a provider answer")
+	}
+	if second.Consensus != first.Consensus {
+		t.Errorf("cached Consensus = %q, want %q — the same data must give the same verdict",
+			second.Consensus, first.Consensus)
+	}
+	if got := srv.requests.Load(); got != 1 {
+		t.Errorf("HTTP requests = %d, want 1 — the second correlation must be served from cache", got)
 	}
 }
 

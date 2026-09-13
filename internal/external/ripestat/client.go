@@ -149,7 +149,8 @@ func (c *Client) Name() string { return ProviderName }
 // GlobalOrigins implements external.GlobalVisibilityProvider.
 //
 // A cached answer younger than maxAge (default: the configured cache TTL) is
-// returned without consuming a rate-limit token or touching the network.
+// returned without consuming a rate-limit token or touching the network, and
+// is flagged CacheHit so the caller can tell it apart from a live fetch.
 // Empty results are cached too, so a prefix nobody carries is not re-queried
 // on every event.
 func (c *Client) GlobalOrigins(
@@ -202,7 +203,12 @@ func (c *Client) lookupCache(prefix netip.Prefix, maxAge time.Duration) (externa
 		}
 		return external.GlobalOriginSummary{}, false
 	}
-	return entry.summary, true
+	// Flag the copy handed to the caller, not the stored entry: CacheHit is a
+	// property of this lookup, and the entry must stay unflagged for whoever
+	// reads it next.
+	summary := entry.summary
+	summary.CacheHit = true
+	return summary, true
 }
 
 func (c *Client) storeCache(prefix netip.Prefix, summary external.GlobalOriginSummary) {
@@ -216,6 +222,10 @@ func (c *Client) storeCache(prefix netip.Prefix, summary external.GlobalOriginSu
 			delete(c.cache, p)
 		}
 	}
+	// Store the answer as it came off the wire. lookupCache sets CacheHit on
+	// the way out, so persisting it here would mark every later reader's
+	// answer — including the live fetch this entry came from — incorrectly.
+	summary.CacheHit = false
 	c.cache[prefix] = cacheEntry{summary: summary, fetchedAt: now}
 }
 

@@ -40,16 +40,16 @@ func counterValue(t *testing.T, source, result string) float64 {
 	return 0
 }
 
-// rateLimitedValue reads raven_global_check_rate_limited_total for one source
-// off the default gatherer. Returns 0 before the series exists.
-func rateLimitedValue(t *testing.T, source string) float64 {
+// sourceCounterValue reads a {source}-labelled counter off the default
+// gatherer. Returns 0 before the series exists.
+func sourceCounterValue(t *testing.T, name, source string) float64 {
 	t.Helper()
 	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
 		t.Fatalf("gather metrics: %v", err)
 	}
 	for _, mf := range families {
-		if mf.GetName() != "raven_global_check_rate_limited_total" {
+		if mf.GetName() != name {
 			continue
 		}
 		for _, m := range mf.GetMetric() {
@@ -61,6 +61,16 @@ func rateLimitedValue(t *testing.T, source string) float64 {
 		}
 	}
 	return 0
+}
+
+func rateLimitedValue(t *testing.T, source string) float64 {
+	t.Helper()
+	return sourceCounterValue(t, "raven_global_check_rate_limited_total", source)
+}
+
+func cacheHitsValue(t *testing.T, source string) float64 {
+	t.Helper()
+	return sourceCounterValue(t, "raven_global_check_cache_hits_total", source)
 }
 
 // histogramCount returns the observation count of
@@ -133,6 +143,7 @@ func TestCorrelateRecordsMetrics(t *testing.T) {
 			// The metrics are process-global, so assert on deltas.
 			startCounter := counterValue(t, "ripestat", tt.wantResult)
 			startHist := histogramCount(t)
+			startCacheHits := cacheHitsValue(t, "ripestat")
 
 			Correlate(context.Background(), tt.provider, prefix, tt.local, 0)
 
@@ -143,7 +154,63 @@ func TestCorrelateRecordsMetrics(t *testing.T) {
 			if got := histogramCount(t); got != startHist+1 {
 				t.Errorf("raven_global_check_latency_seconds count = %d, want %d", got, startHist+1)
 			}
+			// None of these providers reports a cache hit, so the round-trip
+			// they model belongs only in the histogram.
+			if got := cacheHitsValue(t, "ripestat"); got != startCacheHits {
+				t.Errorf("raven_global_check_cache_hits_total moved from %v to %v for a live fetch, want no change",
+					startCacheHits, got)
+			}
 		})
+	}
+}
+
+// ─── TestCorrelateCacheHitMetrics ───
+
+// A cache hit is a real check — it gets a raven_global_check_total row — but
+// it made no network round-trip, so it must stay out of the latency histogram
+// and land on its own counter instead. Mixing in-process map reads with real
+// RIPEstat round-trips pulls p50/p95 toward zero exactly when the cache is
+// warm, hiding the provider latency degradation an operator alerts on.
+func TestCorrelateCacheHitMetrics(t *testing.T) {
+	prefix := mustPrefix(t, "203.0.113.0/24")
+	p := &fakeProvider{name: "ripestat", summary: GlobalOriginSummary{
+		Origins:        []GlobalOriginObservation{{ASN: 64511, CollectorCount: 9}},
+		CollectorCount: 9,
+		CacheHit:       true,
+	}}
+
+	startCacheHits := cacheHitsValue(t, "ripestat")
+	startCounter := counterValue(t, "ripestat", "match")
+	startHist := histogramCount(t)
+
+	Correlate(context.Background(), p, prefix, 64511, 0)
+
+	if got := cacheHitsValue(t, "ripestat") - startCacheHits; got != 1 {
+		t.Errorf("raven_global_check_cache_hits_total{source=\"ripestat\"} delta = %v, want 1", got)
+	}
+	if got := histogramCount(t); got != startHist {
+		t.Errorf("raven_global_check_latency_seconds count moved from %d to %d, want no change — "+
+			"a cache hit is a map read, not a round-trip", startHist, got)
+	}
+	// Still counted as a check: the correlation happened and produced a
+	// verdict, so cache hits must not vanish from raven_global_check_total.
+	if got := counterValue(t, "ripestat", "match") - startCounter; got != 1 {
+		t.Errorf("raven_global_check_total{source=\"ripestat\",result=\"match\"} delta = %v, want 1", got)
+	}
+}
+
+// A rate-limited lookup is not a cache hit either — the two non-network paths
+// must stay on separate counters.
+func TestCorrelateRateLimitedIsNotACacheHit(t *testing.T) {
+	prefix := mustPrefix(t, "203.0.113.0/24")
+	p := &fakeProvider{name: "ripestat", err: ErrRateLimited}
+
+	startCacheHits := cacheHitsValue(t, "ripestat")
+	Correlate(context.Background(), p, prefix, 64511, 0)
+
+	if got := cacheHitsValue(t, "ripestat"); got != startCacheHits {
+		t.Errorf("raven_global_check_cache_hits_total moved from %v to %v for a rate-limited lookup, want no change",
+			startCacheHits, got)
 	}
 }
 

@@ -22,6 +22,10 @@ import (
 // raven_global_check_total; the latter is counted on
 // raven_global_check_rate_limited_total instead.
 //
+// A cache hit did reach the provider, so it is a query and is counted, but it
+// made no network round-trip: it lands on raven_global_check_cache_hits_total
+// and contributes nothing to raven_global_check_latency_seconds.
+//
 // maxAge is passed through to the provider as a freshness requirement; zero
 // means the provider's configured default.
 func Correlate(
@@ -69,7 +73,9 @@ func Correlate(
 	if err != nil {
 		result.Consensus = ConsensusInconclusive
 		result.Error = err.Error()
-		observe(result)
+		// A failed query is still a round-trip — a timeout is precisely the
+		// latency an operator wants in the histogram.
+		observe(result, false)
 		return result
 	}
 
@@ -78,13 +84,24 @@ func Correlate(
 	result.CollectorCount = summary.CollectorCount
 	result.Consensus, result.Error = Consensus(localOrigin, summary.Origins)
 
-	observe(result)
+	observe(result, summary.CacheHit)
 	return result
 }
 
-// observe records the Prometheus counter and latency histogram for a
-// completed correlation.
-func observe(r GlobalVisibilityResult) {
+// observe records the Prometheus series for a completed correlation: always
+// the check counter, then either the latency histogram or the cache-hit
+// counter.
+//
+// A cache hit is an in-process map read, not a network round-trip. Feeding
+// one to the histogram pulls p50/p95 toward zero whenever the cache is warm,
+// which is exactly when real provider latency degradation would otherwise
+// show up. Counting it separately keeps cache activity visible without
+// polluting the latency distribution.
+func observe(r GlobalVisibilityResult, cacheHit bool) {
 	metrics.GlobalCheckTotal.WithLabelValues(r.Source, string(r.Consensus)).Inc()
+	if cacheHit {
+		metrics.GlobalCheckCacheHits.WithLabelValues(r.Source).Inc()
+		return
+	}
 	metrics.GlobalCheckLatency.Observe(r.Latency.Seconds())
 }
