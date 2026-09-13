@@ -19,6 +19,18 @@ var (
 var cfgFile string
 var addr string
 
+// configReadErr records a config file that exists but could not be read or
+// parsed. initConfig runs from cobra.OnInitialize, which cannot return an
+// error, so the failure is stashed here and rootCmd's PersistentPreRunE turns
+// it into a fatal one.
+//
+// A malformed config must never be defaulted away: silently falling back
+// would start a daemon with no RTR caches, no BMP peers and no event rules
+// from a single typo, which looks healthy from the outside. This matches how
+// semantic config errors already behave — config.Load returns them and serve
+// aborts.
+var configReadErr error
+
 var rootCmd = &cobra.Command{
 	Use:   "raven",
 	Short: "RAVEN — Routing Analysis, Validation, and Event Network",
@@ -28,6 +40,10 @@ into a unified, operator-facing workflow.
 Ravens see what you can't.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// Refuse to run any subcommand on a config we could not parse. Returning
+	// the error here means main prints it to stderr and exits 1, and RunE —
+	// including serve's — is never reached.
+	PersistentPreRunE: func(*cobra.Command, []string) error { return configReadErr },
 }
 
 func Execute() error {
@@ -76,9 +92,16 @@ func initConfig() {
 	viper.SetEnvPrefix("RAVEN")
 	viper.AutomaticEnv()
 
+	configReadErr = nil
 	if err := viper.ReadInConfig(); err != nil {
+		// No config file at all is fine: RAVEN runs on defaults. A file that
+		// is present but unparseable is fatal — see configReadErr.
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
+			path := viper.ConfigFileUsed()
+			if path == "" {
+				path = "config"
+			}
+			configReadErr = fmt.Errorf("reading %s: %w", path, err)
 		}
 	}
 }
