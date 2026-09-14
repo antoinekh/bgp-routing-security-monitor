@@ -551,7 +551,7 @@
         ]
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 37 },
-      "id": 105,
+      "id": 17,
       "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
       "title": "Global Consensus Results",
       "type": "timeseries",
@@ -581,7 +581,7 @@
         ]
       },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 37 },
-      "id": 106,
+      "id": 18,
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "title": "Global Consensus — Current Totals",
       "type": "stat",
@@ -628,7 +628,7 @@
         ]
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 },
-      "id": 107,
+      "id": 19,
       "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
       "title": "RIPEstat Query Performance",
       "type": "timeseries",
@@ -668,7 +668,7 @@
         ]
       },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
-      "id": 108,
+      "id": 20,
       "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
       "title": "RIPEstat Query Latency (p50/p95)",
       "type": "timeseries",
