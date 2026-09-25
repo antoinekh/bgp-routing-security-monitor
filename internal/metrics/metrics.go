@@ -36,6 +36,12 @@ var (
 		Help: "Number of VRPs loaded from RTR cache.",
 	}, []string{"cache"})
 
+	// ASPA records loaded from RTR cache. Label: cache.
+	RTRASPACount = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "raven_rtr_aspa_count",
+		Help: "Number of ASPA records loaded from RTR cache.",
+	}, []string{"cache"})
+
 	// Unix timestamp of last successful RTR sync. Label: cache.
 	RTRLastSync = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_rtr_last_sync_seconds",

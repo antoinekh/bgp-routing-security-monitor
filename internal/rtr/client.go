@@ -241,6 +241,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	metrics.RTRSessionState.WithLabelValues(c.address).Set(1)
 	defer metrics.RTRSessionState.WithLabelValues(c.address).Set(0)
 	metrics.RTRVRPCount.WithLabelValues(c.address).Set(float64(c.vrpStore.Count()))
+	metrics.RTRASPACount.WithLabelValues(c.address).Set(float64(c.aspaStore.Count()))
 
 	// Send Reset Query to get the full VRP set
 	c.fullSyncPending = true
@@ -383,6 +384,7 @@ func (c *Client) runSession(ctx context.Context) error {
 
 			c.fullSyncPending = false
 			metrics.RTRVRPCount.WithLabelValues(c.address).Set(float64(c.vrpStore.Count()))
+			metrics.RTRASPACount.WithLabelValues(c.address).Set(float64(c.aspaStore.Count()))
 			metrics.RTRLastSync.WithLabelValues(c.address).Set(float64(time.Now().Unix()))
 			c.log.Info("RTR sync complete",
 				"vrp_count", c.vrpStore.Count(),

@@ -167,6 +167,30 @@
       ]
     },
     {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 5 },
+      "id": 16,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "ASPA Records Loaded",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "raven_rtr_aspa_count",
+          "legendFormat": "ASPAs",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
       "id": 101,
