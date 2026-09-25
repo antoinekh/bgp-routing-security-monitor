@@ -65,4 +65,47 @@ var (
 		Name: "raven_route_table_size",
 		Help: "Total number of pre-policy routes in the route table.",
 	})
+
+	// External global-visibility correlations. Labels: source (e.g.
+	// "ripestat"), result (match, divergent, local_only, inconclusive).
+	GlobalCheckTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_global_check_total",
+		Help: "Total external global-visibility correlations, by source and consensus result.",
+	}, []string{"source", "result"})
+
+	// Global-visibility lookups suppressed by the local rate limiter before
+	// any provider was contacted. Label: source (e.g. "ripestat").
+	//
+	// Separate from raven_global_check_total on purpose: a rate-limit
+	// rejection is a policy decision costing no network call, and folding it
+	// into the inconclusive result label made it indistinguishable from a
+	// provider RAVEN genuinely could not reach.
+	GlobalCheckRateLimited = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_global_check_rate_limited_total",
+		Help: "Total external global-visibility lookups suppressed by the local rate limiter, by source.",
+	}, []string{"source"})
+
+	// Global-visibility lookups the provider served from its in-process cache
+	// without a network round-trip. Label: source (e.g. "ripestat").
+	//
+	// Like the rate-limited counter, this keeps a non-network event off
+	// raven_global_check_latency_seconds while leaving cache activity
+	// visible: rate(cache_hits) / rate(check_total) is the cache hit ratio.
+	GlobalCheckCacheHits = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_global_check_cache_hits_total",
+		Help: "Total global-visibility lookups served from the in-process cache, by source.",
+	}, []string{"source"})
+
+	// Latency of a global-visibility correlation that actually went to the
+	// provider, successful or not.
+	//
+	// Cache hits and rate-limited lookups are both excluded: neither made a
+	// network round-trip, and their near-zero timings would pull p50/p95
+	// toward zero whenever the cache is warm, masking exactly the provider
+	// latency degradation an operator alerts on.
+	GlobalCheckLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "raven_global_check_latency_seconds",
+		Help:    "Latency of external global-visibility correlations in seconds.",
+		Buckets: []float64{.001, .005, .025, .1, .25, .5, 1, 2.5, 5, 10},
+	})
 )

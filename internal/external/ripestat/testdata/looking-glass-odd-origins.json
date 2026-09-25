@@ -1,0 +1,97 @@
+{
+ "messages": [],
+ "see_also": [],
+ "version": "2.1",
+ "data_call_name": "looking-glass",
+ "data_call_status": "supported",
+ "cached": false,
+ "status": "ok",
+ "status_code": 200,
+ "time": "2026-09-08T15:20:00.000000",
+ "data": {
+  "rrcs": [
+   {
+    "rrc": "RRC00",
+    "location": "Amsterdam, Netherlands",
+    "scope": "AMS-IX",
+    "peers": [
+     {
+      "comment": "normal entry",
+      "asn_origin": "64511",
+      "as_path": "34854 6939 64511",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.1",
+      "origin": "IGP",
+      "next_hop": "80.249.208.1"
+     },
+     {
+      "comment": "duplicate of the same collector peer — must be counted once",
+      "asn_origin": "64511",
+      "as_path": "34854 6939 64511",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.1",
+      "origin": "IGP",
+      "next_hop": "80.249.208.1"
+     },
+     {
+      "comment": "asn_origin absent — resolved from the last as_path hop",
+      "asn_origin": "",
+      "as_path": "34854 3356 64511",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.2",
+      "origin": "IGP",
+      "next_hop": "80.249.208.2"
+     },
+     {
+      "comment": "AS_SET origin — unattributable, must be skipped entirely",
+      "asn_origin": "{64500,64501}",
+      "as_path": "34854 6939 {64500,64501}",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.3",
+      "origin": "IGP",
+      "next_hop": "80.249.208.3"
+     },
+     {
+      "comment": "no origin information at all — must be skipped",
+      "asn_origin": "",
+      "as_path": "",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.4",
+      "origin": "IGP",
+      "next_hop": "80.249.208.4"
+     },
+     {
+      "comment": "AS0 is not a usable origin — must be skipped",
+      "asn_origin": "0",
+      "as_path": "34854 0",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.5",
+      "origin": "IGP",
+      "next_hop": "80.249.208.5"
+     }
+    ]
+   },
+   {
+    "rrc": "RRC01",
+    "location": "London, United Kingdom",
+    "scope": "LINX / LONAP",
+    "peers": [
+     {
+      "comment": "same peer address as RRC00 but a different collector — counted separately",
+      "asn_origin": "64511",
+      "as_path": "15692 2914 64511",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.1",
+      "origin": "IGP",
+      "next_hop": "80.249.208.1"
+     }
+    ]
+   }
+  ],
+  "query_time": "2026-09-08T15:20:00",
+  "latest_time": "2026-09-08T15:19:59",
+  "parameters": {
+   "resource": "203.0.113.0/24"
+  }
+ }
+}

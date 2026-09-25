@@ -32,6 +32,24 @@ logging:
   level: info
   format: json
 
+# Correlation against third-party routing data. Disabled by default: RAVEN
+# makes no outbound calls to these providers unless you opt in here.
+#
+# When enabled, the Event Engine's `global-correlate` action can query
+# RIPEstat's looking-glass for a prefix and compare the globally-observed
+# origin ASN(s) against RAVEN's local BMP-observed origin. See the
+# commented-out rule at the end of this file.
+#
+# `raven check global` reads these settings but does not require enabled:
+# invoking that command is itself the explicit opt-in.
+external:
+  ripestat:
+    enabled: false
+    base-url: "https://stat.ripe.net"
+    timeout: 5s
+    cache-ttl: 60s              # reuse a per-prefix result for this long
+    rate-limit-per-min: 10      # per-instance lookup budget
+
 events:
   rules:
     - name: "alert-origin-invalid"
@@ -66,3 +84,28 @@ events:
           url: "http://localhost:9999"
           max_attempts: 2
           timeout: 3s
+
+    # Global visibility correlation. Requires external.ripestat.enabled: true
+    # above; RAVEN refuses to start otherwise rather than silently doing
+    # nothing.
+    #
+    # The global-correlate action runs before the other actions in the same
+    # rule and attaches its verdict to them: the webhook payload gains a
+    # `global_visibility` field and the log action gains global_* keys. It
+    # never runs on the BMP ingest path, and an unreachable RIPEstat degrades
+    # to an "inconclusive" verdict rather than failing the rule.
+    #
+    # - name: "correlate-suspicious-routes"
+    #   trigger:
+    #     type: posture_change
+    #     postures: ["origin-invalid", "path-suspect"]
+    #   cooldown: 60s
+    #   actions:
+    #     - type: global-correlate
+    #       cache_ttl: 60s        # optional; defaults to external.ripestat.cache-ttl
+    #     - type: log
+    #       level: warn
+    #     - type: webhook
+    #       url: "http://localhost:9999"
+    #       max_attempts: 2
+    #       timeout: 3s

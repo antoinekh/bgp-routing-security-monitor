@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/nokia/bgp-routing-security-monitor/internal/external"
 	"github.com/nokia/bgp-routing-security-monitor/internal/flowspec"
 )
 
@@ -51,6 +52,21 @@ func (a *LogAction) Execute(ctx context.Context, event Event) error {
 		"cache_name", event.CacheName,
 		"router_id", event.RouterID,
 	}
+	// Only present when the rule includes a global-correlate action, so
+	// existing log output is byte-for-byte unchanged without one.
+	if gv := event.GlobalVisibility; gv != nil {
+		args = append(args,
+			"global_consensus", string(gv.Consensus),
+			"global_source", gv.Source,
+			"global_collectors", gv.CollectorCount,
+		)
+		if asn, ok := gv.MajorityOrigin(); ok {
+			args = append(args, "global_majority_origin", asn)
+		}
+		if gv.Error != "" {
+			args = append(args, "global_error", gv.Error)
+		}
+	}
 	switch a.level {
 	case "warn":
 		a.log.WarnContext(ctx, "raven event", args...)
@@ -79,6 +95,9 @@ type webhookPayload struct {
 	ROVState      string   `json:"rov_state"`
 	ASPAState     string   `json:"aspa_state"`
 	CacheName     string   `json:"cache_name"`
+	// GlobalVisibility is present only when the rule includes a
+	// global-correlate action. Existing consumers see no change.
+	GlobalVisibility *external.GlobalVisibilityResult `json:"global_visibility,omitempty"`
 }
 
 // WebhookAction delivers the event payload to an HTTP endpoint.
@@ -219,6 +238,8 @@ func (a *WebhookAction) buildPayload(event Event) webhookPayload {
 		OldPosture: string(event.OldPosture),
 		NewPosture: string(event.NewPosture),
 		CacheName:  event.CacheName,
+
+		GlobalVisibility: event.GlobalVisibility,
 	}
 	if event.Route != nil {
 		p.Prefix = event.Route.Prefix.String()

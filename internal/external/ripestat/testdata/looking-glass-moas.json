@@ -1,0 +1,89 @@
+{
+ "messages": [],
+ "see_also": [],
+ "version": "2.1",
+ "data_call_name": "looking-glass",
+ "data_call_status": "supported",
+ "cached": false,
+ "status": "ok",
+ "status_code": 200,
+ "time": "2026-09-08T15:10:00.000000",
+ "data": {
+  "rrcs": [
+   {
+    "rrc": "RRC00",
+    "location": "Amsterdam, Netherlands",
+    "scope": "AMS-IX",
+    "peers": [
+     {
+      "asn_origin": "64511",
+      "as_path": "34854 6939 64511",
+      "community": "",
+      "last_updated": "2026-09-08T14:55:00.000000",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.1",
+      "origin": "IGP",
+      "next_hop": "80.249.208.1",
+      "latest_time": "2026-09-08T15:09:59.000000"
+     },
+     {
+      "asn_origin": "64511",
+      "as_path": "1103 6939 64511",
+      "community": "",
+      "last_updated": "2026-09-08T14:55:00.000000",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.2",
+      "origin": "IGP",
+      "next_hop": "80.249.208.2",
+      "latest_time": "2026-09-08T15:09:59.000000"
+     },
+     {
+      "asn_origin": "65000",
+      "as_path": "34854 3356 65000",
+      "community": "",
+      "last_updated": "2026-09-08T14:56:00.000000",
+      "prefix": "203.0.113.0/24",
+      "peer": "80.249.208.3",
+      "origin": "IGP",
+      "next_hop": "80.249.208.3",
+      "latest_time": "2026-09-08T15:09:59.000000"
+     }
+    ]
+   },
+   {
+    "rrc": "RRC01",
+    "location": "London, United Kingdom",
+    "scope": "LINX / LONAP",
+    "peers": [
+     {
+      "asn_origin": "64511",
+      "as_path": "15692 2914 64511",
+      "community": "",
+      "last_updated": "2026-09-08T14:57:00.000000",
+      "prefix": "203.0.113.0/24",
+      "peer": "5.57.80.113",
+      "origin": "IGP",
+      "next_hop": "5.57.80.113",
+      "latest_time": "2026-09-08T15:09:59.000000"
+     },
+     {
+      "asn_origin": "65000",
+      "as_path": "8218 3356 65000",
+      "community": "",
+      "last_updated": "2026-09-08T14:58:00.000000",
+      "prefix": "203.0.113.0/24",
+      "peer": "5.57.80.114",
+      "origin": "IGP",
+      "next_hop": "5.57.80.114",
+      "latest_time": "2026-09-08T15:09:59.000000"
+     }
+    ]
+   }
+  ],
+  "query_time": "2026-09-08T15:10:00",
+  "latest_time": "2026-09-08T15:09:59",
+  "parameters": {
+   "resource": "203.0.113.0/24"
+  }
+ }
+}

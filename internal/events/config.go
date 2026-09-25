@@ -8,19 +8,50 @@ import (
 	"time"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
+	"github.com/nokia/bgp-routing-security-monitor/internal/external"
 	"github.com/nokia/bgp-routing-security-monitor/internal/flowspec"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
+
+// buildOptions collects optional dependencies injected into BuildEngine.
+type buildOptions struct {
+	globalVisibility external.GlobalVisibilityProvider
+	// defaultCacheTTL is used by global-correlate actions that do not set
+	// their own cache_ttl. Zero means the provider's default.
+	defaultCacheTTL time.Duration
+}
+
+// Option configures BuildEngine.
+type Option func(*buildOptions)
+
+// WithGlobalVisibility supplies the provider backing global-correlate
+// actions, along with the default freshness requirement from
+// external.ripestat.cache-ttl.
+//
+// Without it, a config that uses a global-correlate action is rejected at
+// build time rather than silently producing Inconclusive annotations
+// forever.
+func WithGlobalVisibility(p external.GlobalVisibilityProvider, defaultCacheTTL time.Duration) Option {
+	return func(o *buildOptions) {
+		o.globalVisibility = p
+		o.defaultCacheTTL = defaultCacheTTL
+	}
+}
 
 // BuildEngine constructs an Engine from EventsConfig. It also returns every
 // flowspec.Manager created for flowspec actions; callers must start each
 // manager's Run goroutine scoped to the server context.
 // Returns a descriptive error (including the rule name) if any rule fails to parse.
-func BuildEngine(cfg config.EventsConfig, logger *slog.Logger) (*Engine, []*flowspec.Manager, error) {
+func BuildEngine(cfg config.EventsConfig, logger *slog.Logger, opts ...Option) (*Engine, []*flowspec.Manager, error) {
+	var o buildOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	rules := make([]*Rule, 0, len(cfg.Rules))
 	var managers []*flowspec.Manager
 	for _, rc := range cfg.Rules {
-		rule, ruleManagers, err := buildRule(rc, logger)
+		rule, ruleManagers, err := buildRule(rc, logger, &o)
 		if err != nil {
 			return nil, nil, fmt.Errorf("rule %q: %w", rc.Name, err)
 		}
@@ -30,18 +61,25 @@ func BuildEngine(cfg config.EventsConfig, logger *slog.Logger) (*Engine, []*flow
 	return NewEngine(rules, logger), managers, nil
 }
 
-func buildRule(rc config.RuleConfig, logger *slog.Logger) (*Rule, []*flowspec.Manager, error) {
+func buildRule(rc config.RuleConfig, logger *slog.Logger, o *buildOptions) (*Rule, []*flowspec.Manager, error) {
 	trigger, err := buildTrigger(rc.Trigger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("trigger: %w", err)
 	}
 
 	actions := make([]Action, 0, len(rc.Actions))
+	var enrichers []Enricher
 	var managers []*flowspec.Manager
 	for i, ac := range rc.Actions {
-		action, mgr, err := buildAction(ac, rc.Name, logger)
+		action, mgr, err := buildAction(ac, rc.Name, logger, o)
 		if err != nil {
 			return nil, nil, fmt.Errorf("action[%d]: %w", i, err)
+		}
+		// Enrichers are partitioned out of the concurrent action set so
+		// they can run first and annotate the event the actions then see.
+		if enricher, ok := action.(Enricher); ok {
+			enrichers = append(enrichers, enricher)
+			continue
 		}
 		actions = append(actions, action)
 		if mgr != nil {
@@ -62,6 +100,7 @@ func buildRule(rc config.RuleConfig, logger *slog.Logger) (*Rule, []*flowspec.Ma
 		Name:        rc.Name,
 		Trigger:     trigger,
 		Actions:     actions,
+		Enrichers:   enrichers,
 		Cooldown:    cooldown,
 		log:         logger.With("rule", rc.Name),
 		cooldownMap: make(map[string]time.Time),
@@ -141,7 +180,7 @@ func buildTrigger(tc config.TriggerConfig) (Trigger, error) {
 // buildAction constructs an Action from ActionConfig. For flowspec actions it
 // also returns the Manager that the caller must start (Run). For all other
 // action types the returned manager is nil.
-func buildAction(ac config.ActionConfig, ruleName string, logger *slog.Logger) (Action, *flowspec.Manager, error) {
+func buildAction(ac config.ActionConfig, ruleName string, logger *slog.Logger, o *buildOptions) (Action, *flowspec.Manager, error) {
 	switch ac.Type {
 	case "log":
 		level := ac.Level
@@ -183,6 +222,25 @@ func buildAction(ac config.ActionConfig, ruleName string, logger *slog.Logger) (
 			return nil, nil, err
 		}
 		return &FlowspecAction{manager: mgr, ttl: ttl, action: action}, mgr, nil
+
+	case "global-correlate":
+		if o == nil || o.globalVisibility == nil {
+			return nil, nil, fmt.Errorf(
+				"global-correlate action requires an external provider: " +
+					"set external.ripestat.enabled: true")
+		}
+		cacheTTL := o.defaultCacheTTL
+		if ac.CacheTTL != "" {
+			d, err := time.ParseDuration(ac.CacheTTL)
+			if err != nil {
+				return nil, nil, fmt.Errorf("global-correlate action cache_ttl %q: %w", ac.CacheTTL, err)
+			}
+			if d < 0 {
+				return nil, nil, fmt.Errorf("global-correlate action cache_ttl must not be negative")
+			}
+			cacheTTL = d
+		}
+		return newGlobalCorrelateAction(o.globalVisibility, cacheTTL, logger), nil, nil
 
 	default:
 		return nil, nil, fmt.Errorf("unknown action type %q", ac.Type)

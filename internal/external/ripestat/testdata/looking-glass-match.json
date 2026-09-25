@@ -1,0 +1,142 @@
+{
+ "messages": [],
+ "see_also": [],
+ "version": "2.1",
+ "data_call_name": "looking-glass",
+ "data_call_status": "supported",
+ "cached": false,
+ "status": "ok",
+ "status_code": 200,
+ "time": "2026-09-08T15:08:21.454922",
+ "data": {
+  "rrcs": [
+   {
+    "rrc": "RRC01",
+    "location": "London, United Kingdom",
+    "scope": "LINX / LONAP",
+    "peers": [
+     {
+      "asn_origin": "15169",
+      "as_path": "15692 15169",
+      "community": "15692:1000 15692:1100",
+      "last_updated": "2026-08-26T05:34:13.520000",
+      "prefix": "8.8.8.0/24",
+      "peer": "5.57.80.113",
+      "origin": "IGP",
+      "next_hop": "5.57.80.136",
+      "latest_time": "2026-09-08T15:08:19.010000"
+     },
+     {
+      "asn_origin": "15169",
+      "as_path": "8218 15169",
+      "community": "8218:102 8218:20000 8218:20110",
+      "last_updated": "2026-09-04T03:54:56.760000",
+      "prefix": "8.8.8.0/24",
+      "peer": "5.57.80.210",
+      "origin": "IGP",
+      "next_hop": "5.57.80.210",
+      "latest_time": "2026-09-08T15:08:19.010000"
+     },
+     {
+      "asn_origin": "15169",
+      "as_path": "36924 15169",
+      "community": "",
+      "last_updated": "2026-09-02T03:49:28.500000",
+      "prefix": "8.8.8.0/24",
+      "peer": "5.57.81.76",
+      "origin": "IGP",
+      "next_hop": "5.57.81.76",
+      "latest_time": "2026-09-08T15:08:18.030000"
+     }
+    ]
+   },
+   {
+    "rrc": "RRC00",
+    "location": "Amsterdam, Netherlands",
+    "scope": "RIPE-NCC Multihop",
+    "peers": [
+     {
+      "asn_origin": "15169",
+      "as_path": "59919 9002 15169",
+      "community": "9002:9002 9002:64641",
+      "last_updated": "2026-09-08T10:26:46.630000",
+      "prefix": "8.8.8.0/24",
+      "peer": "5.178.95.254",
+      "origin": "IGP",
+      "next_hop": "5.178.95.254",
+      "latest_time": "2026-09-08T15:08:18.130000"
+     },
+     {
+      "asn_origin": "15169",
+      "as_path": "7018 15169",
+      "community": "7018:2500 7018:37232",
+      "last_updated": "2026-07-28T22:32:55.050000",
+      "prefix": "8.8.8.0/24",
+      "peer": "12.0.1.63",
+      "origin": "IGP",
+      "next_hop": "12.0.1.63",
+      "latest_time": "2026-09-08T15:08:18.130000"
+     },
+     {
+      "asn_origin": "15169",
+      "as_path": "49134 53356 6939 15169",
+      "community": "53356:20003",
+      "last_updated": "2026-08-05T14:05:05.940000",
+      "prefix": "8.8.8.0/24",
+      "peer": "23.129.32.61",
+      "origin": "IGP",
+      "next_hop": "23.129.32.61",
+      "latest_time": "2026-09-08T15:08:18.130000"
+     }
+    ]
+   },
+   {
+    "rrc": "RRC24",
+    "location": "Montevideo, Uruguay",
+    "scope": "LACNIC Multihop",
+    "peers": [
+     {
+      "asn_origin": "15169",
+      "as_path": "46997 38008 38008 3491 15169",
+      "community": "3491:4000 3491:4015 3491:9002 38008:103 38008:2403 38008:3000",
+      "last_updated": "2026-09-07T20:35:34.660000",
+      "prefix": "8.8.8.0/24",
+      "peer": "5.188.4.211",
+      "origin": "IGP",
+      "next_hop": "5.188.4.211",
+      "latest_time": "2026-09-08T15:08:17.460000"
+     },
+     {
+      "asn_origin": "15169",
+      "as_path": "265721 64126 15169",
+      "community": "",
+      "last_updated": "2026-08-26T16:54:31.390000",
+      "prefix": "8.8.8.0/24",
+      "peer": "45.65.244.1",
+      "origin": "IGP",
+      "next_hop": "45.65.244.1",
+      "latest_time": "2026-09-08T15:08:17.410000"
+     },
+     {
+      "asn_origin": "15169",
+      "as_path": "61573 15169",
+      "community": "61573:61573",
+      "last_updated": "2026-08-30T16:40:26.780000",
+      "prefix": "8.8.8.0/24",
+      "peer": "138.122.60.1",
+      "origin": "IGP",
+      "next_hop": "138.122.60.1",
+      "latest_time": "2026-09-08T15:08:14.410000"
+     }
+    ]
+   }
+  ],
+  "query_time": "2026-09-08T15:08:21",
+  "latest_time": "2026-09-08T15:08:11",
+  "parameters": {
+   "resource": "8.8.8.0/24",
+   "look_back_limit": 86400,
+   "cache": null
+  }
+ }
+}

@@ -1,0 +1,19 @@
+{
+ "messages": [],
+ "see_also": [],
+ "version": "2.1",
+ "data_call_name": "looking-glass",
+ "data_call_status": "supported",
+ "cached": false,
+ "status": "ok",
+ "status_code": 200,
+ "time": "2026-09-08T15:01:40.559016",
+ "data": {
+  "rrcs": [],
+  "query_time": "2026-09-08T15:00:00",
+  "latest_time": "2026-09-08T15:00:00",
+  "parameters": {
+   "resource": "203.0.113.0/24"
+  }
+ }
+}

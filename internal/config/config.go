@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/tls"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/spf13/viper"
@@ -17,6 +18,36 @@ type Config struct {
 	Logging     LoggingConfig     `mapstructure:"logging"`
 	Events      EventsConfig      `mapstructure:"events"`
 	Persistence PersistenceConfig `mapstructure:"persistence"`
+	External    ExternalConfig    `mapstructure:"external"`
+}
+
+// ExternalConfig configures correlation against third-party routing data
+// sources. Every provider here defaults to disabled.
+type ExternalConfig struct {
+	RIPEstat RIPEstatConfig `mapstructure:"ripestat"`
+}
+
+// RIPEstatConfig configures the RIPEstat looking-glass provider used for
+// on-demand global BGP visibility correlation.
+type RIPEstatConfig struct {
+	// Enabled must be true for the Event Engine's global-correlate action to
+	// query RIPEstat. Defaults to false so existing deployments are
+	// unaffected without an explicit opt-in.
+	//
+	// It does not gate `raven check global`: typing that command is itself
+	// the opt-in, and it reads the settings below either way.
+	Enabled bool `mapstructure:"enabled"`
+	// BaseURL is the RIPEstat origin, without the data-call path.
+	// Default: https://stat.ripe.net
+	BaseURL string `mapstructure:"base-url"`
+	// Timeout bounds a single looking-glass query. Default: 5s
+	Timeout time.Duration `mapstructure:"timeout"`
+	// CacheTTL is how long a per-prefix result stays usable, so a flapping
+	// route does not re-query RIPEstat on every event. Default: 60s
+	CacheTTL time.Duration `mapstructure:"cache-ttl"`
+	// RateLimitPerMin is the per-instance lookup budget per minute, a
+	// good-citizen safeguard against hammering RIPEstat. Default: 10
+	RateLimitPerMin int `mapstructure:"rate-limit-per-min"`
 }
 
 // PersistenceConfig controls warm-start snapshot behaviour.
@@ -96,6 +127,11 @@ type ActionConfig struct {
 	ApprovalWebhook string `mapstructure:"approval_webhook"`
 	// ApprovalTimeout is a Go duration string for the approval webhook HTTP timeout.
 	ApprovalTimeout string `mapstructure:"approval_timeout"`
+	// CacheTTL is a Go duration string used by the global-correlate action
+	// as its freshness requirement: a cached provider result younger than
+	// this is reused instead of re-querying. Empty falls back to
+	// external.ripestat.cache-ttl.
+	CacheTTL string `mapstructure:"cache_ttl"`
 }
 
 // WebhookActionConfig collects the webhook-specific fields from ActionConfig.
@@ -245,6 +281,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("outputs.prometheus.path", "/metrics")
 	viper.SetDefault("logging.level", "info")
 	viper.SetDefault("logging.format", "json")
+	viper.SetDefault("external.ripestat.enabled", false)
+	viper.SetDefault("external.ripestat.base-url", "https://stat.ripe.net")
+	viper.SetDefault("external.ripestat.timeout", 5*time.Second)
+	viper.SetDefault("external.ripestat.cache-ttl", 60*time.Second)
+	viper.SetDefault("external.ripestat.rate-limit-per-min", 10)
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
@@ -281,6 +322,27 @@ func validate(cfg *Config) error {
 		// ok
 	default:
 		return fmt.Errorf("invalid aspa-as-set-behavior %q", cfg.Validation.ASPAASSetBehavior)
+	}
+
+	// External provider settings are only validated when the provider is
+	// enabled, so a stale or half-filled disabled section cannot break
+	// startup.
+	if cfg.External.RIPEstat.Enabled {
+		rs := cfg.External.RIPEstat
+		if u, err := url.Parse(rs.BaseURL); err != nil {
+			return fmt.Errorf("invalid external.ripestat.base-url %q: %w", rs.BaseURL, err)
+		} else if u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("invalid external.ripestat.base-url %q: want an http(s) URL with a host", rs.BaseURL)
+		}
+		if rs.Timeout < 0 {
+			return fmt.Errorf("external.ripestat.timeout must not be negative")
+		}
+		if rs.CacheTTL < 0 {
+			return fmt.Errorf("external.ripestat.cache-ttl must not be negative")
+		}
+		if rs.RateLimitPerMin < 0 {
+			return fmt.Errorf("external.ripestat.rate-limit-per-min must not be negative")
+		}
 	}
 
 	return nil

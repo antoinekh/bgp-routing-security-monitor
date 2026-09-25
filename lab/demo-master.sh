@@ -15,6 +15,7 @@
 #   demo-master.sh anomaly-setup — bring up RTR anomaly detection demo env
 #   demo-master.sh anomaly-clean — stop the rtr monitor (leaves infra up)
 #   demo-master.sh anomaly-down  — full anomaly-env teardown (leaves Containerlab up)
+#   demo-master.sh full-customer-demo — sequences hijack/leak + RTR anomaly detection end to end
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -37,12 +38,18 @@ ATTACKER_CONTAINER="clab-raven-demo-attacker"
 GRAFANA_URL="http://localhost:3000/d/raven-security-posture"
 
 # ── RTR anomaly detection demo (anomaly-setup / anomaly-clean) ────────────────
+# NOTE: this segment deliberately does NOT start the shared sre-demo-lab
+# observability stack (~/sre-demo-lab/observability, network_mode: host,
+# binds :3000/:9090) — that collides with demo-master's own Prometheus/Grafana
+# below. It reuses demo-master's containers instead: anomaly-setup adds a
+# second Prometheus scrape job (for the monitor's own --prometheus port) and
+# reloads, rather than standing up a second Grafana/Prometheus pair.
 ANOMALY_SNAPSHOT="$HOME/.raven/anomaly-baseline.json"   # seeded baseline (prereq)
-OBSERVABILITY_DIR="$HOME/sre-demo-lab/observability"     # shared Grafana/Prom/gnmic stack
 RTR_CACHE="localhost:3323"                               # Routinator RTR endpoint
 RTR_MONITOR_PIDFILE="/tmp/rtr-monitor.pid"               # so anomaly-clean can find it
 RTR_MONITOR_NDJSON="/tmp/rtr-demo.ndjson"                # monitor event log
 RTR_MONITOR_STDLOG="/tmp/rtr-monitor.log"                # monitor stdout/stderr
+RTR_MONITOR_PROM_PORT=":9596"                            # raven serve already owns :9595
 
 # ── colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -302,11 +309,18 @@ scrape_configs:
 PROMEOF
 
   sudo docker rm -f prometheus 2>/dev/null || true
+  # --web.enable-lifecycle is required so anomaly-setup can POST /-/reload
+  # later to add the RTR monitor's scrape job without restarting the
+  # container. The other two flags are the image's own defaults — passed
+  # through explicitly because they'd otherwise be dropped by overriding CMD.
   sudo docker run -d \
     --name prometheus \
     -p 9090:9090 \
     -v /tmp/prometheus.yml:/etc/prometheus/prometheus.yml \
-    prom/prometheus:latest > /dev/null
+    prom/prometheus:latest \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/prometheus \
+    --web.enable-lifecycle > /dev/null
 
   # Wait for Prometheus to start and run its first scrape
   echo "  Waiting for Prometheus first scrape..."
@@ -401,6 +415,15 @@ print(next(s['uid'] for s in sources if s['type']=='prometheus'))
 down)
   header "Bringing Down RAVEN Demo"
   pkill -f "raven serve"   2>/dev/null && ok "RAVEN stopped"      || warn "RAVEN was not running"
+  # Stop the RTR anomaly monitor too, if it's up — it's a separate process
+  # from 'raven serve' and otherwise survives 'down' holding $RTR_MONITOR_PROM_PORT.
+  if [ -f "$RTR_MONITOR_PIDFILE" ]; then
+    MON_PID=$(cat "$RTR_MONITOR_PIDFILE")
+    kill "$MON_PID" 2>/dev/null && ok "raven rtr monitor stopped" || warn "raven rtr monitor pidfile stale"
+    rm -f "$RTR_MONITOR_PIDFILE"
+  elif pkill -f "raven rtr monitor" 2>/dev/null; then
+    ok "raven rtr monitor stopped (matched by name)"
+  fi
   pkill -x routinator      2>/dev/null && ok "Routinator stopped" || warn "Routinator was not running"
   sudo docker rm -f prometheus grafana 2>/dev/null || true
   ok "Prometheus + Grafana removed"
@@ -1186,11 +1209,102 @@ VTYSH" > /dev/null 2>&1 || true
   ok "LACNIC demo sequence complete."
   ;;
 
+# ── FULL CUSTOMER DEMO — hijack/leak + RTR anomaly detection, sequenced ──────
+# setup → prime anomaly infra (quiet, before any audience-visible step) →
+# baseline → hijack → hijack-clean → kick off RTR churn injection in the
+# background right as leak narration starts (its ~100-105s validation cycle
+# overlaps with the leak/leak-clean talk track instead of causing dead air) →
+# leak → leak-clean → anomaly reveal → clean up churn → whatif → down.
+#
+# The anomaly infra (04-rtr-anomaly.sh --setup + anomaly-setup) is primed
+# right after 'setup', NOT right before the leak segment: 04-rtr-anomaly.sh
+# --setup restarts Routinator (to get a short refresh interval so the churn
+# lands in ~100s instead of up to 600s), which briefly drops RAVEN's own RTR
+# session. Priming it here, before 'baseline', means the audience never sees
+# that blip; doing it later would disturb RTR state while hijack/leak are on
+# screen.
+full-customer-demo)
+  header "Full Customer Demo — Hijack + Leak + RTR Anomaly Detection"
+
+  ANOMALY_SCRIPT="$(dirname "$0")/04-rtr-anomaly.sh"
+  if [ ! -f "$ANOMALY_SCRIPT" ]; then
+    echo "ERROR: $ANOMALY_SCRIPT not found."
+    exit 1
+  fi
+  if [ ! -f "$ANOMALY_SNAPSHOT" ]; then
+    echo "ERROR: anomaly baseline snapshot not found at $ANOMALY_SNAPSHOT"
+    echo "       Seed it before running this sequence (see 'anomaly-setup' for the command)."
+    exit 1
+  fi
+
+  bash "$0" setup
+
+  step "Priming RTR anomaly detection (short Routinator refresh + monitor)..."
+  warn "This restarts Routinator — expect a brief RTR blip now, before baseline is shown."
+  bash "$ANOMALY_SCRIPT" --setup
+  bash "$0" anomaly-setup
+
+  bash "$0" baseline
+  read -rp "  [ENTER to inject hijack]" _
+  bash "$0" hijack
+  read -rp "  [ENTER to clean up hijack and continue to route leak]" _
+  bash "$0" hijack-clean
+
+  step "Kicking off RTR churn injection in the background (overlaps with leak narration)..."
+  bash "$ANOMALY_SCRIPT" > /tmp/rtr-anomaly-churn.log 2>&1 &
+  CHURN_PID=$!
+  disown "$CHURN_PID"
+  ok "Churn injection running in background (PID $CHURN_PID, log: /tmp/rtr-anomaly-churn.log)"
+
+  read -rp "  [ENTER to inject route leak]" _
+  bash "$0" leak
+  read -rp "  [ENTER to clean up route leak and continue to the anomaly reveal]" _
+  bash "$0" leak-clean
+
+  header "RTR Anomaly Reveal"
+  step "Waiting for the anomaly to land (poll up to 130s)..."
+  ANOMALY_SEEN=0
+  for i in $(seq 1 130); do
+    if grep -q '"event_type":"anomaly"' "$RTR_MONITOR_NDJSON" 2>/dev/null; then
+      ANOMALY_SEEN=1
+      ok "Anomaly detected after ~${i}s:"
+      grep '"event_type":"anomaly"' "$RTR_MONITOR_NDJSON" | tail -1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ANOMALY_SEEN" -eq 0 ]; then
+    warn "No anomaly event seen in $RTR_MONITOR_NDJSON within 130s."
+    warn "Check $RTR_MONITOR_STDLOG and /tmp/rtr-anomaly-churn.log before revealing to the customer."
+  fi
+  echo ""
+  echo "  raven_rtr_anomaly_total:"
+  curl -s "http://localhost${RTR_MONITOR_PROM_PORT}/metrics" 2>/dev/null \
+    | grep raven_rtr_anomaly_total | grep -v '^#' \
+    || warn "Could not reach monitor metrics at ${RTR_MONITOR_PROM_PORT}"
+  echo ""
+  alert "Switch to Grafana: $GRAFANA_URL  (RTR Anomaly Detection row)"
+
+  read -rp "  [ENTER to clean up the churn injection and continue]" _
+  bash "$ANOMALY_SCRIPT" --clean
+
+  bash "$0" whatif
+
+  read -rp "  [ENTER to tear everything down, or Ctrl-C to leave it running]" _
+  bash "$0" down
+
+  echo ""
+  ok "=== Full customer demo complete ==="
+  ;;
+
 # ── ANOMALY SETUP — bring up the full RTR anomaly detection demo env ─────────
 # Starts, in order (each healthy before the next): Routinator (native, warm) →
-# shared Grafana/Prometheus/gnmic stack → raven rtr monitor (background).
-# Idempotent on Routinator/Grafana: leaves an already-warm Routinator and a
-# running observability stack in place. Only the monitor is (re)started here.
+# demo-master's own Prometheus (adds a second scrape job for the monitor) →
+# raven rtr monitor (background). Idempotent on Routinator: leaves an
+# already-warm instance in place. Deliberately does NOT start the shared
+# sre-demo-lab observability stack — that stack also binds :3000/:9090 and
+# would collide with demo-master's own Prometheus/Grafana below. Instead this
+# reuses demo-master's containers, so 'setup' must have been run first.
 anomaly-setup)
   header "RTR Anomaly Detection — Demo Setup"
 
@@ -1252,44 +1366,58 @@ anomaly-setup)
     warn "The monitor may connect before RPKI data is available."
   fi
 
-  # ── 2. Shared Grafana/Prometheus/gnmic docker-compose stack ─────────────────
-  step "Starting observability stack (Grafana/Prometheus/gnmic)..."
-  if [ ! -d "$OBSERVABILITY_DIR" ]; then
-    echo "ERROR: observability stack not found at $OBSERVABILITY_DIR"
-    echo "       Expected the shared sre-demo-lab compose stack there."
+  # ── 2. demo-master's own Prometheus — add a scrape job for the monitor ──────
+  # Reuses the 'prometheus' container started by 'setup' instead of standing up
+  # the shared sre-demo-lab stack (which would collide on :3000/:9090).
+  step "Checking for demo-master's Prometheus container..."
+  if ! sudo docker ps --format '{{.Names}}' | grep -qx prometheus; then
+    echo "ERROR: demo-master's 'prometheus' container is not running."
+    echo "       The anomaly segment reuses demo-master's own Prometheus/Grafana"
+    echo "       (not the shared sre-demo-lab stack, to avoid a :3000/:9090 port"
+    echo "       collision). Run './demo-master.sh setup' first, then retry."
     exit 1
   fi
-  ( cd "$OBSERVABILITY_DIR" && docker compose up -d )
+  ok "Prometheus container is running — reusing it"
 
-  step "Waiting for Grafana (localhost:3000)..."
-  GRAFANA_READY=0
-  for i in $(seq 1 60); do
-    CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000 2>/dev/null || true)
-    if [ "$CODE" = "200" ]; then
-      ok "Grafana responding 200 (${i}s)"
-      GRAFANA_READY=1
-      break
-    fi
-    sleep 2; echo -n "."
-  done
-  echo ""
-  if [ "$GRAFANA_READY" -eq 0 ]; then
-    warn "Grafana did not return 200 within ~2 minutes — check 'docker compose ps' in $OBSERVABILITY_DIR"
+  step "Adding RTR monitor scrape job (172.17.0.1${RTR_MONITOR_PROM_PORT}) and reloading Prometheus..."
+  cat > /tmp/prometheus.yml << PROMEOF
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'raven'
+    static_configs:
+      - targets: ['172.17.0.1:9595']
+  - job_name: 'raven-rtr-monitor'
+    static_configs:
+      - targets: ['172.17.0.1${RTR_MONITOR_PROM_PORT}']
+PROMEOF
+
+  RELOAD_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:9090/-/reload)
+  if [ "$RELOAD_CODE" != "200" ]; then
+    echo "ERROR: Prometheus reload failed (HTTP $RELOAD_CODE)."
+    echo "       Is the 'prometheus' container running with --web.enable-lifecycle?"
+    echo "       (demo-master's 'setup' case adds this flag — if this container"
+    echo "        predates that change, run: ./demo-master.sh setup)"
+    exit 1
   fi
+  ok "Prometheus reloaded — now scraping raven-rtr-monitor at 172.17.0.1${RTR_MONITOR_PROM_PORT}"
 
   # ── 3. raven rtr monitor (background, warm-started from the baseline) ────────
+  # --prometheus uses a port distinct from raven serve's own :9595 — these are
+  # two separate processes and can't share a listener.
   step "Starting raven rtr monitor with seeded baseline..."
   $RAVEN_BIN rtr monitor \
     --cache "$RTR_CACHE" \
     --anomaly-snapshot "$ANOMALY_SNAPSHOT" \
     --log-file "$RTR_MONITOR_NDJSON" \
-    --prometheus :9595 \
+    --prometheus "$RTR_MONITOR_PROM_PORT" \
     > "$RTR_MONITOR_STDLOG" 2>&1 &
   MON_PID=$!
   disown "$MON_PID"
   echo "$MON_PID" > "$RTR_MONITOR_PIDFILE"
 
-  # Give it a moment to bind :9595 / connect to the cache, then confirm it's alive.
+  # Give it a moment to bind the port / connect to the cache, then confirm it's alive.
   sleep 2
   if kill -0 "$MON_PID" 2>/dev/null; then
     ok "raven rtr monitor running (PID $MON_PID)"
@@ -1303,14 +1431,14 @@ anomaly-setup)
   echo ""
   ok "Anomaly demo environment up."
   echo ""
-  echo "  Grafana:      http://localhost:3000"
-  echo "  Metrics:      http://localhost:9595/metrics"
+  echo "  Grafana:      $GRAFANA_URL"
+  echo "  Metrics:      http://localhost${RTR_MONITOR_PROM_PORT}/metrics"
   echo "  Event log:    $RTR_MONITOR_NDJSON   (monitor PID $MON_PID)"
   echo "  Monitor logs: $RTR_MONITOR_STDLOG"
   echo ""
   echo "  Watch for anomalies:"
   echo "    tail -f $RTR_MONITOR_NDJSON | grep '\"event_type\":\"anomaly\"'"
-  echo "    (or the raven_rtr_anomaly_total counter on :9595 / in Grafana)"
+  echo "    (or the raven_rtr_anomaly_total counter on ${RTR_MONITOR_PROM_PORT} / in Grafana)"
   echo ""
   echo "  Inject churn:  ./04-rtr-anomaly.sh          (bulk-add ROAs → vrp_announced trip)"
   echo "  Restore:       ./04-rtr-anomaly.sh --clean  (withdraw injected ROAs)"
@@ -1337,7 +1465,7 @@ anomaly-clean)
     warn "raven rtr monitor was not running"
   fi
 
-  warn "Leaving Routinator and the Grafana/Prometheus stack running"
+  warn "Leaving Routinator and demo-master's Prometheus/Grafana running"
   warn "(expensive to restart; they don't need teardown between demo runs)."
   ok "Monitor stopped. Restart with: ./demo-master.sh anomaly-setup"
   ;;
@@ -1345,10 +1473,11 @@ anomaly-clean)
 # ── ANOMALY DOWN — full teardown of the RTR anomaly detection demo env ───────
 # Unlike anomaly-clean (which stops only the monitor), this brings the whole
 # anomaly environment down, in order: monitor → injected SLURM entries →
-# Routinator → shared Grafana/Prometheus/gnmic compose stack. Every step
-# tolerates an "already stopped" state, so it is safe to re-run. It deliberately
-# does NOT touch the Containerlab topology — that is expensive to redeploy and
-# is not part of this env (see the note printed at the end).
+# Routinator → the RTR-monitor scrape job added to demo-master's Prometheus.
+# Every step tolerates an "already stopped" state, so it is safe to re-run. It
+# deliberately does NOT touch the Containerlab topology, or demo-master's own
+# Prometheus/Grafana containers themselves — those are expensive to redeploy
+# and are owned by 'setup'/'down', not this env (see the note printed at the end).
 anomaly-down)
   header "RTR Anomaly Detection — Full Teardown"
 
@@ -1419,17 +1548,29 @@ anomaly-down)
     rm -f "$ROUTINATOR_PIDFILE" 2>/dev/null || true
   fi
 
-  # ── 4. Stop the shared Grafana/Prometheus/gnmic compose stack ───────────────
-  step "Stopping observability stack (docker compose down)..."
-  if [ -d "$OBSERVABILITY_DIR" ]; then
-    # 'docker compose down' is idempotent — it returns 0 even with nothing up.
-    if ( cd "$OBSERVABILITY_DIR" && docker compose down ); then
-      ok "Observability stack stopped"
+  # ── 4. Remove the RTR-monitor scrape job from demo-master's Prometheus ──────
+  # Leaves the 'raven' job (and the container itself) in place — 'setup'/'down'
+  # own that container's lifecycle, not this env. Only revert if it's actually
+  # running; if 'down' already tore it down there's nothing to reload.
+  step "Removing RTR monitor scrape job from Prometheus..."
+  if sudo docker ps --format '{{.Names}}' | grep -qx prometheus; then
+    cat > /tmp/prometheus.yml << PROMEOF
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'raven'
+    static_configs:
+      - targets: ['172.17.0.1:9595']
+PROMEOF
+    RELOAD_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:9090/-/reload)
+    if [ "$RELOAD_CODE" = "200" ]; then
+      ok "Prometheus reloaded — raven-rtr-monitor scrape job removed"
     else
-      warn "docker compose down reported an error — stack may already be down."
+      warn "Prometheus reload failed (HTTP $RELOAD_CODE) — scrape job may still reference :9596"
     fi
   else
-    warn "Observability dir not found at $OBSERVABILITY_DIR — skipping stack teardown"
+    warn "Prometheus container not running — nothing to revert"
   fi
 
   # ── 5. Containerlab — intentionally left running ────────────────────────────
@@ -1472,9 +1613,9 @@ anomaly-down)
   echo "  rtr-fail         Demonstrate RTR cache failure handling"
   echo ""
   echo "RTR anomaly detection:"
-  echo "  anomaly-setup    Bring up anomaly env (Routinator + Grafana stack + rtr monitor)"
-  echo "  anomaly-clean    Stop the rtr monitor (leaves Routinator + Grafana up)"
-  echo "  anomaly-down     Full anomaly-env teardown (monitor + SLURM + Routinator + stack; keeps Containerlab)"
+  echo "  anomaly-setup    Bring up anomaly env (Routinator + rtr monitor; reuses demo-master's Prometheus/Grafana — run 'setup' first)"
+  echo "  anomaly-clean    Stop the rtr monitor (leaves Routinator + Prometheus/Grafana up)"
+  echo "  anomaly-down     Full anomaly-env teardown (monitor + SLURM + Routinator + scrape job; keeps Containerlab + Prometheus/Grafana)"
   echo ""
   echo "Tooling:"
   echo "  whatif           Run what-if simulator"
@@ -1483,8 +1624,9 @@ anomaly-down)
   echo "  webhook-listen   Start webhook listener on port 9999"
   echo ""
   echo "Sequences:"
-  echo "  phase3           Full Phase 3 active-response demo sequence"
-  echo "  lacnic           LACNIC full demo sequence"
+  echo "  phase3              Full Phase 3 active-response demo sequence"
+  echo "  lacnic              LACNIC full demo sequence"
+  echo "  full-customer-demo  setup -> hijack -> leak (with RTR anomaly detection overlapped) -> whatif -> down"
   echo ""
   ;;
 

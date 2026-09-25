@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/cli"
@@ -8,6 +9,9 @@ import (
 
 func main() {
 	if err := cli.Execute(); err != nil {
+		// The root command sets SilenceErrors so cobra does not print the
+		// error itself, which left every failure exiting 1 with no output.
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }
