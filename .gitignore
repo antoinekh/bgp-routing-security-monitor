@@ -2,6 +2,9 @@
 /raven
 /dist/
 *.exe
+# Cross-compiled binaries, e.g. raven-linux-amd64, raven-darwin-arm64
+/raven-linux-*
+/raven-darwin-*
 
 # Go
 vendor/

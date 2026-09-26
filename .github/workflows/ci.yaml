@@ -57,9 +57,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: bufbuild/buf-setup-action@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - run: buf lint proto/
-      - run: buf breaking proto/ --against '.git#branch=main'
+      # On pull_request, checkout leaves HEAD detached on the PR merge ref and
+      # main exists only as origin/main. buf's '.git#branch=main' fetches from
+      # the local repo's own branches, so create main if it isn't there.
+      - run: git show-ref --verify --quiet refs/heads/main || git branch main origin/main
+        if: github.event_name == 'pull_request'
+      - run: buf breaking --against '.git#branch=main'
         if: github.event_name == 'pull_request'
