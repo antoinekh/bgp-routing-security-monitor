@@ -68,5 +68,5 @@ jobs:
       # the local repo's own branches, so create main if it isn't there.
       - run: git show-ref --verify --quiet refs/heads/main || git branch main origin/main
         if: github.event_name == 'pull_request'
-      - run: buf breaking proto/ --against '.git#branch=main'
+      - run: buf breaking --against '.git#branch=main'
         if: github.event_name == 'pull_request'
