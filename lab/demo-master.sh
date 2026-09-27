@@ -16,6 +16,10 @@
 #   demo-master.sh anomaly-clean — stop the rtr monitor (leaves infra up)
 #   demo-master.sh anomaly-down  — full anomaly-env teardown (leaves Containerlab up)
 #   demo-master.sh full-customer-demo — sequences hijack/leak + RTR anomaly detection end to end
+#   demo-master.sh global-setup  — build ../raven.global.yaml (RIPEstat on) and restart RAVEN on it
+#   demo-master.sh global-match  — check a real prefix against RIPEstat's global view
+#   demo-master.sh global-hijack — inject the lab hijack and correlate it globally (LOCAL_ONLY)
+#   demo-master.sh global-reveal — show the verdict inside the Event Engine's webhook payload
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -1585,6 +1589,280 @@ PROMEOF
   ok "Anomaly-env teardown complete. Restart with: ./demo-master.sh anomaly-setup"
   ;;
 
+# ── GLOBAL VISIBILITY — SETUP ────────────────────────────────────────────────
+# Builds ../raven.global.yaml from the config 'setup' uses (../raven.local.yaml
+# if present, else ../raven.yaml) plus an external.ripestat block and one
+# global-correlate event rule, then restarts raven serve on it. The base config
+# is never modified, so every other scenario keeps its usual config: run
+# 'reset' and then 'setup' to go back to it.
+global-setup)
+  header "Global Visibility Correlation — Setup"
+
+  if [ -f "../raven.local.yaml" ]; then
+    GLOBAL_BASE="../raven.local.yaml"
+  else
+    GLOBAL_BASE="../raven.yaml"
+  fi
+  GLOBAL_CONFIG="../raven.global.yaml"
+  if [ ! -f "$GLOBAL_BASE" ]; then
+    alert "Base config $GLOBAL_BASE not found — run this from inside the lab/ directory."
+    exit 1
+  fi
+  echo "  Base config:  $GLOBAL_BASE  (read only — never modified)"
+  echo "  Demo config:  $GLOBAL_CONFIG"
+  echo ""
+
+  GLOBAL_CREATED=0
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    warn "$GLOBAL_CONFIG already exists — not overwriting it."
+    echo "  Delete it and re-run global-setup to regenerate it from $GLOBAL_BASE."
+    echo ""
+  else
+    # The new rule is appended to the end of the file, so it only lands in
+    # events.rules if events: is the last top-level section.
+    if [ "$(grep -E '^[a-z]' "$GLOBAL_BASE" | tail -1)" != "events:" ]; then
+      alert "events: is not the last top-level section of $GLOBAL_BASE — cannot append safely."
+      echo "  Create $GLOBAL_CONFIG by hand: copy $GLOBAL_BASE, add the global-correlate"
+      echo "  rule to events.rules and an external.ripestat block."
+      exit 1
+    fi
+    step "Creating $GLOBAL_CONFIG from $GLOBAL_BASE..."
+    cp "$GLOBAL_BASE" "$GLOBAL_CONFIG"
+    GLOBAL_CREATED=1
+    if [ -n "$(tail -c1 "$GLOBAL_CONFIG")" ]; then
+      echo "" >> "$GLOBAL_CONFIG"
+    fi
+    cat >> "$GLOBAL_CONFIG" << 'YAML'
+
+    - name: "correlate-suspicious-routes"
+      trigger:
+        type: posture_change
+        postures: ["origin-invalid"]
+      cooldown: 60s
+      actions:
+        - type: global-correlate
+        - type: log
+          level: warn
+        - type: webhook
+          url: "http://localhost:9999"
+          max_attempts: 2
+          timeout: 3s
+
+external:
+  ripestat:
+    enabled: true
+    base-url: "https://stat.ripe.net"
+    timeout: 5s
+    cache-ttl: 60s
+    rate-limit-per-min: 10
+YAML
+    ok "Created $GLOBAL_CONFIG"
+    echo ""
+  fi
+
+  # ── Superset check: everything in the base config must survive unchanged ──
+  step "Checking $GLOBAL_CONFIG is a superset of $GLOBAL_BASE..."
+  GLOBAL_CHECK_OK=1
+
+  # Byte count, not line count: the base config may not end in a newline.
+  BASE_BYTES=$(wc -c < "$GLOBAL_BASE")
+  if head -c "$BASE_BYTES" "$GLOBAL_CONFIG" | cmp -s - "$GLOBAL_BASE"; then
+    ok "PASS  first $BASE_BYTES bytes are identical to $GLOBAL_BASE"
+  else
+    alert "FAIL  $GLOBAL_CONFIG does not start with an unchanged copy of $GLOBAL_BASE"
+    GLOBAL_CHECK_OK=0
+  fi
+
+  for marker in "bmp:" "rtr:" "validation:" "outputs:" "logging:" "events:" \
+                "alert-origin-invalid" "alert-route-leak" \
+                "correlate-suspicious-routes" "type: global-correlate" "ripestat:"; do
+    if grep -qF -- "$marker" "$GLOBAL_CONFIG"; then
+      ok "PASS  found: $marker"
+    else
+      alert "FAIL  missing: $marker"
+      GLOBAL_CHECK_OK=0
+    fi
+  done
+
+  if python3 -c "import yaml" 2>/dev/null; then
+    if python3 - "$GLOBAL_BASE" "$GLOBAL_CONFIG" << 'PY'
+import sys, yaml
+base = yaml.safe_load(open(sys.argv[1]))
+new = yaml.safe_load(open(sys.argv[2]))
+base_rules = [r["name"] for r in base["events"]["rules"]]
+new_rules = [r["name"] for r in new["events"]["rules"]]
+assert new_rules == base_rules + ["correlate-suspicious-routes"], new_rules
+assert new["external"]["ripestat"]["enabled"] is True
+for key in base:
+    if key != "events":
+        assert new[key] == base[key], key
+PY
+    then
+      ok "PASS  YAML parses; existing rules unchanged and in order, new rule appended last"
+    else
+      alert "FAIL  YAML structure check (see the Python error above)"
+      GLOBAL_CHECK_OK=0
+    fi
+  else
+    warn "SKIP  YAML structure check (python3 yaml module not installed)"
+  fi
+
+  echo ""
+  if [ "$GLOBAL_CHECK_OK" -ne 1 ]; then
+    alert "SUPERSET CHECK FAILED"
+    if [ "$GLOBAL_CREATED" -eq 1 ]; then
+      rm -f "$GLOBAL_CONFIG"
+      echo "  Removed $GLOBAL_CONFIG so a broken config is not left behind."
+    else
+      echo "  $GLOBAL_CONFIG existed before this run, so it was left in place."
+    fi
+    echo "  Check $GLOBAL_BASE manually. RAVEN was not restarted."
+    exit 1
+  fi
+  ok "SUPERSET CHECK PASSED"
+  echo ""
+
+  # ── Restart RAVEN on the demo config (same pattern as 'setup') ──
+  step "Restarting RAVEN daemon on $GLOBAL_CONFIG..."
+  pkill -f "raven serve" 2>/dev/null || true
+  sleep 2
+  check_stale_raven
+  echo "Using config: $GLOBAL_CONFIG"
+  $RAVEN_BIN serve --config $GLOBAL_CONFIG > /tmp/raven.log 2>&1 &
+  RAVEN_PID=$!
+  disown $RAVEN_PID
+  sleep 2
+  if ! kill -0 "$RAVEN_PID" 2>/dev/null; then
+    alert "raven serve exited during startup — last lines of /tmp/raven.log:"
+    tail -5 /tmp/raven.log
+    exit 1
+  fi
+
+  echo "  Waiting for RAVEN to sync with Routinator..."
+  for i in $(seq 1 12); do
+    if grep -q "RTR sync complete" /tmp/raven.log 2>/dev/null; then
+      ok "RAVEN RTR sync complete"; break
+    fi
+    sleep 5; echo -n "."
+  done
+  echo ""
+  echo "  Waiting for BMP table dump to settle..."
+  sleep 8
+
+  ok "RAVEN is running with global visibility correlation enabled."
+  echo ""
+  echo "  Next: ./demo-master.sh global-match   (real prefix, no lab injection)"
+  echo "        ./demo-master.sh global-hijack  (lab hijack → LOCAL_ONLY)"
+  echo "        ./demo-master.sh global-reveal  (verdict inside the webhook payload)"
+  echo ""
+  echo "  To return to the normal demo config: ./demo-master.sh reset, then ./demo-master.sh setup"
+  echo "  ('setup' never picks up $GLOBAL_CONFIG.) To stop everything: ./demo-master.sh down"
+  ;;
+
+# ── GLOBAL VISIBILITY — REAL PREFIX ──────────────────────────────────────────
+global-match)
+  header "Global Visibility Correlation — Real Prefix"
+
+  echo "  This scenario checks a well-known, real prefix against RIPEstat's live"
+  echo "  view of the global routing table. No lab injection is involved, and no"
+  echo "  RAVEN daemon is required: --origin-asn supplies the local baseline."
+  echo ""
+  echo "  Prefix:           8.8.8.0/24"
+  echo "  Expected origin:  AS15169"
+  echo "  Expected verdict: GLOBAL MATCH — the internet agrees on the origin"
+  echo ""
+
+  step "Running:"
+  echo "  $RAVEN_BIN check global --prefix 8.8.8.0/24 --origin-asn 15169"
+  echo ""
+  $RAVEN_BIN check global --prefix 8.8.8.0/24 --origin-asn 15169 \
+    || warn "check global exited non-zero — see the output above"
+  ;;
+
+# ── GLOBAL VISIBILITY — LOCAL HIJACK ─────────────────────────────────────────
+# Same injection as 'hijack' (192.0.2.0/24 originated by the internet router),
+# repeated here so this scenario runs on its own. The hijack is left in place:
+# withdraw it with 'hijack-clean' when ready.
+global-hijack)
+  header "Global Visibility Correlation — Local Hijack"
+
+  alert "INJECTING BGP ORIGIN HIJACK"
+  echo ""
+  echo "  Prefix:             192.0.2.0/24"
+  echo "  Legitimate origin:  AS65000  (per ROA in Routinator)"
+  echo "  Hijacking router:   AS64496   (internet router — peer 10.0.0.1 via upstream)"
+  echo ""
+
+  step "Injecting hijack via internet router (AS64496)..."
+  sudo docker exec clab-raven-demo-internet bash -c "vtysh << 'VTYSH'
+configure terminal
+ip route 192.0.2.0/24 blackhole
+router bgp 64496
+address-family ipv4 unicast
+network 192.0.2.0/24
+exit-address-family
+end
+VTYSH" > /dev/null 2>&1
+
+  echo "  Waiting 5s for BMP propagation..."
+  sleep 5
+  echo ""
+
+  step "What to expect:"
+  echo "  192.0.2.0/24 is a documentation prefix that exists only inside this lab."
+  echo "  No real route collector sees it, so RIPEstat's global view will be empty"
+  echo "  and the verdict should be LOCAL_ONLY: the anomaly is contained to our own"
+  echo "  routing view, not a hijack the rest of the internet has picked up."
+  echo ""
+
+  step "Running:"
+  echo "  $RAVEN_BIN --address $RAVEN_ADDR check global --prefix 192.0.2.0/24"
+  echo ""
+  GLOBAL_OUT=/tmp/raven-global-hijack.out
+  $RAVEN_BIN --address $RAVEN_ADDR check global --prefix 192.0.2.0/24 | tee "$GLOBAL_OUT" \
+    || warn "check global exited non-zero — see the output above"
+  echo ""
+
+  if grep -q "LOCAL-ONLY ROUTE" "$GLOBAL_OUT"; then
+    alert "LOCAL_ONLY — seen by our routers, by no collector on the internet"
+  else
+    warn "LOCAL_ONLY verdict not found in the output above"
+  fi
+  echo ""
+  echo "  The hijack is still in place. Withdraw it with: ./demo-master.sh hijack-clean"
+  ;;
+
+# ── GLOBAL VISIBILITY — WEBHOOK PAYLOAD ──────────────────────────────────────
+global-reveal)
+  header "Global Visibility Correlation — Webhook Payload"
+
+  echo "  The same LOCAL_ONLY verdict is not only a CLI result. When global-hijack"
+  echo "  injected the route, the Event Engine's correlate-suspicious-routes rule"
+  echo "  ran the correlation itself and attached the verdict to its webhook, so"
+  echo "  any automated alerting pipeline receives it with no operator involved."
+  echo ""
+
+  step "Switch to the webhook-listen pane"
+  echo "  (It must already be running: ./demo-master.sh webhook-listen)"
+  echo ""
+  echo "  Look for the payload with:"
+  echo "    \"rule_name\": \"correlate-suspicious-routes\""
+  echo "    \"prefix\": \"192.0.2.0/24\""
+  echo "  and inside it:"
+  echo "    \"global_visibility\": {"
+  echo "      \"queried\": true,"
+  echo "      \"source\": \"ripestat\","
+  echo "      \"consensus\": \"local_only\", ..."
+  echo "    }"
+  echo ""
+  echo "  The alert-origin-invalid payload for the same route has no global_visibility"
+  echo "  key: only rules with a global-correlate action carry it."
+  echo ""
+  warn "No payload? The listener must be running before global-hijack injects the route."
+  echo "  Run ./demo-master.sh hijack-clean, wait for the rule's 60s cooldown to pass,"
+  echo "  then run ./demo-master.sh global-hijack again."
+  ;;
+
 # ── HELP ─────────────────────────────────────────────────────────────────────
 *)
   echo ""
@@ -1616,6 +1894,12 @@ PROMEOF
   echo "  anomaly-setup    Bring up anomaly env (Routinator + rtr monitor; reuses demo-master's Prometheus/Grafana — run 'setup' first)"
   echo "  anomaly-clean    Stop the rtr monitor (leaves Routinator + Prometheus/Grafana up)"
   echo "  anomaly-down     Full anomaly-env teardown (monitor + SLURM + Routinator + scrape job; keeps Containerlab + Prometheus/Grafana)"
+  echo ""
+  echo "Global visibility correlation:"
+  echo "  global-setup     Build ../raven.global.yaml (RIPEstat enabled) and restart RAVEN on it — run 'setup' first"
+  echo "  global-match     Check a real prefix (8.8.8.0/24) against RIPEstat — no daemon needed"
+  echo "  global-hijack    Inject the 192.0.2.0/24 hijack and correlate it globally (expect LOCAL_ONLY)"
+  echo "  global-reveal    Show the verdict inside the webhook payload (run webhook-listen first)"
   echo ""
   echo "Tooling:"
   echo "  whatif           Run what-if simulator"
