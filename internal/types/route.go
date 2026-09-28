@@ -49,6 +49,18 @@ type Withdrawal struct {
 	WithdrawAll bool // if true, withdraw all routes from PeerAddr
 }
 
+// IngestEvent is one item on the BMP ingest stream. Exactly one of Route or
+// Withdrawal is set.
+//
+// Routes and withdrawals share one channel so the Route Table applies them in
+// the order the router sent them. On separate channels a peer-down could be
+// applied while that peer's routes were still queued, and those routes were
+// then re-inserted after the wipe and never removed.
+type IngestEvent struct {
+	Route      *Route
+	Withdrawal *Withdrawal
+}
+
 // OriginASN returns the last ASN in the AS_PATH (the route originator).
 func (r *Route) OriginASN() uint32 {
 	if len(r.ASPath) == 0 {
