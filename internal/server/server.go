@@ -39,6 +39,9 @@ var Version = "dev"
 // DefaultAPIListen is the address the JSON API server binds to.
 const DefaultAPIListen = ":11020"
 
+// otelShutdownTimeout bounds the OTel exporter's final flush on shutdown.
+const otelShutdownTimeout = 5 * time.Second
+
 // Server is the top-level RAVEN daemon that owns all subsystems.
 type Server struct {
 	cfg         *config.Config
@@ -49,11 +52,10 @@ type Server struct {
 	aspaStore   *store.ASPAStore
 	engine      *validation.Engine
 	eventEngine *events.Engine
-	routeCh     chan types.Route
+	ingestCh    chan types.IngestEvent
 	demoMode    bool
 	apiSrv      *api.Server
 	rtrReady    chan struct{}
-	withdrawCh  chan types.Withdrawal
 
 	// fsManagers holds the active flowspec lifecycle managers.
 	fsManagers []*flowspec.Manager
@@ -66,12 +68,11 @@ type Server struct {
 
 // New creates a new RAVEN server from the given config.
 func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
-	routeCh := make(chan types.Route, 100_000)
+	ingestCh := make(chan types.IngestEvent, 100_000)
 	vrpStore := store.NewVRPStore()
 	aspaStore := store.NewASPAStore() // ADD
 	table := routetable.New()
 	engine := validation.NewEngine(vrpStore, aspaStore, table, log)
-	withdrawCh := make(chan types.Withdrawal, 10_000)
 
 	var bmpTLS *tls.Config
 	if cfg.BMP.TLS != nil {
@@ -86,13 +87,12 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 		cfg:         cfg,
 		log:         log,
 		table:       table,
-		bmpListen:   bmp.NewListener(cfg.BMP.Listen, bmpTLS, routeCh, withdrawCh, log),
+		bmpListen:   bmp.NewListener(cfg.BMP.Listen, bmpTLS, ingestCh, log),
 		vrpStore:    vrpStore,
 		aspaStore:   aspaStore, // ADD
 		engine:      engine,
-		routeCh:     routeCh,
+		ingestCh:    ingestCh,
 		rtrReady:    make(chan struct{}),
-		withdrawCh:  withdrawCh,
 		rtrStates:   make(map[string]int64),
 		rtrLastSync: make(map[string]int64),
 	}
@@ -123,7 +123,7 @@ func (s *Server) Run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Build event engine before starting any goroutines so that routeIngestLoop
+	// Build event engine before starting any goroutines so that ingestLoop
 	// sees a non-nil s.eventEngine from the start.
 	if len(s.cfg.Events.Rules) > 0 {
 		var opts []events.Option
@@ -198,13 +198,7 @@ func (s *Server) Run() error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.routeIngestLoop(ctx)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		s.withdrawIngestLoop(ctx)
+		s.ingestLoop(ctx)
 	}()
 
 	// BMP listener
@@ -315,7 +309,16 @@ func (s *Server) Run() error {
 			s.log.Error("failed to start OTel exporter", "err", otelErr)
 		} else if otelExp != nil {
 			otelExp.SetReader(s)
-			defer otelExp.Shutdown(context.Background())
+			// Bounded: the final export retries with backoff, and against an
+			// unreachable collector that alone could stall shutdown for about
+			// a minute.
+			defer func() {
+				sctx, cancel := context.WithTimeout(context.Background(), otelShutdownTimeout)
+				defer cancel()
+				if err := otelExp.Shutdown(sctx); err != nil {
+					s.log.Warn("OTel exporter shutdown", "err", err)
+				}
+			}()
 			s.log.Info("OTel exporter started",
 				"endpoint", s.cfg.Outputs.OTel.Endpoint,
 				"protocol", s.cfg.Outputs.OTel.Protocol,
@@ -374,8 +377,10 @@ func (s *Server) Run() error {
 	)
 
 	<-ctx.Done()
+	shutdownStart := time.Now()
 	s.log.Info("shutting down...")
 	wg.Wait()
+	s.log.Info("all subsystems stopped", "elapsed", time.Since(shutdownStart).Round(time.Millisecond))
 
 	// ── Snapshot on shutdown (after all sessions drained) ──────────────────
 	if s.cfg.Persistence.Enabled {
@@ -383,11 +388,13 @@ func (s *Server) Run() error {
 		if wErr != nil {
 			s.log.Error("failed to create snapshot writer", "err", wErr)
 		} else {
+			snapStart := time.Now()
 			routes := s.table.Snapshot()
 			if err := writer.WriteRoutes(routes); err != nil {
 				s.log.Error("failed to write route snapshot", "err", err)
 			} else {
-				s.log.Info("wrote route snapshot", "routes", len(routes))
+				s.log.Info("wrote route snapshot", "routes", len(routes),
+					"elapsed", time.Since(snapStart).Round(time.Millisecond))
 			}
 
 			vrps := s.vrpStore.Snapshot()
@@ -405,37 +412,6 @@ func (s *Server) Run() error {
 	return nil
 }
 
-func (s *Server) withdrawIngestLoop(ctx context.Context) {
-	for {
-		select {
-		case w := <-s.withdrawCh:
-			if w.WithdrawAll {
-				s.table.WithdrawAllFromPeer(w.PeerAddr)
-			} else {
-				// Capture route before removal so the event carries prefix/posture context.
-				var withdrawn *types.Route
-				if s.eventEngine != nil {
-					key := types.RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: types.AdjRIBInPre}
-					withdrawn = s.table.Get(key)
-				}
-				s.table.Withdraw(w.PeerAddr, w.Prefix)
-				if s.eventEngine != nil && withdrawn != nil {
-					s.eventEngine.Emit(events.Event{
-						ID:         events.NewID(),
-						Timestamp:  time.Now(),
-						Type:       events.EventTypeRouteWithdraw,
-						Route:      withdrawn,
-						OldPosture: withdrawn.SecurityPosture,
-						RouterID:   w.PeerAddr.String(),
-					})
-				}
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
 // GetTable returns the route table.
 func (s *Server) GetTable() *routetable.Table {
 	return s.table
@@ -451,9 +427,11 @@ func (s *Server) GetBMPListener() *bmp.Listener {
 	return s.bmpListen
 }
 
-// routeIngestLoop reads parsed routes from the BMP subsystem,
-// runs validation, and inserts into the Route Table.
-func (s *Server) routeIngestLoop(ctx context.Context) {
+// ingestLoop applies BMP routes and withdrawals to the Route Table in the
+// order they arrived. It waits for the first RTR sync so the VRP store is
+// populated before any route is annotated; withdrawals wait too, so they can
+// never overtake the routes they withdraw.
+func (s *Server) ingestLoop(ctx context.Context) {
 	s.log.Info("route ingest pipeline started")
 	// Wait for first RTR sync before annotating routes.
 	// This ensures VRP store is populated before any ROV happens.
@@ -469,65 +447,108 @@ func (s *Server) routeIngestLoop(ctx context.Context) {
 
 	for {
 		select {
-		case route := <-s.routeCh:
-			r := route
-
-			// Capture old posture before overwriting so we can classify the event.
-			// If the existing route is Stale (snapshot artefact), treat the
-			// incoming live BMP message as a fresh insert → EventTypeNewRoute.
-			var oldPosture types.SecurityPosture
-			if s.eventEngine != nil {
-				key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
-				if old := s.table.Get(key); old != nil && !old.Stale {
-					oldPosture = old.SecurityPosture
-				}
+		case ev := <-s.ingestCh:
+			// Don't start new work once shutdown has begun: select picks
+			// randomly among ready cases, and a withdraw-all queued by a
+			// closing BMP session can take a long time on a large table.
+			if ctx.Err() != nil {
+				s.log.Info("route ingest pipeline stopped", "total_ingested", count)
+				return
 			}
-
-			// Run ROV validation before inserting
-			if s.cfg.Validation.ROV {
-				s.engine.ValidateRoute(&r)
-			}
-
-			s.table.Insert(&r)
-			count++
-
-			// Notify watch subscribers
-			s.apiSrv.NotifyRoute(&r)
-
-			// Emit to the event engine for active-response rule evaluation.
-			if s.eventEngine != nil {
-				eventType := events.EventTypeNewRoute
-				if oldPosture != "" {
-					eventType = events.EventTypePostureChange
-				}
-				s.eventEngine.Emit(events.Event{
-					ID:         events.NewID(),
-					Timestamp:  r.Timestamp,
-					Type:       eventType,
-					Route:      &r,
-					OldPosture: oldPosture,
-					NewPosture: r.SecurityPosture,
-					RouterID:   r.RouterID.String(),
-				})
-			}
-
-			// Log first few routes so the user sees it working
-			if count <= 20 {
-				s.log.Info("route received",
-					"prefix", r.Prefix.String(),
-					"peer", r.PeerAddr.String(),
-					"origin_asn", r.OriginASN(),
-					"rov", r.ROV.State.String(),
-					"posture", r.SecurityPosture,
-				)
-			}
-			if count%10000 == 0 {
-				s.log.Info("routes ingested", "count", count, "table_size", s.table.Count())
+			switch {
+			case ev.Route != nil:
+				count++
+				s.ingestRoute(*ev.Route, count)
+			case ev.Withdrawal != nil:
+				s.ingestWithdrawal(*ev.Withdrawal)
 			}
 		case <-ctx.Done():
 			s.log.Info("route ingest pipeline stopped", "total_ingested", count)
 			return
 		}
+	}
+}
+
+// ingestRoute validates one BMP route and inserts it into the Route Table.
+// count is the running number of routes ingested, for progress logging.
+func (s *Server) ingestRoute(r types.Route, count uint64) {
+	// Capture old posture before overwriting so we can classify the event.
+	// If the existing route is Stale (snapshot artefact), treat the
+	// incoming live BMP message as a fresh insert → EventTypeNewRoute.
+	var oldPosture types.SecurityPosture
+	if s.eventEngine != nil {
+		key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
+		if old := s.table.Get(key); old != nil && !old.Stale {
+			oldPosture = old.SecurityPosture
+		}
+	}
+
+	// Run ROV validation before inserting
+	if s.cfg.Validation.ROV {
+		s.engine.ValidateRoute(&r)
+	}
+
+	s.table.Insert(&r)
+
+	// Notify watch subscribers
+	s.apiSrv.NotifyRoute(&r)
+
+	// Emit to the event engine for active-response rule evaluation.
+	if s.eventEngine != nil {
+		eventType := events.EventTypeNewRoute
+		if oldPosture != "" {
+			eventType = events.EventTypePostureChange
+		}
+		s.eventEngine.Emit(events.Event{
+			ID:         events.NewID(),
+			Timestamp:  r.Timestamp,
+			Type:       eventType,
+			Route:      &r,
+			OldPosture: oldPosture,
+			NewPosture: r.SecurityPosture,
+			RouterID:   r.RouterID.String(),
+		})
+	}
+
+	// Log first few routes so the user sees it working
+	if count <= 20 {
+		s.log.Info("route received",
+			"prefix", r.Prefix.String(),
+			"peer", r.PeerAddr.String(),
+			"origin_asn", r.OriginASN(),
+			"rov", r.ROV.State.String(),
+			"posture", r.SecurityPosture,
+		)
+	}
+	if count%10000 == 0 {
+		s.log.Info("routes ingested", "count", count, "table_size", s.table.Count())
+	}
+}
+
+// ingestWithdrawal removes one withdrawn route, or every route of a peer
+// that went down, from the Route Table.
+func (s *Server) ingestWithdrawal(w types.Withdrawal) {
+	if w.WithdrawAll {
+		removed := s.table.WithdrawAllFromPeer(w.PeerAddr)
+		s.log.Info("withdrew all routes from BMP peer", "peer", w.PeerAddr.String(), "routes", removed)
+		return
+	}
+	// Capture route before removal so the event carries prefix/posture context.
+	var withdrawn *types.Route
+	if s.eventEngine != nil {
+		key := types.RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: types.AdjRIBInPre}
+		withdrawn = s.table.Get(key)
+	}
+	s.table.Withdraw(w.PeerAddr, w.Prefix)
+	if s.eventEngine != nil && withdrawn != nil {
+		s.eventEngine.Emit(events.Event{
+			ID:         events.NewID(),
+			Timestamp:  time.Now(),
+			Type:       events.EventTypeRouteWithdraw,
+			Route:      withdrawn,
+			OldPosture: withdrawn.SecurityPosture,
+			RouterID:   w.PeerAddr.String(),
+		})
 	}
 }
 

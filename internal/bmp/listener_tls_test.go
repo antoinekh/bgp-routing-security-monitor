@@ -77,13 +77,12 @@ func TestBMPListenerTLS(t *testing.T) {
 		t.Fatalf("BuildTLSConfig: %v", err)
 	}
 
-	routeCh := make(chan types.Route, 1)
-	withdrawCh := make(chan types.Withdrawal, 1)
+	ingestCh := make(chan types.IngestEvent, 1)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Listen on a random localhost port. We bypass Listener.Start so we don't
 	// have to drive the full accept loop — we only need to verify TLS handshake.
-	listener := NewListener("127.0.0.1:0", tlsCfg, routeCh, withdrawCh, log)
+	listener := NewListener("127.0.0.1:0", tlsCfg, ingestCh, log)
 	ln, err := tls.Listen("tcp", listener.addr, listener.tlsCfg)
 	if err != nil {
 		t.Fatalf("tls.Listen: %v", err)

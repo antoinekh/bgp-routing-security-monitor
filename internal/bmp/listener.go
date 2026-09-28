@@ -21,29 +21,48 @@ import (
 
 // Listener accepts BMP connections from routers and processes messages.
 type Listener struct {
-	addr       string
-	tlsCfg     *tls.Config // nil = plain TCP
-	log        *slog.Logger
-	routeCh    chan<- types.Route
-	withdrawCh chan<- types.Withdrawal
-	peerMu     sync.RWMutex
-	peers      map[PeerKey]*Peer
-	routerMu   sync.RWMutex
-	routers    map[netip.Addr]string
-	listener   net.Listener
+	addr     string
+	tlsCfg   *tls.Config // nil = plain TCP
+	log      *slog.Logger
+	ingestCh chan<- types.IngestEvent
+	peerMu   sync.RWMutex
+	peers    map[PeerKey]*Peer
+	routerMu sync.RWMutex
+	routers  map[netip.Addr]string
+	listener net.Listener
 }
 
-// NewListener creates a BMP listener that sends parsed routes to routeCh.
+// NewListener creates a BMP listener that sends parsed routes and withdrawals,
+// in arrival order, to ingestCh.
 // If tlsCfg is non-nil, the listener accepts TLS connections; otherwise plain TCP.
-func NewListener(addr string, tlsCfg *tls.Config, routeCh chan<- types.Route, withdrawCh chan<- types.Withdrawal, log *slog.Logger) *Listener {
+func NewListener(addr string, tlsCfg *tls.Config, ingestCh chan<- types.IngestEvent, log *slog.Logger) *Listener {
 	return &Listener{
-		addr:       addr,
-		tlsCfg:     tlsCfg,
-		log:        log.With("subsystem", "bmp"),
-		routeCh:    routeCh,
-		withdrawCh: withdrawCh,
-		peers:      make(map[PeerKey]*Peer),
-		routers:    make(map[netip.Addr]string),
+		addr:     addr,
+		tlsCfg:   tlsCfg,
+		log:      log.With("subsystem", "bmp"),
+		ingestCh: ingestCh,
+		peers:    make(map[PeerKey]*Peer),
+		routers:  make(map[netip.Addr]string),
+	}
+}
+
+// emit sends ev on the ingest stream, blocking until there is room. It
+// returns false only if ctx is cancelled first.
+//
+// Nothing on this stream may be dropped: a lost withdraw-all leaves every
+// route of a downed peer in the Route Table for good. A full channel instead
+// applies backpressure to this router's session.
+func (l *Listener) emit(ctx context.Context, ev types.IngestEvent) bool {
+	// select picks randomly among ready cases; check first so nothing new is
+	// queued once shutdown has begun.
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case l.ingestCh <- ev:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -168,12 +187,11 @@ func (l *Listener) handleSession(ctx context.Context, conn net.Conn) {
 		l.peerMu.RUnlock()
 
 		for _, peerAddr := range peerAddrs {
-			select {
-			case l.withdrawCh <- types.Withdrawal{
+			if !l.emit(ctx, types.IngestEvent{Withdrawal: &types.Withdrawal{
 				PeerAddr:    peerAddr,
 				WithdrawAll: true,
-			}:
-			default:
+			}}) {
+				break // shutting down
 			}
 		}
 
@@ -307,19 +325,19 @@ func (l *Listener) processMessage(
 		if p, ok := l.peers[key]; ok {
 			p.State = "down"
 			p.LastMsg = time.Now()
+			// The withdraw-all below removes every route this peer held.
+			p.RouteCount = 0
 		}
 		l.peerMu.Unlock()
 		metrics.BMPPeerState.WithLabelValues(sysName, pd.PerPeer.PeerAddr.String()).Set(0)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_down").Inc()
 		log.Info("BMP peer down", "peer", pd.PerPeer.PeerAddr, "reason", pd.Reason)
-		// Signal withdrawal of all routes from this peer
-		select {
-		case l.withdrawCh <- types.Withdrawal{
+		// Implicitly withdraw everything the peer advertised, as a real BGP
+		// session going down would.
+		l.emit(ctx, types.IngestEvent{Withdrawal: &types.Withdrawal{
 			PeerAddr:    pd.PerPeer.PeerAddr,
 			WithdrawAll: true,
-		}:
-		default:
-		}
+		}})
 
 	case MsgTypeRouteMonitoring:
 		l.routerMu.RLock()
@@ -340,17 +358,13 @@ func (l *Listener) processMessage(
 			log.Debug("failed to parse BGP UPDATE", "error", err)
 			return
 		}
-		for _, r := range routes {
-			select {
-			case l.routeCh <- r:
-			case <-ctx.Done():
+		for i := range routes {
+			if !l.emit(ctx, types.IngestEvent{Route: &routes[i]}) {
 				return
 			}
 		}
-		for _, w := range withdrawals {
-			select {
-			case l.withdrawCh <- w:
-			case <-ctx.Done():
+		for i := range withdrawals {
+			if !l.emit(ctx, types.IngestEvent{Withdrawal: &withdrawals[i]}) {
 				return
 			}
 		}
