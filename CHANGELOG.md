@@ -18,6 +18,9 @@ All notable changes to RAVEN are recorded here.
 - `lab/04-rtr-anomaly.sh` Containerlab demo scenario for live RTR
   anomaly detection (bulk SLURM ROA injection, serial-based confirmation).
 
+### Changed
+- `raven routes` no longer decodes the AS path of each route, which it did not show.
+
 ### Fixed
 - RTR anomaly detector no longer evaluates or contaminates its baseline
   with full (non-incremental) RTR syncs, which previously produced a

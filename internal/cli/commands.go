@@ -217,13 +217,12 @@ var routesCmd = &cobra.Command{
 		}
 
 		var routes []struct {
-			Prefix    string   `json:"prefix"`
-			PeerAddr  string   `json:"peer"`
-			OriginASN uint32   `json:"origin_asn"`
-			ASPath    []uint32 `json:"as_path"`
-			ROV       string   `json:"rov"`
-			ASPA      string   `json:"aspa"`
-			Posture   string   `json:"posture"`
+			Prefix    string `json:"prefix"`
+			PeerAddr  string `json:"peer"`
+			OriginASN uint32 `json:"origin_asn"`
+			ROV       string `json:"rov"`
+			ASPA      string `json:"aspa"`
+			Posture   string `json:"posture"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&routes); err != nil {
 			return err
@@ -237,14 +236,12 @@ var routesCmd = &cobra.Command{
 		pw := prefixColWidth(prefixes)
 		fmt.Fprintf(tw, "%-*s\tPEER\tORIGIN\tROV\tASPA\tPOSTURE\n", pw, "PREFIX")
 		for _, r := range routes {
-			asPathStr := formatASPath(r.ASPath)
 			origin := fmt.Sprintf("AS%d", r.OriginASN)
 			if r.OriginASN == 0 {
 				origin = "-"
 			}
 			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s\n",
 				pw, r.Prefix, r.PeerAddr, origin, r.ROV, r.ASPA, r.Posture)
-			_ = asPathStr
 		}
 		tw.Flush()
 		return nil
@@ -400,17 +397,6 @@ func apiPost(addr string, path string) (*http.Response, error) {
 		return nil, fmt.Errorf("connect to daemon at %s: %w\n  is 'raven serve' running?", addr, err)
 	}
 	return resp, nil
-}
-
-func formatASPath(path []uint32) string {
-	if len(path) == 0 {
-		return "-"
-	}
-	parts := make([]string, len(path))
-	for i, asn := range path {
-		parts[i] = fmt.Sprintf("%d", asn)
-	}
-	return strings.Join(parts, " ")
 }
 
 func init() {
