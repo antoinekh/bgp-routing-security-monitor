@@ -552,41 +552,28 @@ func (s *Server) ingestWithdrawal(w types.Withdrawal) {
 
 // updateRouteMetrics refreshes Prometheus gauges for route counts.
 func (s *Server) updateRouteMetrics() {
-	routes := s.table.AllPrePolicy()
-	metrics.RouteTableSize.Set(float64(len(routes)))
-
-	// Explicitly zero all known posture/AFI combinations before repopulating.
+	// Explicitly zero all known RIB/posture/AFI combinations before repopulating.
 	// Using Reset() removes the series entirely, which causes Grafana
 	// lastNotNull panels to show stale values. Set(0) keeps the series at 0.
-	for _, posture := range []string{
-		"secured", "origin-only", "path-suspect", "path-only",
-		"unverified", "origin-invalid",
-	} {
-		for _, afi := range []string{"ipv4", "ipv6"} {
-			metrics.RoutesTotal.WithLabelValues(posture, afi).Set(0)
+	for _, rib := range types.RIBTypes {
+		metrics.RouteTableSize.WithLabelValues(rib.String()).Set(0)
+		for _, posture := range []string{
+			"secured", "origin-only", "path-suspect", "path-only",
+			"unverified", "origin-invalid",
+		} {
+			for _, afi := range []string{"ipv4", "ipv6"} {
+				metrics.RoutesTotal.WithLabelValues(posture, afi, rib.String()).Set(0)
+			}
 		}
 	}
 
-	// Count by posture and AFI
-	counts := make(map[string]map[string]int)
-	for _, r := range routes {
-		posture := string(r.SecurityPosture)
-		if posture == "" {
-			posture = "unverified"
-		}
-		afi := "ipv4"
-		if r.Prefix.Addr().Is6() {
-			afi = "ipv6"
-		}
-		if counts[posture] == nil {
-			counts[posture] = make(map[string]int)
-		}
-		counts[posture][afi]++
+	tableSize := make(map[string]int64)
+	for _, c := range s.RouteCounts() {
+		metrics.RoutesTotal.WithLabelValues(c.Posture, c.AFI, c.RIB).Set(float64(c.Count))
+		tableSize[c.RIB] += c.Count
 	}
-	for posture, afis := range counts {
-		for afi, n := range afis {
-			metrics.RoutesTotal.WithLabelValues(posture, afi).Set(float64(n))
-		}
+	for rib, n := range tableSize {
+		metrics.RouteTableSize.WithLabelValues(rib).Set(float64(n))
 	}
 }
 

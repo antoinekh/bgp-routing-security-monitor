@@ -115,11 +115,12 @@ func TestPeerDownRemovesPeerRoutes(t *testing.T) {
 	drain(t, s)
 
 	s.updateRouteMetrics()
-	if got := gaugeValue(t, "raven_route_table_size", nil); got != n+1 {
+	prePolicy := map[string]string{"rib": "pre-policy"}
+	if got := gaugeValue(t, "raven_route_table_size", prePolicy); got != n+1 {
 		t.Fatalf("raven_route_table_size = %v before peer down, want %d", got, n+1)
 	}
-	originOnly := map[string]string{"posture": "origin-only", "afi": "ipv4"}
-	originInvalid := map[string]string{"posture": "origin-invalid", "afi": "ipv4"}
+	originOnly := map[string]string{"posture": "origin-only", "afi": "ipv4", "rib": "pre-policy"}
+	originInvalid := map[string]string{"posture": "origin-invalid", "afi": "ipv4", "rib": "pre-policy"}
 	if got := gaugeValue(t, "raven_routes_total", originOnly); got != 30 {
 		t.Fatalf("raven_routes_total{origin-only} = %v before peer down, want 30", got)
 	}
@@ -134,7 +135,7 @@ func TestPeerDownRemovesPeerRoutes(t *testing.T) {
 		t.Errorf("table count after peer down = %d, want 1 (the other peer's route)", got)
 	}
 	s.updateRouteMetrics()
-	if got := gaugeValue(t, "raven_route_table_size", nil); got != 1 {
+	if got := gaugeValue(t, "raven_route_table_size", prePolicy); got != 1 {
 		t.Errorf("raven_route_table_size = %v after peer down, want 1", got)
 	}
 	if got := gaugeValue(t, "raven_routes_total", originOnly); got != 0 {
@@ -247,6 +248,29 @@ func TestWithdrawalEventCarriesNonPrePolicyRoute(t *testing.T) {
 			return
 		case <-deadline:
 			t.Fatal("no route_withdraw event for a Loc-RIB withdrawal")
+		}
+	}
+}
+
+// Each RIB has its own route count series, so a route that a router both
+// received and selected is counted once in each.
+func TestRouteMetricsAreSplitByRIB(t *testing.T) {
+	s := newTestServer(t)
+	peer := netip.MustParseAddr("192.0.2.1")
+	pre := testRoute(peer, 0, types.PostureOriginOnly)
+	loc := testRoute(peer, 0, types.PostureOriginOnly)
+	loc.RIBType = types.LocRIB
+	s.table.Insert(pre)
+	s.table.Insert(loc)
+	s.updateRouteMetrics()
+
+	for rib, want := range map[string]float64{"pre-policy": 1, "post-policy": 0, "loc-rib": 1} {
+		if got := gaugeValue(t, "raven_route_table_size", map[string]string{"rib": rib}); got != want {
+			t.Errorf("raven_route_table_size{rib=%q} = %v, want %v", rib, got, want)
+		}
+		labels := map[string]string{"posture": "origin-only", "afi": "ipv4", "rib": rib}
+		if got := gaugeValue(t, "raven_routes_total", labels); got != want {
+			t.Errorf("raven_routes_total{origin-only,rib=%q} = %v, want %v", rib, got, want)
 		}
 	}
 }

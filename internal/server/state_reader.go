@@ -2,16 +2,21 @@ package server
 
 import (
 	ravenotel "github.com/nokia/bgp-routing-security-monitor/internal/otel"
+	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
 // Verify at compile time that *Server implements ravenotel.StateReader.
 var _ ravenotel.StateReader = (*Server)(nil)
 
-// RouteCountsByPosture returns the current pre-policy route count broken down
-// by security posture and address family.
-func (s *Server) RouteCountsByPosture() map[string]map[string]int64 {
-	routes := s.table.AllPrePolicy()
-	result := make(map[string]map[string]int64)
+// RouteCounts returns the current route count broken down by RIB, security
+// posture and address family.
+func (s *Server) RouteCounts() []ravenotel.RouteCount {
+	return countRoutes(s.table.All())
+}
+
+func countRoutes(routes []*types.Route) []ravenotel.RouteCount {
+	type countKey struct{ rib, posture, afi string }
+	counts := make(map[countKey]int64)
 	for _, r := range routes {
 		posture := string(r.SecurityPosture)
 		if posture == "" {
@@ -21,10 +26,11 @@ func (s *Server) RouteCountsByPosture() map[string]map[string]int64 {
 		if r.Prefix.Addr().Is6() {
 			afi = "ipv6"
 		}
-		if result[posture] == nil {
-			result[posture] = make(map[string]int64)
-		}
-		result[posture][afi]++
+		counts[countKey{r.RIBType.String(), posture, afi}]++
+	}
+	result := make([]ravenotel.RouteCount, 0, len(counts))
+	for k, n := range counts {
+		result = append(result, ravenotel.RouteCount{RIB: k.rib, Posture: k.posture, AFI: k.afi, Count: n})
 	}
 	return result
 }
