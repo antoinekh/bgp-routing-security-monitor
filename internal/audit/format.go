@@ -43,7 +43,7 @@ func FormatTable(r *RouterAuditReport) string {
 		fmt.Fprintln(tw, "  PEER\tRD\tASN\tROUTES\tROV\tASPA")
 		for _, p := range r.Peers {
 			fmt.Fprintf(tw, "  %s\t%s\tAS%d\t%d\t%.0f%%\t%.0f%%\n",
-				p.PeerAddr, rdOrDash(p.PeerDistinguisher), p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
+				p.PeerAddr, p.PeerDistinguisher, p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
 		}
 		tw.Flush()
 		fmt.Fprintln(&buf)
@@ -122,7 +122,7 @@ func FormatMarkdown(r *RouterAuditReport) string {
 		fmt.Fprintln(&buf, "|---|---|---|---|---|---|")
 		for _, p := range r.Peers {
 			fmt.Fprintf(&buf, "| %s | %s | AS%d | %d | %.0f%% | %.0f%% |\n",
-				p.PeerAddr, rdOrDash(p.PeerDistinguisher), p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
+				p.PeerAddr, p.PeerDistinguisher, p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
 		}
 		fmt.Fprintln(&buf)
 	}
@@ -153,11 +153,4 @@ func FormatMarkdown(r *RouterAuditReport) string {
 	}
 
 	return buf.String()
-}
-
-func rdOrDash(rd string) string {
-	if rd == "" {
-		return "-"
-	}
-	return rd
 }

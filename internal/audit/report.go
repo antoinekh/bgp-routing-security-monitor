@@ -19,7 +19,7 @@ type RouterAuditReport struct {
 // PeerAuditReport summarises a single BGP peer's contribution to the router's route table.
 type PeerAuditReport struct {
 	PeerAddr          string         `json:"peer_addr"`
-	PeerDistinguisher string         `json:"peer_distinguisher,omitempty"`
+	PeerDistinguisher string         `json:"peer_distinguisher"`
 	PeerASN           uint32         `json:"peer_asn"`
 	TotalRoutes       int            `json:"total_routes"`
 	PostureSummary    map[string]int `json:"posture_summary"`

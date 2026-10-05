@@ -33,6 +33,7 @@ All notable changes to RAVEN are recorded here.
 - `raven status` shows the RD and the type of each BMP peer, as `raven peers` does.
 - The API, the CLI, the metric labels and the events show a Peer Distinguisher as a route distinguisher: `64500:100`, `192.0.2.1:7`, and `4200000000L:9` for a 4-byte AS, so RD types 0 and 2 stay apart.
 - `lab/README-phase3.md` describes the event rule cooldown per route (prefix, peer, Peer Distinguisher and RIB).
+- The audit report always has the `peer_distinguisher` field of each peer, empty for a global peer, as the routes and peers API does.
 
 ### Fixed
 - A BGP withdrawal of a route that is not pre-policy now sends its `route_withdraw` event with the withdrawn route.
