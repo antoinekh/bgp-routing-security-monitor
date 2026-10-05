@@ -528,8 +528,12 @@ func (s *Server) ingestRoute(r types.Route, count uint64) {
 // that went down, from the Route Table.
 func (s *Server) ingestWithdrawal(w types.Withdrawal) {
 	if w.WithdrawAll {
-		removed := s.table.WithdrawAllFromPeer(w.PeerAddr, w.RIBs...)
-		s.log.Info("withdrew all routes from BMP peer", "peer", w.PeerAddr.String(), "routes", removed)
+		removed := s.table.WithdrawAllFromPeer(w.PeerAddr, w.PeerDistinguisher, w.RIBs...)
+		s.log.Info("withdrew all routes from BMP peer",
+			"peer", w.PeerAddr.String(),
+			"distinguisher", w.PeerDistinguisher.String(),
+			"routes", removed,
+		)
 		return
 	}
 	// Capture route before removal so the event carries prefix/posture context.

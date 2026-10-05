@@ -117,7 +117,7 @@ func TestWithdrawAllFromPeer(t *testing.T) {
 		t.Fatalf("count = %d, want 3", tbl.Count())
 	}
 
-	removed := tbl.WithdrawAllFromPeer(netip.MustParseAddr("192.0.2.1"), types.AdjRIBInPre)
+	removed := tbl.WithdrawAllFromPeer(netip.MustParseAddr("192.0.2.1"), types.PeerDistinguisher{}, types.AdjRIBInPre)
 	if removed != 2 {
 		t.Errorf("removed = %d, want 2", removed)
 	}
@@ -159,7 +159,7 @@ func TestWithdrawAllFromPeerCleansAllIndexes(t *testing.T) {
 		t.Fatalf("count before peer down = %d, want %d", got, 2*n+2)
 	}
 
-	if removed := tbl.WithdrawAllFromPeer(down, types.AdjRIBInPre, types.AdjRIBInPost); removed != 2*n {
+	if removed := tbl.WithdrawAllFromPeer(down, types.PeerDistinguisher{}, types.AdjRIBInPre, types.AdjRIBInPost); removed != 2*n {
 		t.Errorf("removed = %d, want %d", removed, 2*n)
 	}
 
@@ -298,7 +298,7 @@ func TestWithdrawIsScopedToRIBType(t *testing.T) {
 	}
 
 	tbl = newTable()
-	if removed := tbl.WithdrawAllFromPeer(peer, types.AdjRIBInPre, types.AdjRIBInPost); removed != 2 {
+	if removed := tbl.WithdrawAllFromPeer(peer, types.PeerDistinguisher{}, types.AdjRIBInPre, types.AdjRIBInPost); removed != 2 {
 		t.Errorf("Adj-RIB-In withdraw-all removed %d routes, want 2", removed)
 	}
 	if !has(tbl, types.LocRIB) {
@@ -306,10 +306,35 @@ func TestWithdrawIsScopedToRIBType(t *testing.T) {
 	}
 
 	tbl = newTable()
-	if removed := tbl.WithdrawAllFromPeer(peer, types.LocRIB); removed != 1 {
+	if removed := tbl.WithdrawAllFromPeer(peer, types.PeerDistinguisher{}, types.LocRIB); removed != 1 {
 		t.Errorf("Loc-RIB withdraw-all removed %d routes, want 1", removed)
 	}
 	if !has(tbl, types.AdjRIBInPre) || !has(tbl, types.AdjRIBInPost) {
 		t.Error("a Loc-RIB withdraw-all removed an Adj-RIB-In route")
+	}
+}
+
+// VRF Loc-RIBs of one router share its BGP ID, so routes and withdrawals are
+// kept apart by the Peer Distinguisher.
+func TestRoutesAreKeyedByDistinguisher(t *testing.T) {
+	peer := netip.MustParseAddr("192.0.2.55")
+	prefix := netip.MustParsePrefix("1.0.0.0/24")
+	vrf := types.PeerDistinguisherFromUint64(64500<<32 | 100)
+	tbl := New()
+	for _, d := range []types.PeerDistinguisher{{}, vrf} {
+		r := makeRoute(peer.String(), prefix.String(), []uint32{64510})
+		r.RIBType = types.LocRIB
+		r.PeerDistinguisher = d
+		tbl.Insert(r)
+	}
+	if got := tbl.Count(); got != 2 {
+		t.Fatalf("count = %d, want one route per instance", got)
+	}
+
+	if removed := tbl.WithdrawAllFromPeer(peer, vrf, types.LocRIB); removed != 1 {
+		t.Errorf("VRF withdraw-all removed %d routes, want 1", removed)
+	}
+	if tbl.Get(types.RouteKey{PeerAddr: peer, Prefix: prefix, RIBType: types.LocRIB}) == nil {
+		t.Error("the VRF withdraw-all removed the global Loc-RIB route")
 	}
 }

@@ -286,21 +286,23 @@ func (l *Listener) processMessage(
 		}
 		l.peerMu.Lock()
 		l.peers[key] = &Peer{
-			Addr:     pu.PerPeer.PeerAddr,
-			PeerType: pu.PerPeer.PeerType,
-			ASN:      pu.PerPeer.PeerASN,
-			LocalASN: pu.LocalASN,
-			RouterID: pu.PerPeer.PeerBGPID,
-			SysName:  sysName,
-			State:    "up",
-			UpSince:  time.Now(),
-			LastMsg:  time.Now(),
+			Addr:          pu.PerPeer.PeerAddr,
+			Distinguisher: pu.PerPeer.PeerDistinguisher,
+			PeerType:      pu.PerPeer.PeerType,
+			ASN:           pu.PerPeer.PeerASN,
+			LocalASN:      pu.LocalASN,
+			RouterID:      pu.PerPeer.PeerBGPID,
+			SysName:       sysName,
+			State:         "up",
+			UpSince:       time.Now(),
+			LastMsg:       time.Now(),
 		}
 		l.peerMu.Unlock()
 		setPeerState(sysName, pu.PerPeer, 1)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_up").Inc()
 		log.Info("BMP peer up",
 			"peer", pu.PerPeer.PeerAddr,
+			"distinguisher", pu.PerPeer.PeerDistinguisher.String(),
 			"type", PeerTypeName(pu.PerPeer.PeerType),
 			"asn", pu.PerPeer.PeerASN,
 			"local_asn", pu.LocalASN,
@@ -405,26 +407,28 @@ func (l *Listener) registerLocRIBPeer(log *slog.Logger, routerAddr netip.Addr, s
 	}
 	now := time.Now()
 	l.peers[key] = &Peer{
-		Addr:     pph.PeerAddr,
-		PeerType: pph.PeerType,
-		ASN:      pph.PeerASN,
-		LocalASN: pph.PeerASN,
-		RouterID: pph.PeerBGPID,
-		SysName:  sysName,
-		State:    "up",
-		UpSince:  now,
-		LastMsg:  now,
+		Addr:          pph.PeerAddr,
+		Distinguisher: pph.PeerDistinguisher,
+		PeerType:      pph.PeerType,
+		ASN:           pph.PeerASN,
+		LocalASN:      pph.PeerASN,
+		RouterID:      pph.PeerBGPID,
+		SysName:       sysName,
+		State:         "up",
+		UpSince:       now,
+		LastMsg:       now,
 	}
 	l.peerMu.Unlock()
 	setPeerState(sysName, pph, 1)
 	log.Info("BMP Loc-RIB peer registered without Peer Up",
 		"peer", pph.PeerAddr,
+		"distinguisher", pph.PeerDistinguisher.String(),
 		"asn", pph.PeerASN,
 	)
 }
 
 func setPeerState(sysName string, pph BMPPerPeerHeader, state float64) {
-	metrics.BMPPeerState.WithLabelValues(sysName, pph.PeerAddr.String()).Set(state)
+	metrics.BMPPeerState.WithLabelValues(sysName, pph.PeerAddr.String(), pph.PeerDistinguisher.String()).Set(state)
 }
 
 // withdrawAll builds the withdrawal of every route a BMP peer fed, limited
@@ -435,9 +439,10 @@ func withdrawAll(key PeerKey, peerType uint8) types.Withdrawal {
 		ribs = []types.RIBType{types.LocRIB}
 	}
 	return types.Withdrawal{
-		PeerAddr:    key.PeerAddr,
-		WithdrawAll: true,
-		RIBs:        ribs,
+		PeerAddr:          key.PeerAddr,
+		PeerDistinguisher: key.PeerDistinguisher,
+		WithdrawAll:       true,
+		RIBs:              ribs,
 	}
 }
 
@@ -512,9 +517,10 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, localASN uint32) ([]types
 		v4Withdrawals := parseNLRI(data[2:2+int(withdrawnLen)], 4)
 		for _, p := range v4Withdrawals {
 			withdrawals = append(withdrawals, types.Withdrawal{
-				PeerAddr: pph.PeerAddr,
-				Prefix:   p,
-				RIBType:  ribType,
+				PeerAddr:          pph.PeerAddr,
+				PeerDistinguisher: pph.PeerDistinguisher,
+				Prefix:            p,
+				RIBType:           ribType,
 			})
 		}
 	}
@@ -557,9 +563,10 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, localASN uint32) ([]types
 		prefixes := parseMPUnreachNLRI(attrs.mpUnreach)
 		for _, p := range prefixes {
 			withdrawals = append(withdrawals, types.Withdrawal{
-				PeerAddr: pph.PeerAddr,
-				Prefix:   p,
-				RIBType:  ribType,
+				PeerAddr:          pph.PeerAddr,
+				PeerDistinguisher: pph.PeerDistinguisher,
+				Prefix:            p,
+				RIBType:           ribType,
 			})
 		}
 	}
@@ -570,19 +577,20 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, localASN uint32) ([]types
 // makeRoute constructs a types.Route from a prefix, next hop, and extracted path attributes.
 func makeRoute(prefix netip.Prefix, nextHop netip.Addr, pph BMPPerPeerHeader, attrs pathAttrs, ribType types.RIBType, localASN uint32) types.Route {
 	return types.Route{
-		Timestamp:        pph.Timestamp,
-		PeerAddr:         pph.PeerAddr,
-		PeerASN:          pph.PeerASN,
-		LocalASN:         localASN,
-		RouterID:         pph.PeerBGPID,
-		Prefix:           prefix,
-		ASPath:           attrs.asPath,
-		ASPathRaw:        attrs.asPathRaw,
-		Origin:           types.OriginType(attrs.origin),
-		NextHop:          nextHop,
-		Communities:      attrs.communities,
-		LargeCommunities: attrs.largeCommunities,
-		RIBType:          ribType,
+		Timestamp:         pph.Timestamp,
+		PeerAddr:          pph.PeerAddr,
+		PeerDistinguisher: pph.PeerDistinguisher,
+		PeerASN:           pph.PeerASN,
+		LocalASN:          localASN,
+		RouterID:          pph.PeerBGPID,
+		Prefix:            prefix,
+		ASPath:            attrs.asPath,
+		ASPathRaw:         attrs.asPathRaw,
+		Origin:            types.OriginType(attrs.origin),
+		NextHop:           nextHop,
+		Communities:       attrs.communities,
+		LargeCommunities:  attrs.largeCommunities,
+		RIBType:           ribType,
 	}
 }
 

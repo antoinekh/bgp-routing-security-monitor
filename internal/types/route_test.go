@@ -51,3 +51,21 @@ func TestParseRIBType(t *testing.T) {
 		t.Error("ParseRIBType accepted an unknown RIB type")
 	}
 }
+
+func TestPeerDistinguisherString(t *testing.T) {
+	for v, want := range map[uint64]string{
+		0:                          "",
+		64500<<32 | 100:            "64500:100",
+		1<<48 | 0xc0000201<<16 | 7: "192.0.2.1:7",
+		2<<48 | 4200000000<<16 | 9: "4200000000:9",
+		3<<48 | 1:                  "0x0003000000000001",
+	} {
+		d := PeerDistinguisherFromUint64(v)
+		if got := d.String(); got != want {
+			t.Errorf("PeerDistinguisher(%#x).String() = %q, want %q", v, got, want)
+		}
+		if d.Uint64() != v {
+			t.Errorf("PeerDistinguisher(%#x).Uint64() = %#x", v, d.Uint64())
+		}
+	}
+}

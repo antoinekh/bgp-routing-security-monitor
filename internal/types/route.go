@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net/netip"
 	"time"
@@ -12,9 +13,10 @@ import (
 
 type Route struct {
 	// Populated by BMP Ingest
-	Timestamp time.Time
-	PeerAddr  netip.Addr
-	PeerASN   uint32
+	Timestamp         time.Time
+	PeerAddr          netip.Addr
+	PeerDistinguisher PeerDistinguisher
+	PeerASN           uint32
 	// LocalASN is the monitoring router's own AS on the BMP session this
 	// route was learned over (from the Peer Up message's Sent OPEN). Zero
 	// if unknown. Used by ASPA validation for the path[0]-vs-local-AS hop.
@@ -44,9 +46,10 @@ type Route struct {
 
 // Withdrawal represents a BGP route withdrawal received via BMP.
 type Withdrawal struct {
-	PeerAddr netip.Addr
-	Prefix   netip.Prefix
-	RIBType  RIBType
+	PeerAddr          netip.Addr
+	PeerDistinguisher PeerDistinguisher
+	Prefix            netip.Prefix
+	RIBType           RIBType
 	// WithdrawAll removes every route of the peer in RIBs, and Prefix and
 	// RIBType are then unused.
 	WithdrawAll bool
@@ -55,7 +58,7 @@ type Withdrawal struct {
 
 // Key returns the Route Table key of the one route this withdrawal removes.
 func (w *Withdrawal) Key() RouteKey {
-	return RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: w.RIBType}
+	return RouteKey{PeerAddr: w.PeerAddr, PeerDistinguisher: w.PeerDistinguisher, Prefix: w.Prefix, RIBType: w.RIBType}
 }
 
 // IngestEvent is one item on the BMP ingest stream. Exactly one of Route or
@@ -80,14 +83,48 @@ func (r *Route) OriginASN() uint32 {
 
 // Key returns the Route Table key of the route.
 func (r *Route) Key() RouteKey {
-	return RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
+	return RouteKey{PeerAddr: r.PeerAddr, PeerDistinguisher: r.PeerDistinguisher, Prefix: r.Prefix, RIBType: r.RIBType}
 }
 
 // RouteKey uniquely identifies a route in the Route Table.
 type RouteKey struct {
-	PeerAddr netip.Addr
-	Prefix   netip.Prefix
-	RIBType  RIBType
+	PeerAddr          netip.Addr
+	PeerDistinguisher PeerDistinguisher
+	Prefix            netip.Prefix
+	RIBType           RIBType
+}
+
+// PeerDistinguisher is the BMP Peer Distinguisher (RFC 7854 §4.2): the RD
+// or instance ID of a non-global peer, zero for a global one.
+type PeerDistinguisher [8]byte
+
+// PeerDistinguisherFromUint64 builds a distinguisher from its big-endian integer form.
+func PeerDistinguisherFromUint64(v uint64) PeerDistinguisher {
+	var d PeerDistinguisher
+	binary.BigEndian.PutUint64(d[:], v)
+	return d
+}
+
+func (d PeerDistinguisher) Uint64() uint64 {
+	return binary.BigEndian.Uint64(d[:])
+}
+
+// String formats the distinguisher as a route distinguisher (RFC 4364 §4.2),
+// or returns "" for a global peer.
+func (d PeerDistinguisher) String() string {
+	if d == (PeerDistinguisher{}) {
+		return ""
+	}
+	switch binary.BigEndian.Uint16(d[0:2]) {
+	case 0:
+		return fmt.Sprintf("%d:%d", binary.BigEndian.Uint16(d[2:4]), binary.BigEndian.Uint32(d[4:8]))
+	case 1:
+		return fmt.Sprintf("%s:%d", netip.AddrFrom4([4]byte(d[2:6])), binary.BigEndian.Uint16(d[6:8]))
+	case 2:
+		return fmt.Sprintf("%d:%d", binary.BigEndian.Uint32(d[2:6]), binary.BigEndian.Uint16(d[6:8]))
+	default:
+		return fmt.Sprintf("0x%016x", d.Uint64())
+	}
 }
 
 // ─── AS_PATH types ───

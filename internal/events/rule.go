@@ -92,5 +92,5 @@ func cooldownKey(event Event) string {
 		return string(event.Type)
 	}
 	k := event.Route.Key()
-	return fmt.Sprintf("%s|%s|%s", k.Prefix, k.PeerAddr, k.RIBType)
+	return fmt.Sprintf("%s|%s|%s|%s", k.Prefix, k.PeerAddr, k.PeerDistinguisher, k.RIBType)
 }

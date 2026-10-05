@@ -19,30 +19,32 @@ import (
 
 // RouteResponse is a single route in API output.
 type RouteResponse struct {
-	Prefix    string   `json:"prefix"`
-	PeerAddr  string   `json:"peer"`
-	RIB       string   `json:"rib"`
-	PeerASN   uint32   `json:"peer_asn"`
-	OriginASN uint32   `json:"origin_asn"`
-	ASPath    []uint32 `json:"as_path"`
-	NextHop   string   `json:"next_hop"`
-	ROV       string   `json:"rov"`
-	ROVReason string   `json:"rov_reason,omitempty"`
-	ASPA      string   `json:"aspa"`
-	Posture   string   `json:"posture"`
-	Timestamp string   `json:"timestamp"`
+	Prefix            string   `json:"prefix"`
+	PeerAddr          string   `json:"peer"`
+	PeerDistinguisher string   `json:"peer_distinguisher"`
+	RIB               string   `json:"rib"`
+	PeerASN           uint32   `json:"peer_asn"`
+	OriginASN         uint32   `json:"origin_asn"`
+	ASPath            []uint32 `json:"as_path"`
+	NextHop           string   `json:"next_hop"`
+	ROV               string   `json:"rov"`
+	ROVReason         string   `json:"rov_reason,omitempty"`
+	ASPA              string   `json:"aspa"`
+	Posture           string   `json:"posture"`
+	Timestamp         string   `json:"timestamp"`
 }
 
 // PeerResponse is a BMP peer in API output.
 type PeerResponse struct {
-	Addr       string `json:"addr"`
-	Type       string `json:"type"`
-	ASN        uint32 `json:"asn"`
-	RouterID   string `json:"router_id"`
-	State      string `json:"state"`
-	RouteCount uint64 `json:"route_count"`
-	UpSince    string `json:"up_since"`
-	LastMsg    string `json:"last_msg"`
+	Addr          string `json:"addr"`
+	Distinguisher string `json:"distinguisher"`
+	Type          string `json:"type"`
+	ASN           uint32 `json:"asn"`
+	RouterID      string `json:"router_id"`
+	State         string `json:"state"`
+	RouteCount    uint64 `json:"route_count"`
+	UpSince       string `json:"up_since"`
+	LastMsg       string `json:"last_msg"`
 }
 
 // StatusResponse is the system health API output.
@@ -268,30 +270,32 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 func peerToResponse(p bmp.Peer) PeerResponse {
 	return PeerResponse{
-		Addr:       p.Addr.String(),
-		Type:       bmp.PeerTypeName(p.PeerType),
-		ASN:        p.ASN,
-		RouterID:   p.RouterID.String(),
-		State:      p.State,
-		RouteCount: p.RouteCount,
-		UpSince:    p.UpSince.Format(time.RFC3339),
-		LastMsg:    p.LastMsg.Format(time.RFC3339),
+		Addr:          p.Addr.String(),
+		Distinguisher: p.Distinguisher.String(),
+		Type:          bmp.PeerTypeName(p.PeerType),
+		ASN:           p.ASN,
+		RouterID:      p.RouterID.String(),
+		State:         p.State,
+		RouteCount:    p.RouteCount,
+		UpSince:       p.UpSince.Format(time.RFC3339),
+		LastMsg:       p.LastMsg.Format(time.RFC3339),
 	}
 }
 
 func routeToResponse(r *types.Route) RouteResponse {
 	return RouteResponse{
-		Prefix:    r.Prefix.String(),
-		PeerAddr:  r.PeerAddr.String(),
-		RIB:       r.RIBType.String(),
-		PeerASN:   r.PeerASN,
-		OriginASN: r.OriginASN(),
-		ASPath:    r.ASPath,
-		NextHop:   r.NextHop.String(),
-		ROV:       r.ROV.State.String(),
-		ROVReason: r.ROV.Reason,
-		ASPA:      r.ASPA.State.String(),
-		Posture:   string(r.SecurityPosture),
+		Prefix:            r.Prefix.String(),
+		PeerAddr:          r.PeerAddr.String(),
+		PeerDistinguisher: r.PeerDistinguisher.String(),
+		RIB:               r.RIBType.String(),
+		PeerASN:           r.PeerASN,
+		OriginASN:         r.OriginASN(),
+		ASPath:            r.ASPath,
+		NextHop:           r.NextHop.String(),
+		ROV:               r.ROV.State.String(),
+		ROVReason:         r.ROV.Reason,
+		ASPA:              r.ASPA.State.String(),
+		Posture:           string(r.SecurityPosture),
 	}
 }
 

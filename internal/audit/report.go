@@ -18,12 +18,13 @@ type RouterAuditReport struct {
 
 // PeerAuditReport summarises a single BGP peer's contribution to the router's route table.
 type PeerAuditReport struct {
-	PeerAddr       string         `json:"peer_addr"`
-	PeerASN        uint32         `json:"peer_asn"`
-	TotalRoutes    int            `json:"total_routes"`
-	PostureSummary map[string]int `json:"posture_summary"`
-	ROVCoverage    float64        `json:"rov_coverage"`
-	ASPACoverage   float64        `json:"aspa_coverage"`
+	PeerAddr          string         `json:"peer_addr"`
+	PeerDistinguisher string         `json:"peer_distinguisher,omitempty"`
+	PeerASN           uint32         `json:"peer_asn"`
+	TotalRoutes       int            `json:"total_routes"`
+	PostureSummary    map[string]int `json:"posture_summary"`
+	ROVCoverage       float64        `json:"rov_coverage"`
+	ASPACoverage      float64        `json:"aspa_coverage"`
 }
 
 // OffenderEntry describes an origin ASN contributing origin-invalid or path-suspect routes.

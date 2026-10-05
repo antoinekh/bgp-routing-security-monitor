@@ -440,9 +440,9 @@ func TestCooldown(t *testing.T) {
 	}
 }
 
-// Events for the same prefix and peer address in another RIB describe
-// another route, so the cooldown of one must not suppress the other.
-func TestCooldownKeyedByRIB(t *testing.T) {
+// Events for the same prefix and peer address in another RIB or instance
+// describe other routes, so the cooldown of one must not suppress the other.
+func TestCooldownKeyedByRIBAndDistinguisher(t *testing.T) {
 	action := &countAction{}
 	rule := &Rule{
 		Name:        "test-cooldown",
@@ -455,8 +455,10 @@ func TestCooldownKeyedByRIB(t *testing.T) {
 	pre := newRoute("10.0.0.0/8")
 	loc := *pre
 	loc.RIBType = types.LocRIB
+	vrf := loc
+	vrf.PeerDistinguisher = types.PeerDistinguisherFromUint64(64500<<32 | 100)
 
-	for _, r := range []*types.Route{pre, &loc} {
+	for _, r := range []*types.Route{pre, &loc, &vrf} {
 		rule.Evaluate(context.Background(), Event{
 			ID:        NewID(),
 			Timestamp: time.Now(),
@@ -464,8 +466,8 @@ func TestCooldownKeyedByRIB(t *testing.T) {
 			Route:     r,
 		})
 	}
-	if n := action.count(); n != 2 {
-		t.Errorf("fired %d times, want 2: one per RIB", n)
+	if n := action.count(); n != 3 {
+		t.Errorf("fired %d times, want 3: one per RIB and instance", n)
 	}
 }
 

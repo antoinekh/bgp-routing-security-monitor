@@ -185,14 +185,14 @@ func (t *Table) Withdraw(key types.RouteKey) {
 }
 
 // WithdrawAllFromPeer removes every route a peer holds in the given RIBs.
-func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr, ribs ...types.RIBType) int {
+func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr, distinguisher types.PeerDistinguisher, ribs ...types.RIBType) int {
 	count := 0
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
 		var toRemove []types.RouteKey
 		for key := range s.routes {
-			if key.PeerAddr == peerAddr && slices.Contains(ribs, key.RIBType) {
+			if key.PeerAddr == peerAddr && key.PeerDistinguisher == distinguisher && slices.Contains(ribs, key.RIBType) {
 				toRemove = append(toRemove, key)
 			}
 		}

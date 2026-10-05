@@ -52,7 +52,11 @@ func Analyze(peerAddr string, rib types.RIBType, routes []*types.Route) *RouterA
 		aspaCov  int
 		postures map[string]int
 	}
-	peers := make(map[string]*peerAccum)
+	type peerKey struct {
+		addr          string
+		distinguisher string
+	}
+	peers := make(map[peerKey]*peerAccum)
 
 	type offenderAccum struct {
 		count    int
@@ -78,14 +82,14 @@ func Analyze(peerAddr string, rib types.RIBType, routes []*types.Route) *RouterA
 			aspaCovered++
 		}
 
-		peerKey := r.PeerAddr.String()
-		if peers[peerKey] == nil {
-			peers[peerKey] = &peerAccum{
+		pk := peerKey{r.PeerAddr.String(), r.PeerDistinguisher.String()}
+		if peers[pk] == nil {
+			peers[pk] = &peerAccum{
 				peerASN:  r.PeerASN,
 				postures: make(map[string]int),
 			}
 		}
-		pa := peers[peerKey]
+		pa := peers[pk]
 		pa.total++
 		pa.postures[posture]++
 		if r.ROV.State != types.ROVNotFound {
@@ -121,12 +125,13 @@ func Analyze(peerAddr string, rib types.RIBType, routes []*types.Route) *RouterA
 	report.ROVCoverage = float64(rovCovered) / float64(total)
 	report.ASPACoverage = float64(aspaCovered) / float64(total)
 
-	for peerKey, pa := range peers {
+	for pk, pa := range peers {
 		pr := PeerAuditReport{
-			PeerAddr:       peerKey,
-			PeerASN:        pa.peerASN,
-			TotalRoutes:    pa.total,
-			PostureSummary: pa.postures,
+			PeerAddr:          pk.addr,
+			PeerDistinguisher: pk.distinguisher,
+			PeerASN:           pa.peerASN,
+			TotalRoutes:       pa.total,
+			PostureSummary:    pa.postures,
 		}
 		if pa.total > 0 {
 			pr.ROVCoverage = float64(pa.rovCov) / float64(pa.total)

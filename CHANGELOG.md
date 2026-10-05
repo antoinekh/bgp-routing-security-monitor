@@ -17,19 +17,22 @@ All notable changes to RAVEN are recorded here.
   `raven_rtr_anomaly_last_timestamp`.
 - `lab/04-rtr-anomaly.sh` Containerlab demo scenario for live RTR
   anomaly detection (bulk SLURM ROA injection, serial-based confirmation).
-- `/api/v1/audit` takes a `rib` parameter and `raven audit` a `--rib` flag (`pre-policy` by default, `post-policy`, `loc-rib`). The report shows its RIB.
-- BMP Loc-RIB monitoring (RFC 9069, peer type 3): routes are stored as Loc-RIB under the router's BGP ID, so the Loc-RIB of each router stays separate. A Loc-RIB peer is registered from its first Route Monitoring message when the router sends no Peer Up for it (FRR 10.2). `/api/v1/routes` lists pre-policy and Loc-RIB routes. `/api/v1/routes` and `raven routes` show the RIB of each route; `/api/v1/peers` and `raven peers` show the BMP peer type (`global`, `rd`, `local`, `loc-rib`).
+- `/api/v1/audit` takes a `rib` parameter and `raven audit` a `--rib` flag (`pre-policy` by default, `post-policy`, `loc-rib`). The report shows its RIB and has one peer row per peer address and Peer Distinguisher.
+- BMP Loc-RIB monitoring (RFC 9069, peer type 3): routes are stored as Loc-RIB under the router's BGP ID and the Peer Distinguisher, so the Loc-RIB of each router and of each VRF stays separate. A Loc-RIB peer is registered from its first Route Monitoring message when the router sends no Peer Up for it (FRR 10.2). `/api/v1/routes` lists pre-policy and Loc-RIB routes. `/api/v1/routes` and `raven routes` show the RIB and the Peer Distinguisher of each route; `/api/v1/peers` and `raven peers` show the BMP peer type (`global`, `rd`, `local`, `loc-rib`) and the Peer Distinguisher.
 - `lab/loc-rib/` Containerlab lab that checks Loc-RIB monitoring live with FRR, StayRTR and the RAVEN binary built from the repository (`./run.sh all`).
 
 ### Changed
 - `raven routes` no longer decodes the AS path of each route, which it did not show.
 - A route snapshot with an unknown RIB type is rejected instead of being restored as pre-policy.
 - `raven_routes_total`, `raven_route_table_size` and the OTel `raven.routes.total` have a `rib` label (`pre-policy`, `post-policy`, `loc-rib`) and count the routes of every RIB. Before, they counted pre-policy routes only: filter on `rib="pre-policy"` to keep the old values, as `lab/grafana-dashboard.json` does.
+- `raven_bmp_peer_state` has a `distinguisher` label, empty for a global peer.
+- Route snapshots store the Peer Distinguisher of each route.
 
 ### Fixed
 - A BGP withdrawal of a route that is not pre-policy now sends its `route_withdraw` event with the withdrawn route.
 - A withdrawal now removes only the RIB it was sent for, and a peer down removes only the pre-policy and post-policy routes of that peer. Before, a pre-policy withdrawal also removed the post-policy and Loc-RIB routes held under the same peer address.
-- An event rule cooldown applies per route (prefix, peer address and RIB), so the event of a route in one RIB no longer suppresses the event of a route in another RIB.
+- An event rule cooldown applies per route (prefix, peer address, Peer Distinguisher and RIB), so the event of a route in one RIB no longer suppresses the event of a route in another RIB.
+- Routes and BMP peers are keyed by peer address and Peer Distinguisher, so two RD peers with the same address no longer overwrite each other, and the peer down of one no longer removes the routes of the other.
 - RTR anomaly detector no longer evaluates or contaminates its baseline
   with full (non-incremental) RTR syncs, which previously produced a
   false-positive high-severity anomaly on every `raven rtr monitor`

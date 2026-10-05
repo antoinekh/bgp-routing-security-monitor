@@ -231,14 +231,25 @@ func TestRecommendations(t *testing.T) {
 	})
 }
 
-// A report covers one RIB.
-func TestAnalyze_RIB(t *testing.T) {
+// A report covers one RIB, and has one peer row per peer address and
+// distinguisher.
+func TestAnalyze_RIBAndDistinguisher(t *testing.T) {
 	pre := makeRoute("10.0.0.1", "192.0.2.1", 65001, "1.0.0.0/24", []uint32{65001}, types.ROVValid, types.ASPAValid)
 	loc := makeRoute("10.0.0.1", "192.0.2.1", 65001, "2.0.0.0/24", []uint32{65001}, types.ROVValid, types.ASPAValid)
 	loc.RIBType = types.LocRIB
+	vrf := makeRoute("10.0.0.1", "192.0.2.1", 65001, "3.0.0.0/24", []uint32{65001}, types.ROVValid, types.ASPAValid)
+	vrf.RIBType = types.LocRIB
+	vrf.PeerDistinguisher = types.PeerDistinguisherFromUint64(64500<<32 | 100)
 
-	report := Analyze("192.0.2.1", types.LocRIB, []*types.Route{pre, loc})
-	if report.RIB != "loc-rib" || report.TotalRoutes != 1 {
-		t.Errorf("report RIB %q with %d routes, want loc-rib with 1", report.RIB, report.TotalRoutes)
+	report := Analyze("192.0.2.1", types.LocRIB, []*types.Route{pre, loc, vrf})
+	if report.RIB != "loc-rib" || report.TotalRoutes != 2 {
+		t.Errorf("report RIB %q with %d routes, want loc-rib with 2", report.RIB, report.TotalRoutes)
+	}
+	rds := map[string]int{}
+	for _, p := range report.Peers {
+		rds[p.PeerDistinguisher] = p.TotalRoutes
+	}
+	if len(rds) != 2 || rds[""] != 1 || rds["64500:100"] != 1 {
+		t.Errorf("peer rows by distinguisher = %v, want one route each for the global and the 64500:100 instance", rds)
 	}
 }

@@ -262,6 +262,48 @@ func isLocRIBWithdrawAll(w *types.Withdrawal, peer netip.Addr) bool {
 	return w != nil && w.WithdrawAll && w.PeerAddr == peer && slices.Equal(w.RIBs, []types.RIBType{types.LocRIB})
 }
 
+func withDistinguisher(hdr []byte, d types.PeerDistinguisher) []byte {
+	copy(hdr[2:10], d[:])
+	return hdr
+}
+
+// VRF Loc-RIBs often share the router's BGP ID, so the Peer Distinguisher
+// keeps each instance a separate peer, and a Peer Down withdraws only its
+// own instance.
+func TestLocRIBInstancesAreKeyedByDistinguisher(t *testing.T) {
+	router := netip.MustParseAddr("198.51.100.1")
+	bgpID := netip.MustParseAddr("192.0.2.55")
+	vrf := types.PeerDistinguisherFromUint64(64500<<32 | 100)
+	ingest := make(chan types.IngestEvent, 8)
+	l := NewListener("127.0.0.1:0", nil, ingest, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	rmHdr := BMPCommonHeader{Version: 3, MsgType: MsgTypeRouteMonitoring}
+	update := bgpUpdate(netip.MustParsePrefix("10.9.0.0/16"), netip.MustParsePrefix("10.1.0.0/24"), []uint32{64510})
+
+	l.processMessage(ctx, l.log, router, rmHdr, append(locRIBHeader(0, 64500, bgpID), update...))
+	l.processMessage(ctx, l.log, router, rmHdr, append(withDistinguisher(locRIBHeader(0, 64500, bgpID), vrf), update...))
+
+	if peers := l.GetPeers(); len(peers) != 2 {
+		t.Fatalf("GetPeers returned %d peers, want the global and the VRF Loc-RIB", len(peers))
+	}
+	got := map[types.PeerDistinguisher]bool{}
+	for len(ingest) > 0 {
+		if r := (<-ingest).Route; r != nil {
+			got[r.PeerDistinguisher] = true
+		}
+	}
+	if !got[types.PeerDistinguisher{}] || !got[vrf] {
+		t.Errorf("route distinguishers = %v, want the global one and %s", got, vrf)
+	}
+
+	down := append(withDistinguisher(locRIBHeader(0, 64500, bgpID), vrf), 6)
+	l.processMessage(ctx, l.log, router, BMPCommonHeader{Version: 3, MsgType: MsgTypePeerDown}, down)
+	w := (<-ingest).Withdrawal
+	if !isLocRIBWithdrawAll(w, bgpID) || w.PeerDistinguisher != vrf {
+		t.Fatalf("got %+v, want a Loc-RIB withdraw-all for %s %s", w, bgpID, vrf)
+	}
+}
+
 // A Loc-RIB that sends routes again after its Peer Down, still without a
 // Peer Up, is up again.
 func TestLocRIBPeerUpAgainAfterPeerDown(t *testing.T) {

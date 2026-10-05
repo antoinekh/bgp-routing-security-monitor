@@ -18,11 +18,11 @@ var (
 		Help: "Total BMP messages processed.",
 	}, []string{"router", "msg_type"})
 
-	// BGP peer state via BMP: 1=established 0=down. Labels: router, peer.
+	// BGP peer state via BMP (1=established, 0=down), by router, peer and distinguisher (empty for a global peer).
 	BMPPeerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_bmp_peer_state",
 		Help: "BGP peer state as seen via BMP (1=established, 0=down).",
-	}, []string{"router", "peer"})
+	}, []string{"router", "peer", "distinguisher"})
 
 	// RTR session state: 1=connected 0=down. Label: cache.
 	RTRSessionState = promauto.NewGaugeVec(prometheus.GaugeOpts{

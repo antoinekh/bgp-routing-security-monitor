@@ -133,18 +133,19 @@ func recordToRoute(rec snapshotv1.RouteRecord) (*types.Route, error) {
 	aspaState := parseASPAState(rec.ASPAState)
 
 	return &types.Route{
-		Prefix:          prefix,
-		PeerAddr:        peerAddr,
-		PeerASN:         rec.PeerASN,
-		RouterID:        routerID,
-		ASPath:          rec.ASPath,
-		NextHop:         nextHop,
-		Timestamp:       time.Unix(0, rec.TimestampUnix),
-		RIBType:         rib,
-		ROV:             types.ROVResult{State: rovState},
-		ASPA:            types.ASPAResult{State: aspaState},
-		SecurityPosture: types.SecurityPosture(rec.Posture),
-		Stale:           true, // always stale on restore
+		Prefix:            prefix,
+		PeerAddr:          peerAddr,
+		PeerDistinguisher: types.PeerDistinguisherFromUint64(rec.PeerDistinguisher),
+		PeerASN:           rec.PeerASN,
+		RouterID:          routerID,
+		ASPath:            rec.ASPath,
+		NextHop:           nextHop,
+		Timestamp:         time.Unix(0, rec.TimestampUnix),
+		RIBType:           rib,
+		ROV:               types.ROVResult{State: rovState},
+		ASPA:              types.ASPAResult{State: aspaState},
+		SecurityPosture:   types.SecurityPosture(rec.Posture),
+		Stale:             true, // always stale on restore
 	}, nil
 }
 

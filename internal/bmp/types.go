@@ -3,6 +3,8 @@ package bmp
 import (
 	"net/netip"
 	"time"
+
+	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
 // BMP Message Types (RFC 7854 §4.1)
@@ -72,7 +74,7 @@ type BMPCommonHeader struct {
 type BMPPerPeerHeader struct {
 	PeerType          uint8
 	Flags             uint8
-	PeerDistinguisher [8]byte
+	PeerDistinguisher types.PeerDistinguisher
 	PeerAddr          netip.Addr
 	PeerASN           uint32
 	PeerBGPID         netip.Addr // Router ID as IPv4
@@ -81,7 +83,7 @@ type BMPPerPeerHeader struct {
 
 // Key returns the key of the peer this header describes on the given router.
 func (h *BMPPerPeerHeader) Key(routerAddr netip.Addr) PeerKey {
-	return PeerKey{RouterAddr: routerAddr, PeerAddr: h.PeerAddr}
+	return PeerKey{RouterAddr: routerAddr, PeerAddr: h.PeerAddr, PeerDistinguisher: h.PeerDistinguisher}
 }
 
 // IsLocRIB returns true if this header describes the router's own Loc-RIB
@@ -146,21 +148,23 @@ type BMPStatsReport struct {
 
 // Peer is the runtime state RAVEN maintains per BMP peer session.
 type Peer struct {
-	Addr       netip.Addr
-	PeerType   uint8
-	ASN        uint32
-	LocalASN   uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
-	RouterID   netip.Addr
-	SysName    string
-	SysDescr   string
-	State      string // "up" or "down"
-	RouteCount uint64
-	UpSince    time.Time
-	LastMsg    time.Time
+	Addr          netip.Addr
+	Distinguisher types.PeerDistinguisher
+	PeerType      uint8
+	ASN           uint32
+	LocalASN      uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
+	RouterID      netip.Addr
+	SysName       string
+	SysDescr      string
+	State         string // "up" or "down"
+	RouteCount    uint64
+	UpSince       time.Time
+	LastMsg       time.Time
 }
 
 // PeerKey uniquely identifies a BMP peer.
 type PeerKey struct {
-	RouterAddr netip.Addr // the BMP session source (router)
-	PeerAddr   netip.Addr // the BGP peer on that router
+	RouterAddr        netip.Addr // the BMP session source (router)
+	PeerAddr          netip.Addr // the BGP peer on that router
+	PeerDistinguisher types.PeerDistinguisher
 }
