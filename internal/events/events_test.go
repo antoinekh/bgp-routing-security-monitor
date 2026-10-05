@@ -440,6 +440,35 @@ func TestCooldown(t *testing.T) {
 	}
 }
 
+// Events for the same prefix and peer address in another RIB describe
+// another route, so the cooldown of one must not suppress the other.
+func TestCooldownKeyedByRIB(t *testing.T) {
+	action := &countAction{}
+	rule := &Rule{
+		Name:        "test-cooldown",
+		Trigger:     &alwaysTrigger{},
+		Actions:     []Action{action},
+		Cooldown:    time.Minute,
+		log:         slog.Default(),
+		cooldownMap: make(map[string]time.Time),
+	}
+	pre := newRoute("10.0.0.0/8")
+	loc := *pre
+	loc.RIBType = types.LocRIB
+
+	for _, r := range []*types.Route{pre, &loc} {
+		rule.Evaluate(context.Background(), Event{
+			ID:        NewID(),
+			Timestamp: time.Now(),
+			Type:      EventTypeNewRoute,
+			Route:     r,
+		})
+	}
+	if n := action.count(); n != 2 {
+		t.Errorf("fired %d times, want 2: one per RIB", n)
+	}
+}
+
 // ─── TestEngine_Run ───
 
 func TestEngine_Run(t *testing.T) {

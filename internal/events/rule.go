@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -90,5 +91,6 @@ func cooldownKey(event Event) string {
 	if event.Route == nil {
 		return string(event.Type)
 	}
-	return event.Route.Prefix.String() + "|" + event.Route.PeerAddr.String()
+	k := event.Route.Key()
+	return fmt.Sprintf("%s|%s|%s", k.Prefix, k.PeerAddr, k.RIBType)
 }
