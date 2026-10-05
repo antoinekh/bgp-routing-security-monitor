@@ -1,6 +1,7 @@
 package routetable
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 
@@ -336,5 +337,38 @@ func TestRoutesAreKeyedByDistinguisher(t *testing.T) {
 	}
 	if tbl.Get(types.RouteKey{PeerAddr: peer, Prefix: prefix, RIBType: types.LocRIB}) == nil {
 		t.Error("the VRF withdraw-all removed the global Loc-RIB route")
+	}
+}
+
+// The what-if simulator and the ASPA recommender count each route once, so
+// ListRoutes returns one RIB, pre-policy by default.
+func TestListRoutesReturnsOneRIB(t *testing.T) {
+	tbl := New()
+	peer := "192.0.2.1"
+	prefix := "1.0.0.0/24"
+	for _, rib := range types.RIBTypes {
+		r := makeRoute(peer, prefix, []uint32{64501, 13335})
+		r.RIBType = rib
+		r.SecurityPosture = types.PostureOriginOnly
+		tbl.Insert(r)
+	}
+
+	for name, f := range map[string]Filter{
+		"no filter": {},
+		"peer":      {PeerAddr: peer},
+		"prefix":    {Prefix: prefix},
+		"origin":    {OriginASN: 13335},
+		"posture":   {Posture: string(types.PostureOriginOnly)},
+	} {
+		for _, rib := range types.RIBTypes {
+			f.RIB = rib
+			routes, err := tbl.ListRoutes(context.Background(), f)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if len(routes) != 1 || routes[0].RIBType != rib {
+				t.Errorf("%s, RIB %s: got %d routes, want the %s route only", name, rib, len(routes), rib)
+			}
+		}
 	}
 }

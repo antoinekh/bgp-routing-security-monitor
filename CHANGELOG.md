@@ -41,6 +41,7 @@ All notable changes to RAVEN are recorded here.
   startup.
   
 - `raven check stealthy` and `raven check global` take the expected neighbor AS of a Loc-RIB route from the first AS of its path, not from its peer (the router itself), and `check stealthy` does not take a Loc-RIB peer for a BGP neighbor.
+- The what-if simulator and the ASPA recommender read pre-policy routes only. Before, they counted a route once for each RIB that a router sent.
 ## v0.3.3 (2026-07-02)
 
 ### Added

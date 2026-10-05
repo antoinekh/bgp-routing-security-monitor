@@ -47,12 +47,15 @@ type Filter struct {
 	OriginASN uint32
 	Posture   string
 	AFI       string // "ipv4" | "ipv6" | ""
+	// RIB keeps each route once when routers send several RIBs; the zero value is pre-policy.
+	RIB types.RIBType
 }
 
 // ListRoutes returns routes matching the given filter.
 // Used by the what-if simulator and ASPA recommender.
 func (t *Table) ListRoutes(ctx context.Context, f Filter) ([]types.Route, error) {
 	var ptrs []*types.Route
+	inRIB := func(rib types.RIBType) bool { return rib == f.RIB }
 
 	switch {
 	case f.PeerAddr != "":
@@ -60,19 +63,19 @@ func (t *Table) ListRoutes(ctx context.Context, f Filter) ([]types.Route, error)
 		if err != nil {
 			return nil, fmt.Errorf("invalid peer addr: %w", err)
 		}
-		ptrs = t.GetByPeer(addr)
+		ptrs = t.byPeer(addr, inRIB)
 	case f.Prefix != "":
 		p, err := netip.ParsePrefix(f.Prefix)
 		if err != nil {
 			return nil, fmt.Errorf("invalid prefix: %w", err)
 		}
-		ptrs = t.GetByPrefix(p)
+		ptrs = t.resolveKeys(t.prefixKeys(p), inRIB)
 	case f.OriginASN != 0:
-		ptrs = t.GetByOriginASN(f.OriginASN)
+		ptrs = t.resolveKeys(t.originASNKeys(f.OriginASN), inRIB)
 	case f.Posture != "":
-		ptrs = t.GetByPosture(types.SecurityPosture(f.Posture))
+		ptrs = t.resolveKeys(t.postureKeys(types.SecurityPosture(f.Posture)), inRIB)
 	default:
-		ptrs = t.All()
+		ptrs = t.all(inRIB)
 	}
 
 	// Apply AFI filter
@@ -217,71 +220,31 @@ func (t *Table) Get(key types.RouteKey) *types.Route {
 }
 
 func (t *Table) GetByPrefix(prefix netip.Prefix) []*types.Route {
-	t.prefixMu.RLock()
-	keys, _ := t.prefixIdx.Get(prefix)
-	t.prefixMu.RUnlock()
-	return t.resolveKeys(keys)
+	return t.resolveKeys(t.prefixKeys(prefix), inDefaultView)
 }
 
 func (t *Table) GetByOriginASN(asn uint32) []*types.Route {
-	t.asnMu.RLock()
-	keys := t.asnIdx[asn]
-	t.asnMu.RUnlock()
-	return t.resolveKeys(keys)
+	return t.resolveKeys(t.originASNKeys(asn), inDefaultView)
 }
 
 func (t *Table) GetByPosture(posture types.SecurityPosture) []*types.Route {
-	t.postureMu.RLock()
-	keys := t.postureIdx[posture]
-	t.postureMu.RUnlock()
-	return t.resolveKeys(keys)
+	return t.resolveKeys(t.postureKeys(posture), inDefaultView)
 }
 
 func (t *Table) GetByPeer(peerAddr netip.Addr) []*types.Route {
-	var routes []*types.Route
-	for i := range t.shards {
-		s := &t.shards[i]
-		s.mu.RLock()
-		for key, route := range s.routes {
-			if key.PeerAddr == peerAddr && inDefaultView(route.RIBType) {
-				routes = append(routes, route)
-			}
-		}
-		s.mu.RUnlock()
-	}
-	return routes
+	return t.byPeer(peerAddr, inDefaultView)
 }
 
 // All returns every route in the table regardless of RIB type.
 func (t *Table) All() []*types.Route {
-	var routes []*types.Route
-	for i := range t.shards {
-		s := &t.shards[i]
-		s.mu.RLock()
-		for _, route := range s.routes {
-			routes = append(routes, route)
-		}
-		s.mu.RUnlock()
-	}
-	return routes
+	return t.all(func(types.RIBType) bool { return true })
 }
 
 // AllDefaultView returns the routes of the default operator view: what the
 // routers received before import filtering (Adj-RIB-In Pre-Policy) and what
 // they selected (Loc-RIB).
 func (t *Table) AllDefaultView() []*types.Route {
-	var routes []*types.Route
-	for i := range t.shards {
-		s := &t.shards[i]
-		s.mu.RLock()
-		for _, route := range s.routes {
-			if inDefaultView(route.RIBType) {
-				routes = append(routes, route)
-			}
-		}
-		s.mu.RUnlock()
-	}
-	return routes
+	return t.all(inDefaultView)
 }
 
 // Count returns the total number of routes.
@@ -362,10 +325,59 @@ func (t *Table) getShard(key types.RouteKey) *shard {
 	return &t.shards[h.Sum32()%uint32(len(t.shards))]
 }
 
-func (t *Table) resolveKeys(keys []types.RouteKey) []*types.Route {
+func (t *Table) prefixKeys(prefix netip.Prefix) []types.RouteKey {
+	t.prefixMu.RLock()
+	defer t.prefixMu.RUnlock()
+	keys, _ := t.prefixIdx.Get(prefix)
+	return keys
+}
+
+func (t *Table) originASNKeys(asn uint32) []types.RouteKey {
+	t.asnMu.RLock()
+	defer t.asnMu.RUnlock()
+	return t.asnIdx[asn]
+}
+
+func (t *Table) postureKeys(posture types.SecurityPosture) []types.RouteKey {
+	t.postureMu.RLock()
+	defer t.postureMu.RUnlock()
+	return t.postureIdx[posture]
+}
+
+func (t *Table) byPeer(peerAddr netip.Addr, keep func(types.RIBType) bool) []*types.Route {
+	var routes []*types.Route
+	for i := range t.shards {
+		s := &t.shards[i]
+		s.mu.RLock()
+		for key, route := range s.routes {
+			if key.PeerAddr == peerAddr && keep(key.RIBType) {
+				routes = append(routes, route)
+			}
+		}
+		s.mu.RUnlock()
+	}
+	return routes
+}
+
+func (t *Table) all(keep func(types.RIBType) bool) []*types.Route {
+	var routes []*types.Route
+	for i := range t.shards {
+		s := &t.shards[i]
+		s.mu.RLock()
+		for key, route := range s.routes {
+			if keep(key.RIBType) {
+				routes = append(routes, route)
+			}
+		}
+		s.mu.RUnlock()
+	}
+	return routes
+}
+
+func (t *Table) resolveKeys(keys []types.RouteKey, keep func(types.RIBType) bool) []*types.Route {
 	routes := make([]*types.Route, 0, len(keys))
 	for _, key := range keys {
-		if !inDefaultView(key.RIBType) {
+		if !keep(key.RIBType) {
 			continue
 		}
 		s := t.getShard(key)
