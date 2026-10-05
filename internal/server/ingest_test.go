@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
+	"github.com/nokia/bgp-routing-security-monitor/internal/events"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
@@ -193,5 +194,54 @@ func TestPeerDownQueuedBeforeRTRReadyIsAppliedAfterItsRoutes(t *testing.T) {
 
 	if got := s.table.Count(); got != 0 {
 		t.Errorf("table count = %d, want 0: the peer-down was queued after all its routes", got)
+	}
+}
+
+type matchAll struct{}
+
+func (matchAll) Matches(events.Event) bool { return true }
+
+type recordAction struct{ ch chan events.Event }
+
+func (recordAction) Name() string { return "record" }
+
+func (a recordAction) Execute(_ context.Context, ev events.Event) error {
+	a.ch <- ev
+	return nil
+}
+
+// A withdrawal must carry the withdrawn route to the event engine whatever
+// RIB the route lives in, not only for pre-policy routes.
+func TestWithdrawalEventCarriesNonPrePolicyRoute(t *testing.T) {
+	s := newTestServer(t)
+	rec := recordAction{ch: make(chan events.Event, 8)}
+	s.eventEngine = events.NewEngine([]*events.Rule{{
+		Name:    "record",
+		Trigger: matchAll{},
+		Actions: []events.Action{rec},
+	}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.eventEngine.Run(ctx, nil)
+
+	r := testRoute(netip.MustParseAddr("192.0.2.1"), 0, types.PostureOriginOnly)
+	r.RIBType = types.LocRIB
+	s.ingestRoute(*r, 1)
+	s.ingestWithdrawal(types.Withdrawal{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: types.LocRIB})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-rec.ch:
+			if ev.Type != events.EventTypeRouteWithdraw {
+				continue
+			}
+			if ev.Route == nil || ev.Route.Prefix != r.Prefix {
+				t.Fatalf("withdraw event route = %+v, want prefix %s", ev.Route, r.Prefix)
+			}
+			return
+		case <-deadline:
+			t.Fatal("no route_withdraw event for a Loc-RIB withdrawal")
+		}
 	}
 }

@@ -536,7 +536,7 @@ func (s *Server) ingestWithdrawal(w types.Withdrawal) {
 	// Capture route before removal so the event carries prefix/posture context.
 	var withdrawn *types.Route
 	if s.eventEngine != nil {
-		key := types.RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: types.AdjRIBInPre}
+		key := types.RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: w.RIBType}
 		withdrawn = s.table.Get(key)
 	}
 	s.table.Withdraw(w.PeerAddr, w.Prefix)

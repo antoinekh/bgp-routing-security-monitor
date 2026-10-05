@@ -22,6 +22,7 @@ All notable changes to RAVEN are recorded here.
 - `raven routes` no longer decodes the AS path of each route, which it did not show.
 
 ### Fixed
+- A BGP withdrawal of a route that is not pre-policy now sends its `route_withdraw` event with the withdrawn route.
 - RTR anomaly detector no longer evaluates or contaminates its baseline
   with full (non-incremental) RTR syncs, which previously produced a
   false-positive high-severity anomaly on every `raven rtr monitor`
