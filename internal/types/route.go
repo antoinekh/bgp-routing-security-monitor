@@ -1,6 +1,7 @@
 package types
 
 import (
+	"fmt"
 	"net/netip"
 	"time"
 )
@@ -132,6 +133,30 @@ const (
 	AdjRIBInPost RIBType = 1
 	LocRIB       RIBType = 2
 )
+
+// RIBTypes lists every RIB type.
+var RIBTypes = []RIBType{AdjRIBInPre, AdjRIBInPost, LocRIB}
+
+func (r RIBType) String() string {
+	switch r {
+	case AdjRIBInPost:
+		return "post-policy"
+	case LocRIB:
+		return "loc-rib"
+	default:
+		return "pre-policy"
+	}
+}
+
+// ParseRIBType parses the name of a RIB type.
+func ParseRIBType(s string) (RIBType, error) {
+	for _, r := range RIBTypes {
+		if r.String() == s {
+			return r, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown RIB type %q (want pre-policy, post-policy or loc-rib)", s)
+}
 
 // ─── ROV (RFC 6811) ───
 

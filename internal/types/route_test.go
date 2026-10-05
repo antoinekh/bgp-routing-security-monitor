@@ -28,3 +28,26 @@ func TestComputePosture(t *testing.T) {
 		}
 	}
 }
+
+func TestRIBTypeString(t *testing.T) {
+	for rib, want := range map[RIBType]string{
+		AdjRIBInPre:  "pre-policy",
+		AdjRIBInPost: "post-policy",
+		LocRIB:       "loc-rib",
+	} {
+		if got := rib.String(); got != want {
+			t.Errorf("RIBType(%d).String() = %q, want %q", rib, got, want)
+		}
+	}
+}
+
+func TestParseRIBType(t *testing.T) {
+	for _, rib := range RIBTypes {
+		if got, err := ParseRIBType(rib.String()); err != nil || got != rib {
+			t.Errorf("ParseRIBType(%q) = %v, %v, want %v", rib.String(), got, err, rib)
+		}
+	}
+	if _, err := ParseRIBType("adj-rib-out"); err == nil {
+		t.Error("ParseRIBType accepted an unknown RIB type")
+	}
+}

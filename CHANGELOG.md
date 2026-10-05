@@ -20,6 +20,7 @@ All notable changes to RAVEN are recorded here.
 
 ### Changed
 - `raven routes` no longer decodes the AS path of each route, which it did not show.
+- A route snapshot with an unknown RIB type is rejected instead of being restored as pre-policy.
 
 ### Fixed
 - A BGP withdrawal of a route that is not pre-policy now sends its `route_withdraw` event with the withdrawn route.

@@ -151,22 +151,11 @@ func routeToRecord(r *types.Route) snapshotv1.RouteRecord {
 		OriginASN:     r.OriginASN(),
 		NextHop:       addrString(r.NextHop),
 		TimestampUnix: r.Timestamp.UnixNano(),
-		RIBType:       ribTypeString(r.RIBType),
+		RIBType:       r.RIBType.String(),
 		ROVState:      r.ROV.State.String(),
 		ASPAState:     r.ASPA.State.String(),
 		Posture:       string(r.SecurityPosture),
 		Stale:         r.Stale,
-	}
-}
-
-func ribTypeString(rt types.RIBType) string {
-	switch rt {
-	case types.AdjRIBInPost:
-		return "post-policy"
-	case types.LocRIB:
-		return "loc-rib"
-	default:
-		return "pre-policy"
 	}
 }
 
