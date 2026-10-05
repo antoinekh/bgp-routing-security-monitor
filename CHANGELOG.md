@@ -40,6 +40,7 @@ All notable changes to RAVEN are recorded here.
   false-positive high-severity anomaly on every `raven rtr monitor`
   startup.
   
+- `raven check stealthy` and `raven check global` take the expected neighbor AS of a Loc-RIB route from the first AS of its path, not from its peer (the router itself), and `check stealthy` does not take a Loc-RIB peer for a BGP neighbor.
 ## v0.3.3 (2026-07-02)
 
 ### Added
