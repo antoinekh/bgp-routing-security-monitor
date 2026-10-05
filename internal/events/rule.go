@@ -19,12 +19,13 @@ type Rule struct {
 	// Enrichers annotate the event before Actions run. They are populated
 	// from the same YAML actions list; buildRule partitions them out.
 	Enrichers []Enricher
-	// Cooldown prevents the same rule from firing more than once per
-	// prefix+peer pair within this duration. Zero means no cooldown.
+	// Cooldown prevents the same rule from firing more than once per route
+	// (prefix, peer, Peer Distinguisher and RIB) within this duration. Zero
+	// means no cooldown.
 	Cooldown    time.Duration
 	log         *slog.Logger
 	cooldownMu  sync.Mutex
-	cooldownMap map[string]time.Time // key: "prefix|peerAddr" or event type
+	cooldownMap map[string]time.Time // key: "prefix|peer|distinguisher|rib" or event type
 }
 
 // Evaluate checks the trigger, enforces the cooldown, runs any enrichers,
@@ -68,7 +69,7 @@ func (r *Rule) Evaluate(ctx context.Context, event Event) {
 }
 
 // checkCooldown returns false when the event falls within the active cooldown
-// window for its prefix+peer key. On a pass it records the current time.
+// window for its route key. On a pass it records the current time.
 func (r *Rule) checkCooldown(event Event) bool {
 	if r.Cooldown == 0 {
 		return true

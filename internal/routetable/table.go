@@ -14,8 +14,8 @@ import (
 
 const defaultShards = 256
 
-// Table is RAVEN's internal route table — an annotated Adj-RIB-In.
-// It stores every route from every peer with validation annotations.
+// Table is RAVEN's internal route table: the Adj-RIB-In and Loc-RIB routes of
+// every monitored router, with validation annotations.
 //
 // Architecture: hybrid BART prefix index + sharded flat map (see ARCHITECTURE.md §2.3).
 type Table struct {
