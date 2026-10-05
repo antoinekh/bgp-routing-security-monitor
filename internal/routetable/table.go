@@ -187,8 +187,12 @@ func (t *Table) Withdraw(key types.RouteKey) {
 	}
 }
 
-// WithdrawAllFromPeer removes every route a peer holds in the given RIBs.
+// WithdrawAllFromPeer removes every route a peer holds in the given RIBs, or
+// in every RIB when none is given.
 func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr, distinguisher types.PeerDistinguisher, ribs ...types.RIBType) int {
+	if len(ribs) == 0 {
+		ribs = types.RIBTypes
+	}
 	count := 0
 	for i := range t.shards {
 		s := &t.shards[i]

@@ -372,3 +372,17 @@ func TestListRoutesReturnsOneRIB(t *testing.T) {
 		}
 	}
 }
+
+// A withdraw-all without RIBs must not silently keep the routes of the peer.
+func TestWithdrawAllFromPeerWithoutRIBsRemovesEveryRIB(t *testing.T) {
+	tbl := New()
+	peer := netip.MustParseAddr("192.0.2.1")
+	for _, rib := range types.RIBTypes {
+		r := makeRoute(peer.String(), "1.0.0.0/24", []uint32{64501, 13335})
+		r.RIBType = rib
+		tbl.Insert(r)
+	}
+	if removed := tbl.WithdrawAllFromPeer(peer, types.PeerDistinguisher{}); removed != len(types.RIBTypes) {
+		t.Errorf("removed %d routes, want %d", removed, len(types.RIBTypes))
+	}
+}

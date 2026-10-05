@@ -50,8 +50,8 @@ type Withdrawal struct {
 	PeerDistinguisher PeerDistinguisher
 	Prefix            netip.Prefix
 	RIBType           RIBType
-	// WithdrawAll removes every route of the peer in RIBs, and Prefix and
-	// RIBType are then unused.
+	// WithdrawAll removes every route of the peer in RIBs (every RIB when
+	// empty), and Prefix and RIBType are then unused.
 	WithdrawAll bool
 	RIBs        []RIBType
 }
