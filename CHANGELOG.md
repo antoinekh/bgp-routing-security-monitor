@@ -20,6 +20,7 @@ All notable changes to RAVEN are recorded here.
 - `/api/v1/audit` takes a `rib` parameter and `raven audit` a `--rib` flag (`pre-policy` by default, `post-policy`, `loc-rib`). The report shows its RIB and has one peer row per peer address and Peer Distinguisher.
 - BMP Loc-RIB monitoring (RFC 9069, peer type 3): routes are stored as Loc-RIB under the router's BGP ID and the Peer Distinguisher, so the Loc-RIB of each router and of each VRF stays separate. A Loc-RIB peer is registered from its first Route Monitoring message when the router sends no Peer Up for it (FRR 10.2). `/api/v1/routes` lists pre-policy and Loc-RIB routes. `/api/v1/routes` and `raven routes` show the RIB and the Peer Distinguisher of each route; `/api/v1/peers` and `raven peers` show the BMP peer type (`global`, `rd`, `local`, `loc-rib`) and the Peer Distinguisher.
 - `lab/loc-rib/` Containerlab lab that checks Loc-RIB monitoring live with FRR, StayRTR and the RAVEN binary built from the repository (`./run.sh all`).
+- `rib` event trigger (`ribs: ["pre-policy", "post-policy", "loc-rib"]`). In a `compound` trigger, it keeps a rule to the routes of some RIBs; see `raven.yaml`.
 
 ### Changed
 - `raven routes` no longer decodes the AS path of each route, which it did not show.

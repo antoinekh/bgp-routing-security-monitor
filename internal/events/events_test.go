@@ -581,3 +581,30 @@ func TestBuildEngine(t *testing.T) {
 		t.Error("expected error for unknown trigger type, got nil")
 	}
 }
+
+// A rib trigger keeps a rule to the routes of some RIBs, so a router that
+// sends several RIBs does not fire the rule once per RIB.
+func TestRIBTrigger(t *testing.T) {
+	trigger, err := buildTrigger(config.TriggerConfig{Type: "rib", RIBs: []string{"loc-rib"}})
+	if err != nil {
+		t.Fatalf("buildTrigger: %v", err)
+	}
+	pre := newRoute("10.0.0.0/8")
+	loc := *pre
+	loc.RIBType = types.LocRIB
+	if trigger.Matches(Event{Route: pre}) {
+		t.Error("a loc-rib trigger matched a pre-policy route")
+	}
+	if !trigger.Matches(Event{Route: &loc}) {
+		t.Error("a loc-rib trigger did not match a Loc-RIB route")
+	}
+	if trigger.Matches(Event{Type: EventTypeCacheUnhealthy}) {
+		t.Error("a rib trigger matched an event without a route")
+	}
+
+	for _, ribs := range [][]string{nil, {"adj-rib-out"}} {
+		if _, err := buildTrigger(config.TriggerConfig{Type: "rib", RIBs: ribs}); err == nil {
+			t.Errorf("buildTrigger accepted a rib trigger with ribs %v", ribs)
+		}
+	}
+}
