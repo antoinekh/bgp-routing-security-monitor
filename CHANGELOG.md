@@ -17,6 +17,7 @@ All notable changes to RAVEN are recorded here.
   `raven_rtr_anomaly_last_timestamp`.
 - `lab/04-rtr-anomaly.sh` Containerlab demo scenario for live RTR
   anomaly detection (bulk SLURM ROA injection, serial-based confirmation).
+- `/api/v1/audit` takes a `rib` parameter and `raven audit` a `--rib` flag (`pre-policy` by default, `post-policy`, `loc-rib`). The report shows its RIB.
 
 ### Changed
 - `raven routes` no longer decodes the AS path of each route, which it did not show.

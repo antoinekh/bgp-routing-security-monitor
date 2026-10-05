@@ -20,20 +20,21 @@ var postureOrder = map[string]int{
 	"secured":        5,
 }
 
-// Analyze computes a RouterAuditReport for the given peer address from the supplied
-// route slice (typically routetable.Table.AllPrePolicy()).
+// Analyze computes a RouterAuditReport for the given peer address from the
+// routes of one RIB in the supplied route slice.
 // An empty peerAddr matches all routes. It is a pure function: no I/O,
 // no side-effects, safe to call from tests.
-func Analyze(peerAddr string, routes []*types.Route) *RouterAuditReport {
+func Analyze(peerAddr string, rib types.RIBType, routes []*types.Route) *RouterAuditReport {
 	var local []*types.Route
 	for _, r := range routes {
-		if peerAddr == "" || r.PeerAddr.String() == peerAddr {
+		if r.RIBType == rib && (peerAddr == "" || r.PeerAddr.String() == peerAddr) {
 			local = append(local, r)
 		}
 	}
 
 	report := &RouterAuditReport{
 		RouterID:       peerAddr,
+		RIB:            rib.String(),
 		GeneratedAt:    time.Now(),
 		TotalRoutes:    len(local),
 		PostureSummary: make(map[string]int),

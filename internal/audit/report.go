@@ -5,6 +5,7 @@ import "time"
 // RouterAuditReport is the top-level result of a security posture audit for one router.
 type RouterAuditReport struct {
 	RouterID        string            `json:"router_id"`
+	RIB             string            `json:"rib"`
 	GeneratedAt     time.Time         `json:"generated_at"`
 	TotalRoutes     int               `json:"total_routes"`
 	ROVCoverage     float64           `json:"rov_coverage"`    // fraction 0–1
