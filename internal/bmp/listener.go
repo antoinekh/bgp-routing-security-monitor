@@ -178,19 +178,16 @@ func (l *Listener) handleSession(ctx context.Context, conn net.Conn) {
 		sessionLog.Info("BMP session ended")
 		// Withdraw all routes from all peers of this router
 		l.peerMu.RLock()
-		var peerAddrs []netip.Addr
+		var withdrawals []types.Withdrawal
 		for key := range l.peers {
 			if key.RouterAddr == routerAddr.Addr() {
-				peerAddrs = append(peerAddrs, key.PeerAddr)
+				withdrawals = append(withdrawals, withdrawAll(key))
 			}
 		}
 		l.peerMu.RUnlock()
 
-		for _, peerAddr := range peerAddrs {
-			if !l.emit(ctx, types.IngestEvent{Withdrawal: &types.Withdrawal{
-				PeerAddr:    peerAddr,
-				WithdrawAll: true,
-			}}) {
+		for i := range withdrawals {
+			if !l.emit(ctx, types.IngestEvent{Withdrawal: &withdrawals[i]}) {
 				break // shutting down
 			}
 		}
@@ -334,10 +331,8 @@ func (l *Listener) processMessage(
 		log.Info("BMP peer down", "peer", pd.PerPeer.PeerAddr, "reason", pd.Reason)
 		// Implicitly withdraw everything the peer advertised, as a real BGP
 		// session going down would.
-		l.emit(ctx, types.IngestEvent{Withdrawal: &types.Withdrawal{
-			PeerAddr:    pd.PerPeer.PeerAddr,
-			WithdrawAll: true,
-		}})
+		w := withdrawAll(key)
+		l.emit(ctx, types.IngestEvent{Withdrawal: &w})
 
 	case MsgTypeRouteMonitoring:
 		l.routerMu.RLock()
@@ -392,6 +387,15 @@ func (l *Listener) processMessage(
 
 	default:
 		log.Debug("unknown BMP message type", "type", hdr.MsgType)
+	}
+}
+
+// withdrawAll builds the withdrawal of every route a BMP peer fed.
+func withdrawAll(key PeerKey) types.Withdrawal {
+	return types.Withdrawal{
+		PeerAddr:    key.PeerAddr,
+		WithdrawAll: true,
+		RIBs:        []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost},
 	}
 }
 

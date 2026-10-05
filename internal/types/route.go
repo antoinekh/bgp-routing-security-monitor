@@ -44,10 +44,18 @@ type Route struct {
 
 // Withdrawal represents a BGP route withdrawal received via BMP.
 type Withdrawal struct {
-	PeerAddr    netip.Addr
-	Prefix      netip.Prefix
-	RIBType     RIBType
-	WithdrawAll bool // if true, withdraw all routes from PeerAddr
+	PeerAddr netip.Addr
+	Prefix   netip.Prefix
+	RIBType  RIBType
+	// WithdrawAll removes every route of the peer in RIBs, and Prefix and
+	// RIBType are then unused.
+	WithdrawAll bool
+	RIBs        []RIBType
+}
+
+// Key returns the Route Table key of the one route this withdrawal removes.
+func (w *Withdrawal) Key() RouteKey {
+	return RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: w.RIBType}
 }
 
 // IngestEvent is one item on the BMP ingest stream. Exactly one of Route or
@@ -68,6 +76,11 @@ func (r *Route) OriginASN() uint32 {
 		return 0
 	}
 	return r.ASPath[len(r.ASPath)-1]
+}
+
+// Key returns the Route Table key of the route.
+func (r *Route) Key() RouteKey {
+	return RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
 }
 
 // RouteKey uniquely identifies a route in the Route Table.

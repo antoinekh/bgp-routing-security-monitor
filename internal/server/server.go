@@ -477,8 +477,7 @@ func (s *Server) ingestRoute(r types.Route, count uint64) {
 	// incoming live BMP message as a fresh insert → EventTypeNewRoute.
 	var oldPosture types.SecurityPosture
 	if s.eventEngine != nil {
-		key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
-		if old := s.table.Get(key); old != nil && !old.Stale {
+		if old := s.table.Get(r.Key()); old != nil && !old.Stale {
 			oldPosture = old.SecurityPosture
 		}
 	}
@@ -529,17 +528,16 @@ func (s *Server) ingestRoute(r types.Route, count uint64) {
 // that went down, from the Route Table.
 func (s *Server) ingestWithdrawal(w types.Withdrawal) {
 	if w.WithdrawAll {
-		removed := s.table.WithdrawAllFromPeer(w.PeerAddr)
+		removed := s.table.WithdrawAllFromPeer(w.PeerAddr, w.RIBs...)
 		s.log.Info("withdrew all routes from BMP peer", "peer", w.PeerAddr.String(), "routes", removed)
 		return
 	}
 	// Capture route before removal so the event carries prefix/posture context.
 	var withdrawn *types.Route
 	if s.eventEngine != nil {
-		key := types.RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: w.RIBType}
-		withdrawn = s.table.Get(key)
+		withdrawn = s.table.Get(w.Key())
 	}
-	s.table.Withdraw(w.PeerAddr, w.Prefix)
+	s.table.Withdraw(w.Key())
 	if s.eventEngine != nil && withdrawn != nil {
 		s.eventEngine.Emit(events.Event{
 			ID:         events.NewID(),

@@ -24,6 +24,7 @@ All notable changes to RAVEN are recorded here.
 
 ### Fixed
 - A BGP withdrawal of a route that is not pre-policy now sends its `route_withdraw` event with the withdrawn route.
+- A withdrawal now removes only the RIB it was sent for, and a peer down removes only the pre-policy and post-policy routes of that peer. Before, a pre-policy withdrawal also removed the post-policy and Loc-RIB routes held under the same peer address.
 - RTR anomaly detector no longer evaluates or contaminates its baseline
   with full (non-incremental) RTR syncs, which previously produced a
   false-positive high-severity anomaly on every `raven rtr monitor`

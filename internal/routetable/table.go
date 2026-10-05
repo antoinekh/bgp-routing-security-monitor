@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"github.com/gaissmai/bart"
@@ -18,7 +19,7 @@ const defaultShards = 256
 //
 // Architecture: hybrid BART prefix index + sharded flat map (see ARCHITECTURE.md §2.3).
 type Table struct {
-	// Primary store: sharded flat map keyed by (PeerAddr, Prefix)
+	// Primary store: sharded flat map keyed by types.RouteKey
 	shards []shard
 
 	// Prefix index: BART trie mapping prefix -> set of route keys
@@ -103,11 +104,7 @@ func New() *Table {
 
 // Insert adds or updates a route in the table.
 func (t *Table) Insert(route *types.Route) {
-	key := types.RouteKey{
-		PeerAddr: route.PeerAddr,
-		Prefix:   route.Prefix,
-		RIBType:  route.RIBType,
-	}
+	key := route.Key()
 
 	// Write to primary store
 	s := t.getShard(key)
@@ -148,15 +145,8 @@ func (t *Table) Insert(route *types.Route) {
 	}
 }
 
-// Withdraw removes a route from the table.
-func (t *Table) Withdraw(peerAddr netip.Addr, prefix netip.Prefix) {
-	// Withdraw across all RIB types
-	for _, rib := range []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost, types.LocRIB} {
-		t.withdrawOne(types.RouteKey{PeerAddr: peerAddr, Prefix: prefix, RIBType: rib})
-	}
-}
-
-func (t *Table) withdrawOne(key types.RouteKey) {
+// Withdraw removes the route stored under the given key.
+func (t *Table) Withdraw(key types.RouteKey) {
 	s := t.getShard(key)
 	s.mu.Lock()
 	route, exists := s.routes[key]
@@ -194,23 +184,22 @@ func (t *Table) withdrawOne(key types.RouteKey) {
 	}
 }
 
-// WithdrawAllFromPeer removes all routes from a specific peer.
-func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr) int {
+// WithdrawAllFromPeer removes every route a peer holds in the given RIBs.
+func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr, ribs ...types.RIBType) int {
 	count := 0
-	// Scan all shards for routes from this peer
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
-		var toRemove []netip.Prefix
+		var toRemove []types.RouteKey
 		for key := range s.routes {
-			if key.PeerAddr == peerAddr {
-				toRemove = append(toRemove, key.Prefix)
+			if key.PeerAddr == peerAddr && slices.Contains(ribs, key.RIBType) {
+				toRemove = append(toRemove, key)
 			}
 		}
 		s.mu.RUnlock()
 
-		for _, prefix := range toRemove {
-			t.Withdraw(peerAddr, prefix)
+		for _, key := range toRemove {
+			t.Withdraw(key)
 			count++
 		}
 	}
@@ -339,7 +328,7 @@ func (t *Table) EvictStale() int {
 		s.mu.RUnlock()
 	}
 	for _, key := range toEvict {
-		t.withdrawOne(key)
+		t.Withdraw(key)
 	}
 	return len(toEvict)
 }

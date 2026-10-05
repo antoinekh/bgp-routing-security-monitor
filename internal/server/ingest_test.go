@@ -43,6 +43,11 @@ func gaugeValue(t *testing.T, name string, labels map[string]string) float64 {
 	return 0
 }
 
+// peerDown is the withdraw-all the BMP listener sends when a BGP peer goes down.
+func peerDown(peer netip.Addr) *types.Withdrawal {
+	return &types.Withdrawal{PeerAddr: peer, WithdrawAll: true, RIBs: []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost}}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	s, err := New(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -72,9 +77,9 @@ func drain(t *testing.T, s *Server) {
 		Prefix:   netip.MustParsePrefix("203.0.113.0/24"),
 		RIBType:  types.AdjRIBInPre,
 	}
-	s.table.Withdraw(marker.PeerAddr, marker.Prefix)
+	s.table.Withdraw(marker.Key())
 	s.ingestCh <- types.IngestEvent{Route: marker}
-	key := types.RouteKey{PeerAddr: marker.PeerAddr, Prefix: marker.Prefix, RIBType: marker.RIBType}
+	key := marker.Key()
 	deadline := time.Now().Add(5 * time.Second)
 	for s.table.Get(key) == nil {
 		if time.Now().After(deadline) {
@@ -82,7 +87,7 @@ func drain(t *testing.T, s *Server) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	s.table.Withdraw(marker.PeerAddr, marker.Prefix)
+	s.table.Withdraw(marker.Key())
 }
 
 // End to end through the ingest loop: a peer's routes are counted in the
@@ -122,7 +127,7 @@ func TestPeerDownRemovesPeerRoutes(t *testing.T) {
 		t.Fatalf("raven_routes_total{origin-invalid} = %v before peer down, want 11", got)
 	}
 
-	s.ingestCh <- types.IngestEvent{Withdrawal: &types.Withdrawal{PeerAddr: down, WithdrawAll: true}}
+	s.ingestCh <- types.IngestEvent{Withdrawal: peerDown(down)}
 	drain(t, s)
 
 	if got := s.table.Count(); got != 1 {
@@ -180,7 +185,7 @@ func TestPeerDownQueuedBeforeRTRReadyIsAppliedAfterItsRoutes(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		s.ingestCh <- types.IngestEvent{Route: testRoute(peer, i, types.PostureOriginOnly)}
 	}
-	s.ingestCh <- types.IngestEvent{Withdrawal: &types.Withdrawal{PeerAddr: peer, WithdrawAll: true}}
+	s.ingestCh <- types.IngestEvent{Withdrawal: peerDown(peer)}
 
 	// Give a loop that applies withdrawals early the chance to do so, then
 	// confirm nothing at all was consumed before the first RTR sync.
