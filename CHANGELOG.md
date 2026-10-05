@@ -29,6 +29,7 @@ All notable changes to RAVEN are recorded here.
 - `raven_bmp_peer_state` has a `distinguisher` label, empty for a global peer.
 - Route snapshots store the Peer Distinguisher of each route.
 - Event rules fire once for each RIB and Peer Distinguisher of a route, so a router that sends several RIBs can trigger one action per RIB. Webhook payloads have new `rib` and `peer_distinguisher` fields, and the log action logs the peer, the Peer Distinguisher and the RIB.
+- `proto/raven/v1/raven.proto` and the snapshot schema `internal/proto/snapshot/v1/snapshot.proto` have the new RIB, peer type and Peer Distinguisher fields of the JSON API and the snapshot file.
 
 ### Fixed
 - A BGP withdrawal of a route that is not pre-policy now sends its `route_withdraw` event with the withdrawn route.
