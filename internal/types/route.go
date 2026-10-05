@@ -110,7 +110,8 @@ func (d PeerDistinguisher) Uint64() uint64 {
 }
 
 // String formats the distinguisher as a route distinguisher (RFC 4364 §4.2),
-// or returns "" for a global peer.
+// with an L after a type 2 AS number so that types 0 and 2 stay apart, or
+// returns "" for a global peer.
 func (d PeerDistinguisher) String() string {
 	if d == (PeerDistinguisher{}) {
 		return ""
@@ -121,7 +122,7 @@ func (d PeerDistinguisher) String() string {
 	case 1:
 		return fmt.Sprintf("%s:%d", netip.AddrFrom4([4]byte(d[2:6])), binary.BigEndian.Uint16(d[6:8]))
 	case 2:
-		return fmt.Sprintf("%d:%d", binary.BigEndian.Uint32(d[2:6]), binary.BigEndian.Uint16(d[6:8]))
+		return fmt.Sprintf("%dL:%d", binary.BigEndian.Uint32(d[2:6]), binary.BigEndian.Uint16(d[6:8]))
 	default:
 		return fmt.Sprintf("0x%016x", d.Uint64())
 	}

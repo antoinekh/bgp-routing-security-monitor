@@ -31,6 +31,7 @@ All notable changes to RAVEN are recorded here.
 - Event rules fire once for each RIB and Peer Distinguisher of a route, so a router that sends several RIBs can trigger one action per RIB. Webhook payloads have new `rib` and `peer_distinguisher` fields, and the log action logs the peer, the Peer Distinguisher and the RIB.
 - `proto/raven/v1/raven.proto` and the snapshot schema `internal/proto/snapshot/v1/snapshot.proto` have the new RIB, peer type and Peer Distinguisher fields of the JSON API and the snapshot file.
 - `raven status` shows the RD and the type of each BMP peer, as `raven peers` does.
+- The API, the CLI, the metric labels and the events show a Peer Distinguisher as a route distinguisher: `64500:100`, `192.0.2.1:7`, and `4200000000L:9` for a 4-byte AS, so RD types 0 and 2 stay apart.
 
 ### Fixed
 - A BGP withdrawal of a route that is not pre-policy now sends its `route_withdraw` event with the withdrawn route.
