@@ -108,10 +108,12 @@ var statusCmd = &cobra.Command{
 			Version string `json:"version"`
 			Uptime  string `json:"uptime"`
 			BMP     []struct {
-				Addr       string `json:"addr"`
-				ASN        uint32 `json:"asn"`
-				State      string `json:"state"`
-				RouteCount uint64 `json:"route_count"`
+				Addr          string `json:"addr"`
+				Distinguisher string `json:"distinguisher"`
+				Type          string `json:"type"`
+				ASN           uint32 `json:"asn"`
+				State         string `json:"state"`
+				RouteCount    uint64 `json:"route_count"`
 			} `json:"bmp_peers"`
 			RTR struct {
 				VRPCount uint64 `json:"vrp_count"`
@@ -137,9 +139,10 @@ var statusCmd = &cobra.Command{
 
 		fmt.Printf("\nBMP Peers: %d\n", len(status.BMP))
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "  PEER\tASN\tSTATE\tROUTES\n")
+		fmt.Fprintf(tw, "  PEER\tRD\tTYPE\tASN\tSTATE\tROUTES\n")
 		for _, p := range status.BMP {
-			fmt.Fprintf(tw, "  %s\t%d\t%s\t%d\n", p.Addr, p.ASN, p.State, p.RouteCount)
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%d\t%s\t%d\n",
+				p.Addr, dashIfEmpty(p.Distinguisher), p.Type, p.ASN, p.State, p.RouteCount)
 		}
 		tw.Flush()
 		return nil
