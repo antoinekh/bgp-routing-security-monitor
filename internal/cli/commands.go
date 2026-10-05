@@ -161,6 +161,7 @@ var peersCmd = &cobra.Command{
 
 		var peers []struct {
 			Addr       string `json:"addr"`
+			Type       string `json:"type"`
 			ASN        uint32 `json:"asn"`
 			RouterID   string `json:"router_id"`
 			State      string `json:"state"`
@@ -172,10 +173,10 @@ var peersCmd = &cobra.Command{
 		}
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "PEER\tASN\tROUTER ID\tSTATE\tROUTES\tUP SINCE\n")
+		fmt.Fprintf(tw, "PEER\tTYPE\tASN\tROUTER ID\tSTATE\tROUTES\tUP SINCE\n")
 		for _, p := range peers {
-			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\t%s\n",
-				p.Addr, p.ASN, p.RouterID, p.State, p.RouteCount, p.UpSince)
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d\t%s\n",
+				p.Addr, p.Type, p.ASN, p.RouterID, p.State, p.RouteCount, p.UpSince)
 		}
 		tw.Flush()
 		return nil
@@ -219,6 +220,7 @@ var routesCmd = &cobra.Command{
 		var routes []struct {
 			Prefix    string `json:"prefix"`
 			PeerAddr  string `json:"peer"`
+			RIB       string `json:"rib"`
 			OriginASN uint32 `json:"origin_asn"`
 			ROV       string `json:"rov"`
 			ASPA      string `json:"aspa"`
@@ -234,14 +236,14 @@ var routesCmd = &cobra.Command{
 			prefixes[i] = r.Prefix
 		}
 		pw := prefixColWidth(prefixes)
-		fmt.Fprintf(tw, "%-*s\tPEER\tORIGIN\tROV\tASPA\tPOSTURE\n", pw, "PREFIX")
+		fmt.Fprintf(tw, "%-*s\tPEER\tRIB\tORIGIN\tROV\tASPA\tPOSTURE\n", pw, "PREFIX")
 		for _, r := range routes {
 			origin := fmt.Sprintf("AS%d", r.OriginASN)
 			if r.OriginASN == 0 {
 				origin = "-"
 			}
-			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s\n",
-				pw, r.Prefix, r.PeerAddr, origin, r.ROV, r.ASPA, r.Posture)
+			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				pw, r.Prefix, r.PeerAddr, r.RIB, origin, r.ROV, r.ASPA, r.Posture)
 		}
 		tw.Flush()
 		return nil

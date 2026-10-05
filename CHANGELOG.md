@@ -18,6 +18,7 @@ All notable changes to RAVEN are recorded here.
 - `lab/04-rtr-anomaly.sh` Containerlab demo scenario for live RTR
   anomaly detection (bulk SLURM ROA injection, serial-based confirmation).
 - `/api/v1/audit` takes a `rib` parameter and `raven audit` a `--rib` flag (`pre-policy` by default, `post-policy`, `loc-rib`). The report shows its RIB.
+- BMP Loc-RIB monitoring (RFC 9069, peer type 3): routes are stored as Loc-RIB under the router's BGP ID, so the Loc-RIB of each router stays separate. A Loc-RIB peer is registered from its first Route Monitoring message when the router sends no Peer Up for it (FRR 10.2). `/api/v1/routes` lists pre-policy and Loc-RIB routes. `/api/v1/routes` and `raven routes` show the RIB of each route; `/api/v1/peers` and `raven peers` show the BMP peer type (`global`, `rd`, `local`, `loc-rib`).
 
 ### Changed
 - `raven routes` no longer decodes the AS path of each route, which it did not show.

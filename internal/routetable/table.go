@@ -243,7 +243,7 @@ func (t *Table) GetByPeer(peerAddr netip.Addr) []*types.Route {
 		s := &t.shards[i]
 		s.mu.RLock()
 		for key, route := range s.routes {
-			if key.PeerAddr == peerAddr && route.RIBType == types.AdjRIBInPre {
+			if key.PeerAddr == peerAddr && inDefaultView(route.RIBType) {
 				routes = append(routes, route)
 			}
 		}
@@ -266,15 +266,16 @@ func (t *Table) All() []*types.Route {
 	return routes
 }
 
-// AllPrePolicy returns only Adj-RIB-In Pre-Policy routes — the default
-// operator view showing what routers received before import filtering.
-func (t *Table) AllPrePolicy() []*types.Route {
+// AllDefaultView returns the routes of the default operator view: what the
+// routers received before import filtering (Adj-RIB-In Pre-Policy) and what
+// they selected (Loc-RIB).
+func (t *Table) AllDefaultView() []*types.Route {
 	var routes []*types.Route
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
 		for _, route := range s.routes {
-			if route.RIBType == types.AdjRIBInPre {
+			if inDefaultView(route.RIBType) {
 				routes = append(routes, route)
 			}
 		}
@@ -347,6 +348,11 @@ func (t *Table) CountByPosture() map[types.SecurityPosture]uint64 {
 
 // ─── Internal helpers ───
 
+// inDefaultView leaves Post-Policy out because a router that sends it also sends the same routes Pre-Policy.
+func inDefaultView(rib types.RIBType) bool {
+	return rib == types.AdjRIBInPre || rib == types.LocRIB
+}
+
 func (t *Table) getShard(key types.RouteKey) *shard {
 	h := fnv.New32a()
 	b := key.PeerAddr.As16()
@@ -359,8 +365,8 @@ func (t *Table) getShard(key types.RouteKey) *shard {
 func (t *Table) resolveKeys(keys []types.RouteKey) []*types.Route {
 	routes := make([]*types.Route, 0, len(keys))
 	for _, key := range keys {
-		if key.RIBType != types.AdjRIBInPre {
-			continue // only return pre-policy routes by default
+		if !inDefaultView(key.RIBType) {
+			continue
 		}
 		s := t.getShard(key)
 		s.mu.RLock()

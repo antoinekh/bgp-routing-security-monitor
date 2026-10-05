@@ -233,6 +233,45 @@ func TestGetByPosture(t *testing.T) {
 	}
 }
 
+// The default view holds what the routers received (pre-policy Adj-RIB-In)
+// and what they selected (Loc-RIB). Post-policy routes stay stored but out
+// of the view.
+func TestDefaultViewIncludesLocRIBButNotPostPolicy(t *testing.T) {
+	tbl := New()
+	prefix := "1.0.0.0/24"
+
+	pre := makeRoute("192.0.2.1", prefix, []uint32{64501, 13335})
+	pre.SecurityPosture = types.PostureOriginOnly
+	post := makeRoute("192.0.2.1", prefix, []uint32{64501, 13335})
+	post.RIBType = types.AdjRIBInPost
+	post.SecurityPosture = types.PostureOriginOnly
+	loc := makeRoute("192.0.2.55", prefix, []uint32{64501, 13335})
+	loc.RIBType = types.LocRIB
+	loc.SecurityPosture = types.PostureOriginOnly
+	for _, r := range []*types.Route{pre, post, loc} {
+		tbl.Insert(r)
+	}
+
+	wantRIBs := func(name string, routes []*types.Route) {
+		t.Helper()
+		got := map[types.RIBType]int{}
+		for _, r := range routes {
+			got[r.RIBType]++
+		}
+		if len(routes) != 2 || got[types.AdjRIBInPre] != 1 || got[types.LocRIB] != 1 {
+			t.Errorf("%s returned RIB types %v, want one pre-policy and one Loc-RIB", name, got)
+		}
+	}
+	wantRIBs("GetByPrefix", tbl.GetByPrefix(netip.MustParsePrefix(prefix)))
+	wantRIBs("GetByOriginASN", tbl.GetByOriginASN(13335))
+	wantRIBs("GetByPosture", tbl.GetByPosture(types.PostureOriginOnly))
+	wantRIBs("AllDefaultView", tbl.AllDefaultView())
+
+	if routes := tbl.GetByPeer(netip.MustParseAddr("192.0.2.55")); len(routes) != 1 || routes[0].RIBType != types.LocRIB {
+		t.Errorf("GetByPeer on the Loc-RIB peer returned %d routes, want its Loc-RIB route", len(routes))
+	}
+}
+
 // A router's BGP ID is often the address another router peers with, so a
 // Loc-RIB and an Adj-RIB-In can share a peer address. A withdrawal must only
 // touch the RIBs it was sent for.

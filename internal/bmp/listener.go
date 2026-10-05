@@ -179,9 +179,9 @@ func (l *Listener) handleSession(ctx context.Context, conn net.Conn) {
 		// Withdraw all routes from all peers of this router
 		l.peerMu.RLock()
 		var withdrawals []types.Withdrawal
-		for key := range l.peers {
+		for key, p := range l.peers {
 			if key.RouterAddr == routerAddr.Addr() {
-				withdrawals = append(withdrawals, withdrawAll(key))
+				withdrawals = append(withdrawals, withdrawAll(key, p.PeerType))
 			}
 		}
 		l.peerMu.RUnlock()
@@ -277,7 +277,7 @@ func (l *Listener) processMessage(
 			log.Error("failed to parse peer up", "error", err)
 			return
 		}
-		key := PeerKey{RouterAddr: routerAddr, PeerAddr: pu.PerPeer.PeerAddr}
+		key := pu.PerPeer.Key(routerAddr)
 		l.routerMu.RLock()
 		sysName := l.routers[routerAddr]
 		l.routerMu.RUnlock()
@@ -287,6 +287,7 @@ func (l *Listener) processMessage(
 		l.peerMu.Lock()
 		l.peers[key] = &Peer{
 			Addr:     pu.PerPeer.PeerAddr,
+			PeerType: pu.PerPeer.PeerType,
 			ASN:      pu.PerPeer.PeerASN,
 			LocalASN: pu.LocalASN,
 			RouterID: pu.PerPeer.PeerBGPID,
@@ -296,10 +297,11 @@ func (l *Listener) processMessage(
 			LastMsg:  time.Now(),
 		}
 		l.peerMu.Unlock()
-		metrics.BMPPeerState.WithLabelValues(sysName, pu.PerPeer.PeerAddr.String()).Set(1)
+		setPeerState(sysName, pu.PerPeer, 1)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_up").Inc()
 		log.Info("BMP peer up",
 			"peer", pu.PerPeer.PeerAddr,
+			"type", PeerTypeName(pu.PerPeer.PeerType),
 			"asn", pu.PerPeer.PeerASN,
 			"local_asn", pu.LocalASN,
 			"router_id", pu.PerPeer.PeerBGPID,
@@ -311,7 +313,7 @@ func (l *Listener) processMessage(
 			log.Error("failed to parse peer down", "error", err)
 			return
 		}
-		key := PeerKey{RouterAddr: routerAddr, PeerAddr: pd.PerPeer.PeerAddr}
+		key := pd.PerPeer.Key(routerAddr)
 		l.routerMu.RLock()
 		sysName := l.routers[routerAddr]
 		l.routerMu.RUnlock()
@@ -326,12 +328,12 @@ func (l *Listener) processMessage(
 			p.RouteCount = 0
 		}
 		l.peerMu.Unlock()
-		metrics.BMPPeerState.WithLabelValues(sysName, pd.PerPeer.PeerAddr.String()).Set(0)
+		setPeerState(sysName, pd.PerPeer, 0)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_down").Inc()
 		log.Info("BMP peer down", "peer", pd.PerPeer.PeerAddr, "reason", pd.Reason)
 		// Implicitly withdraw everything the peer advertised, as a real BGP
 		// session going down would.
-		w := withdrawAll(key)
+		w := withdrawAll(key, pd.PerPeer.PeerType)
 		l.emit(ctx, types.IngestEvent{Withdrawal: &w})
 
 	case MsgTypeRouteMonitoring:
@@ -353,6 +355,9 @@ func (l *Listener) processMessage(
 			log.Debug("failed to parse BGP UPDATE", "error", err)
 			return
 		}
+		if rm.PerPeer.IsLocRIB() && len(routes)+len(withdrawals) > 0 {
+			l.registerLocRIBPeer(log, routerAddr, sysName, rm.PerPeer)
+		}
 		for i := range routes {
 			if !l.emit(ctx, types.IngestEvent{Route: &routes[i]}) {
 				return
@@ -365,7 +370,7 @@ func (l *Listener) processMessage(
 		}
 
 		// Update peer last-message time
-		key := PeerKey{RouterAddr: routerAddr, PeerAddr: rm.PerPeer.PeerAddr}
+		key := rm.PerPeer.Key(routerAddr)
 		l.peerMu.Lock()
 		if p, ok := l.peers[key]; ok {
 			p.LastMsg = time.Now()
@@ -390,12 +395,49 @@ func (l *Listener) processMessage(
 	}
 }
 
-// withdrawAll builds the withdrawal of every route a BMP peer fed.
-func withdrawAll(key PeerKey) types.Withdrawal {
+// registerLocRIBPeer marks a router's Loc-RIB up when it sends routes without a Peer Up, as FRR 10.2 does, so that its routes are withdrawn when the session ends.
+func (l *Listener) registerLocRIBPeer(log *slog.Logger, routerAddr netip.Addr, sysName string, pph BMPPerPeerHeader) {
+	key := pph.Key(routerAddr)
+	l.peerMu.Lock()
+	if p, ok := l.peers[key]; ok && p.State == "up" {
+		l.peerMu.Unlock()
+		return
+	}
+	now := time.Now()
+	l.peers[key] = &Peer{
+		Addr:     pph.PeerAddr,
+		PeerType: pph.PeerType,
+		ASN:      pph.PeerASN,
+		LocalASN: pph.PeerASN,
+		RouterID: pph.PeerBGPID,
+		SysName:  sysName,
+		State:    "up",
+		UpSince:  now,
+		LastMsg:  now,
+	}
+	l.peerMu.Unlock()
+	setPeerState(sysName, pph, 1)
+	log.Info("BMP Loc-RIB peer registered without Peer Up",
+		"peer", pph.PeerAddr,
+		"asn", pph.PeerASN,
+	)
+}
+
+func setPeerState(sysName string, pph BMPPerPeerHeader, state float64) {
+	metrics.BMPPeerState.WithLabelValues(sysName, pph.PeerAddr.String()).Set(state)
+}
+
+// withdrawAll builds the withdrawal of every route a BMP peer fed, limited
+// to the RIBs of its peer type.
+func withdrawAll(key PeerKey, peerType uint8) types.Withdrawal {
+	ribs := []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost}
+	if peerType == PeerTypeLocRIB {
+		ribs = []types.RIBType{types.LocRIB}
+	}
 	return types.Withdrawal{
 		PeerAddr:    key.PeerAddr,
 		WithdrawAll: true,
-		RIBs:        []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost},
+		RIBs:        ribs,
 	}
 }
 
@@ -427,13 +469,18 @@ func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]
 	// Look up the monitoring router's own AS on this session, learned from
 	// the Peer Up message's Sent OPEN (see ParsePeerUp). Needed for ASPA's
 	// final path[0]-vs-local-AS check.
-	key := PeerKey{RouterAddr: routerAddr, PeerAddr: rm.PerPeer.PeerAddr}
+	key := rm.PerPeer.Key(routerAddr)
 	l.peerMu.RLock()
 	var localASN uint32
 	if p, ok := l.peers[key]; ok {
 		localASN = p.LocalASN
 	}
 	l.peerMu.RUnlock()
+	// The Peer AS of a Loc-RIB header is the router's own AS (RFC 9069 §5.1),
+	// which does not depend on a Peer Up having been received.
+	if rm.PerPeer.IsLocRIB() {
+		localASN = rm.PerPeer.PeerASN
+	}
 
 	routes, withdrawals, err := parseBGPUpdate(updateBody, rm.PerPeer, localASN)
 	if err != nil {
@@ -451,7 +498,10 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, localASN uint32) ([]types
 		return nil, nil, nil
 	}
 	ribType := types.AdjRIBInPre
-	if pph.IsPostPolicy() {
+	switch {
+	case pph.IsLocRIB():
+		ribType = types.LocRIB
+	case pph.IsPostPolicy():
 		ribType = types.AdjRIBInPost
 	}
 

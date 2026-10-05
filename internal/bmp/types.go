@@ -16,12 +16,29 @@ const (
 	MsgTypeRouteMirroring   uint8 = 6
 )
 
-// BMP Peer Types (RFC 7854 §4.2)
+// BMP Peer Types (RFC 7854 §4.2, RFC 9069)
 const (
 	PeerTypeGlobal  uint8 = 0
 	PeerTypeRDLocal uint8 = 1
 	PeerTypeLocal   uint8 = 2
+	PeerTypeLocRIB  uint8 = 3
 )
+
+// PeerTypeName returns the name RAVEN reports for a BMP peer type.
+func PeerTypeName(peerType uint8) string {
+	switch peerType {
+	case PeerTypeGlobal:
+		return "global"
+	case PeerTypeRDLocal:
+		return "rd"
+	case PeerTypeLocal:
+		return "local"
+	case PeerTypeLocRIB:
+		return "loc-rib"
+	default:
+		return "unknown"
+	}
+}
 
 // BMP Peer Flags (RFC 7854 §4.2)
 const (
@@ -62,19 +79,30 @@ type BMPPerPeerHeader struct {
 	Timestamp         time.Time
 }
 
+// Key returns the key of the peer this header describes on the given router.
+func (h *BMPPerPeerHeader) Key(routerAddr netip.Addr) PeerKey {
+	return PeerKey{RouterAddr: routerAddr, PeerAddr: h.PeerAddr}
+}
+
+// IsLocRIB returns true if this header describes the router's own Loc-RIB
+// (RFC 9069) rather than one of its BGP peers.
+func (h *BMPPerPeerHeader) IsLocRIB() bool {
+	return h.PeerType == PeerTypeLocRIB
+}
+
 // IsIPv6 returns true if the peer address is IPv6.
 func (h *BMPPerPeerHeader) IsIPv6() bool {
-	return h.Flags&PeerFlagIPv6 != 0
+	return !h.IsLocRIB() && h.Flags&PeerFlagIPv6 != 0
 }
 
 // IsPostPolicy returns true if this is Post-Policy Adj-RIB-In.
 func (h *BMPPerPeerHeader) IsPostPolicy() bool {
-	return h.Flags&PeerFlagPostPolicy != 0
+	return !h.IsLocRIB() && h.Flags&PeerFlagPostPolicy != 0
 }
 
 // IsAdjRIBOut returns true if this is Adj-RIB-Out (RFC 8671).
 func (h *BMPPerPeerHeader) IsAdjRIBOut() bool {
-	return h.Flags&PeerFlagAdjRIBOut != 0
+	return !h.IsLocRIB() && h.Flags&PeerFlagAdjRIBOut != 0
 }
 
 // BMPInitiation represents a BMP Initiation message (Type 4).
@@ -119,6 +147,7 @@ type BMPStatsReport struct {
 // Peer is the runtime state RAVEN maintains per BMP peer session.
 type Peer struct {
 	Addr       netip.Addr
+	PeerType   uint8
 	ASN        uint32
 	LocalASN   uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
 	RouterID   netip.Addr
