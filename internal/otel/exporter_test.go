@@ -175,6 +175,36 @@ func TestStateReader_Interface(t *testing.T) {
 	}
 }
 
+// A router's Loc-RIB and a BGP peer of another router can share a peer
+// address, so each gets its own raven.peer.routes series.
+func TestPeerRoutesKeepPeersWithTheSameAddressApart(t *testing.T) {
+	sr := &mockReader{
+		peerCounts: []ravenotel.PeerRouteCount{
+			{Router: "rr1", PeerAddr: "10.0.12.1", PeerType: "loc-rib", PeerASN: 65000, Posture: "unverified", Count: 3},
+			{Router: "rr2", PeerAddr: "10.0.12.1", PeerType: "global", PeerASN: 65000, Posture: "unverified", Count: 4},
+		},
+	}
+	exp, _ := newTestExporter(t, sr)
+	rm := collectMetrics(t, exp)
+
+	got := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != ravenotel.MetricPeerRoutes {
+				continue
+			}
+			for _, dp := range m.Data.(metricdata.Gauge[int64]).DataPoints {
+				router, _ := dp.Attributes.Value("router")
+				peerType, _ := dp.Attributes.Value("peer_type")
+				got[router.AsString()+"/"+peerType.AsString()] = dp.Value
+			}
+		}
+	}
+	if len(got) != 2 || got["rr1/loc-rib"] != 3 || got["rr2/global"] != 4 {
+		t.Errorf("raven.peer.routes = %v, want rr1/loc-rib 3 and rr2/global 4", got)
+	}
+}
+
 // TestOTelConfig_Defaults verifies that an empty OTelConfig gets the documented
 // default values after applyDefaults (exercised indirectly via NewExporterWithReader).
 func TestOTelConfig_Defaults(t *testing.T) {

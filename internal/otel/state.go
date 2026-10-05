@@ -35,10 +35,13 @@ type RouteCount struct {
 
 // PeerRouteCount holds the route count for a single BGP peer.
 type PeerRouteCount struct {
-	PeerAddr string
-	PeerASN  uint32
-	Posture  string
-	Count    int64
+	Router        string
+	PeerAddr      string
+	Distinguisher string
+	PeerType      string
+	PeerASN       uint32
+	Posture       string
+	Count         int64
 }
 
 // BMPSessionState holds the up/down state for one router's BMP session.

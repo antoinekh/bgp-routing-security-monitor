@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/nokia/bgp-routing-security-monitor/internal/bmp"
 	ravenotel "github.com/nokia/bgp-routing-security-monitor/internal/otel"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
@@ -42,10 +43,13 @@ func (s *Server) PeerRouteCounts() []ravenotel.PeerRouteCount {
 	result := make([]ravenotel.PeerRouteCount, 0, len(peers))
 	for _, p := range peers {
 		result = append(result, ravenotel.PeerRouteCount{
-			PeerAddr: p.Addr.String(),
-			PeerASN:  p.ASN,
-			Posture:  "unverified", // per-peer posture not tracked; use "unverified"
-			Count:    int64(p.RouteCount),
+			Router:        p.SysName,
+			PeerAddr:      p.Addr.String(),
+			Distinguisher: p.Distinguisher.String(),
+			PeerType:      bmp.PeerTypeName(p.PeerType),
+			PeerASN:       p.ASN,
+			Posture:       "unverified", // per-peer posture not tracked; use "unverified"
+			Count:         int64(p.RouteCount),
 		})
 	}
 	return result
