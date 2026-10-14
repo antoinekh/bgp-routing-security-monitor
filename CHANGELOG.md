@@ -17,6 +17,10 @@ All notable changes to RAVEN are recorded here.
   `raven_rtr_anomaly_last_timestamp`.
 - `lab/04-rtr-anomaly.sh` Containerlab demo scenario for live RTR
   anomaly detection (bulk SLURM ROA injection, serial-based confirmation).
+- Opt-in pprof profiling endpoint (`debug.pprof.listen`, off by default)
+  for diagnosing memory growth on long-running daemons. Served on its own
+  listener and mux, never on `http.DefaultServeMux`; warns at startup if
+  bound beyond loopback.
 
 ### Fixed
 - RTR anomaly detector no longer evaluates or contaminates its baseline

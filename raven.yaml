@@ -32,6 +32,16 @@ logging:
   level: info
   format: json
 
+# Operator diagnostics. Off by default.
+#
+# debug.pprof.listen starts a Go pprof profiling endpoint on its own listener,
+# separate from the API and metrics servers. Keep it on loopback: it is
+# unauthenticated and heap profiles expose process memory. RAVEN logs a
+# warning at startup if it binds anything other than 127.x or ::1.
+# debug:
+#   pprof:
+#     listen: "localhost:6060"
+
 # Correlation against third-party routing data. Disabled by default: RAVEN
 # makes no outbound calls to these providers unless you opt in here.
 #

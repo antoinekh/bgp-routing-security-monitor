@@ -19,6 +19,21 @@ type Config struct {
 	Events      EventsConfig      `mapstructure:"events"`
 	Persistence PersistenceConfig `mapstructure:"persistence"`
 	External    ExternalConfig    `mapstructure:"external"`
+	Debug       DebugConfig       `mapstructure:"debug"`
+}
+
+// DebugConfig holds operator diagnostics. Everything here defaults to off.
+type DebugConfig struct {
+	Pprof PprofConfig `mapstructure:"pprof"`
+}
+
+// PprofConfig configures the runtime profiling endpoint.
+type PprofConfig struct {
+	// Listen is the address the pprof HTTP server binds to, e.g.
+	// "localhost:6060". Empty (the default) disables it entirely. It is a
+	// separate listener from the API and metrics servers so that it can be
+	// kept on loopback while those are exposed.
+	Listen string `mapstructure:"listen"`
 }
 
 // ExternalConfig configures correlation against third-party routing data
@@ -286,6 +301,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("external.ripestat.timeout", 5*time.Second)
 	viper.SetDefault("external.ripestat.cache-ttl", 60*time.Second)
 	viper.SetDefault("external.ripestat.rate-limit-per-min", 10)
+	viper.SetDefault("debug.pprof.listen", "")
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {

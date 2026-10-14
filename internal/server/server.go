@@ -293,6 +293,9 @@ func (s *Server) Run() error {
 		}()
 	}
 
+	// pprof profiling endpoint — opt-in via debug.pprof.listen, off by default.
+	s.startPprof(ctx, &wg)
+
 	// OTel metrics exporter — non-fatal if collector is unreachable.
 	if s.cfg.Outputs.OTel.Enabled {
 		otelCfg := otelexporter.OTelConfig{
