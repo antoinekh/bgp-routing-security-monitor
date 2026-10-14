@@ -64,6 +64,10 @@ external:                           # optional third-party correlation (see belo
 logging:
   level: info                       # debug | info | warn | error
   format: text                      # text | json
+
+debug:
+  pprof:
+    listen: ""                      # e.g. "localhost:6060"; empty = disabled (default)
 ```
 
 !!! note

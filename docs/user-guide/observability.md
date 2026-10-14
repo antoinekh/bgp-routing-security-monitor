@@ -320,3 +320,85 @@ docker run -d \
 
 Then import the dashboard as described above and point the Prometheus
 datasource at your RAVEN metrics endpoint.
+
+## Memory Profiling (pprof)
+
+RAVEN can expose Go's runtime profiler for diagnosing memory growth, CPU hot
+spots or goroutine leaks on a running daemon. It is **off by default** and
+runs on its own listener, separate from the API server and the Prometheus
+endpoint.
+
+### Enabling the pprof Endpoint
+
+Add to your `raven.yaml` and restart RAVEN:
+
+```yaml
+debug:
+  pprof:
+    listen: "localhost:6060"   # empty or absent = disabled (default)
+```
+
+RAVEN logs `pprof endpoint started` with the bound address when it is up.
+An idle endpoint costs nothing: profiling work happens only while a profile
+is being requested, and a CPU profile adds a few percent of overhead for
+the seconds it runs.
+
+!!! warning
+    Keep pprof on loopback. The endpoint is unauthenticated, and heap
+    profiles expose process memory contents. If the listen address binds
+    anything other than `127.x` or `::1` (including `:6060`, which binds
+    every interface), RAVEN logs a warning at startup. To profile a remote
+    host, leave it on `localhost` and tunnel in:
+    `ssh -L 6060:localhost:6060 raven-host`.
+
+### Diagnosing Memory Growth
+
+**Live heap — what is holding memory right now:**
+
+```bash
+go tool pprof http://localhost:6060/debug/pprof/heap
+```
+
+At the `(pprof)` prompt, `top` ranks functions by in-use memory and `list
+<func>` shows the allocating lines. To find what is *growing*, save a heap
+profile now and another a few hours later, then diff them:
+
+```bash
+curl -s -o heap-1.pb.gz http://localhost:6060/debug/pprof/heap
+# ...hours later...
+curl -s -o heap-2.pb.gz http://localhost:6060/debug/pprof/heap
+go tool pprof -base heap-1.pb.gz heap-2.pb.gz
+```
+
+**Allocations since start — what is churning memory:**
+
+```bash
+go tool pprof http://localhost:6060/debug/pprof/allocs
+```
+
+This counts every allocation since the process started, including memory
+already freed. High churn with flat in-use memory points at GC pressure
+rather than a leak.
+
+**Goroutines — whether something is accumulating:**
+
+```bash
+curl -s http://localhost:6060/debug/pprof/goroutine?debug=1
+```
+
+Goroutines are grouped by identical stack, with a count for each. A count
+that keeps climbing between runs, for example per-session or per-subscriber
+goroutines outliving their peer, is a leak in its own right. Each leaked
+goroutine also pins whatever memory it references.
+
+!!! note
+    RSS reported by the OS can sit well above the Go heap in use: the
+    runtime returns freed memory to the OS lazily. Compare the heap
+    profile's in-use total against `go_memstats_heap_inuse_bytes` on the
+    Prometheus endpoint before concluding that memory is leaking outside the
+    heap.
+
+Other endpoints follow the standard Go layout: `/debug/pprof/` lists every
+profile, `/debug/pprof/profile?seconds=30` is a CPU profile, and
+`/debug/pprof/trace?seconds=5` is an execution trace. Delta profiles
+(`?seconds=` on heap or allocs) are not supported; use `-base` as shown above.
