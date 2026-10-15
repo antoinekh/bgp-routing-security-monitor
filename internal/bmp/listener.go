@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
@@ -28,8 +29,54 @@ type Listener struct {
 	peerMu   sync.RWMutex
 	peers    map[PeerKey]*Peer
 	routerMu sync.RWMutex
-	routers  map[netip.Addr]string
+	routers  map[netip.Addr]routerInfo
 	listener net.Listener
+
+	lastSession atomic.Uint64 // last session ID handed out; IDs start at 1
+	sessMu      sync.Mutex
+	sessions    map[netip.Addr]*bmpSession // the current session per router address
+}
+
+// routerInfo is what Initiation told us about a router, and which session
+// told us.
+type routerInfo struct {
+	sysName string
+	session uint64
+}
+
+// bmpSession is one accepted BMP connection.
+type bmpSession struct {
+	id     uint64
+	router netip.Addr
+	conn   net.Conn
+
+	// mu is held for each send on the ingest stream so that retire can
+	// wait out a send in progress: once retire returns, the session puts
+	// nothing more on the stream but its final session-end withdrawal.
+	mu      sync.Mutex
+	retired bool
+	ended   bool // its session-end withdrawal has been sent
+}
+
+// retire stops a superseded session from emitting any further routes or
+// withdrawals, tells the Route Table so it drops anything of the session's
+// still in flight, then closes the session's socket.
+func (l *Listener) retire(ctx context.Context, s *bmpSession) {
+	s.mu.Lock()
+	// Once its session end has gone out the session has nothing left to
+	// send, and the Route Table must not start tracking it.
+	if !s.ended {
+		l.emit(ctx, types.IngestEvent{Session: s.id, Superseded: true})
+	}
+	s.retired = true
+	s.mu.Unlock()
+	s.conn.Close()
+}
+
+func (s *bmpSession) isRetired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retired
 }
 
 // NewListener creates a BMP listener that sends parsed routes and withdrawals,
@@ -42,7 +89,8 @@ func NewListener(addr string, tlsCfg *tls.Config, ingestCh chan<- types.IngestEv
 		log:      log.With("subsystem", "bmp"),
 		ingestCh: ingestCh,
 		peers:    make(map[PeerKey]*Peer),
-		routers:  make(map[netip.Addr]string),
+		routers:  make(map[netip.Addr]routerInfo),
+		sessions: make(map[netip.Addr]*bmpSession),
 	}
 }
 
@@ -64,6 +112,36 @@ func (l *Listener) emit(ctx context.Context, ev types.IngestEvent) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// emitFrom sends ev on the ingest stream on behalf of sess, stamped with its
+// session ID. It returns false, sending nothing, if sess has been superseded.
+func (l *Listener) emitFrom(ctx context.Context, sess *bmpSession, ev types.IngestEvent) bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.retired {
+		return false
+	}
+	ev.Session = sess.id
+	return l.emit(ctx, ev)
+}
+
+// register makes a new session for conn the current one for its router
+// address and returns it, along with the still-open session it replaces, if
+// any. Called from the accept loop, so session IDs increase in the order
+// connections were accepted.
+//
+// Sessions are matched by source IP alone. Routers behind one NAT address
+// therefore look like a single router reconnecting, and each new session
+// from any of them supersedes, and closes, the others'.
+func (l *Listener) register(conn net.Conn) (sess, old *bmpSession) {
+	routerAddr, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
+	sess = &bmpSession{id: l.lastSession.Add(1), router: routerAddr.Addr(), conn: conn}
+	l.sessMu.Lock()
+	old = l.sessions[sess.router]
+	l.sessions[sess.router] = sess
+	l.sessMu.Unlock()
+	return sess, old
 }
 
 // BuildTLSConfig assembles a server-side *tls.Config from the operator-supplied
@@ -132,11 +210,11 @@ func (l *Listener) Start(ctx context.Context) error {
 			continue
 		}
 
-		remoteAddr := conn.RemoteAddr().String()
-		l.log.Info("BMP session accepted", "remote", remoteAddr)
+		sess, old := l.register(conn)
+		l.log.Info("BMP session accepted", "remote", conn.RemoteAddr().String(), "session", sess.id)
 
 		// One goroutine per BMP session (per the architecture doc)
-		go l.handleSession(ctx, conn)
+		go l.handleSession(ctx, sess, old)
 	}
 }
 
@@ -160,55 +238,78 @@ func (l *Listener) GetRouterStates() map[string]int64 {
 	defer l.routerMu.RUnlock()
 
 	result := make(map[string]int64, len(l.routers))
-	for _, sysName := range l.routers {
-		result[sysName] = 1
+	for _, r := range l.routers {
+		result[r.sysName] = 1
 	}
 	return result
 }
 
-// handleSession processes a single BMP session (one TCP connection = one router).
-func (l *Listener) handleSession(ctx context.Context, conn net.Conn) {
+// handleSession processes a single BMP session (one TCP connection = one
+// router). old, if non-nil, is an earlier session from the same router
+// address that is still open; sess supersedes it.
+func (l *Listener) handleSession(ctx context.Context, sess, old *bmpSession) {
+	conn := sess.conn
 	defer conn.Close()
 	remoteAddr := conn.RemoteAddr().String()
-	routerAddr, _ := netip.ParseAddrPort(remoteAddr)
-	sessionLog := l.log.With("router", remoteAddr)
+	sessionLog := l.log.With("router", remoteAddr, "session", sess.id)
 	sessionLog.Info("BMP session started")
+
+	// Takeover. A router opens a new session while the old socket is still
+	// open when it has given up on the old one (e.g. it judged the station
+	// stuck). Retire the old one before reading anything, so all of its
+	// remaining output reaches the ingest stream ahead of ours and it cannot
+	// deliver late updates or withdrawals over the routes we are about to
+	// send; the Route Table also drops anything of its that arrives after
+	// the retirement.
+	//
+	// "Same router" means same source IP (see register): routers sharing
+	// one NAT address would supersede each other's sessions.
+	if old != nil {
+		sessionLog.Warn("superseding stale BMP session", "stale_session", old.id)
+		l.retire(ctx, old)
+	}
 
 	defer func() {
 		sessionLog.Info("BMP session ended")
-		// Withdraw all routes from all peers of this router
-		l.peerMu.RLock()
-		var peerAddrs []netip.Addr
-		for key := range l.peers {
-			if key.RouterAddr == routerAddr.Addr() {
-				peerAddrs = append(peerAddrs, key.PeerAddr)
-			}
-		}
-		l.peerMu.RUnlock()
+		// Withdraw every route this session still owns, from all of its
+		// peers. Routes a newer session has re-announced since are that
+		// session's and stay. Sent even if this session was superseded.
+		// emit fails only when shutting down. Under sess.mu, so a
+		// takeover's retirement notice cannot follow it.
+		sess.mu.Lock()
+		sess.ended = true
+		l.emit(ctx, types.IngestEvent{
+			Withdrawal: &types.Withdrawal{SessionEnd: true},
+			Session:    sess.id,
+		})
+		sess.mu.Unlock()
 
-		for _, peerAddr := range peerAddrs {
-			if !l.emit(ctx, types.IngestEvent{Withdrawal: &types.Withdrawal{
-				PeerAddr:    peerAddr,
-				WithdrawAll: true,
-			}}) {
-				break // shutting down
-			}
+		l.sessMu.Lock()
+		if l.sessions[sess.router] == sess {
+			delete(l.sessions, sess.router)
 		}
+		l.sessMu.Unlock()
 
-		// Clean up peers for this router
+		// Clean up this session's peers. A newer session from the same
+		// router may have replaced some entries already; leave those.
 		l.peerMu.Lock()
-		for key := range l.peers {
-			if key.RouterAddr == routerAddr.Addr() {
+		for key, p := range l.peers {
+			if key.RouterAddr == sess.router && p.session == sess.id {
 				delete(l.peers, key)
 			}
 		}
 		l.peerMu.Unlock()
 
-		// Clean up router state
+		// Clean up router state, unless a newer session owns it now.
 		l.routerMu.Lock()
-		sysName := l.routers[routerAddr.Addr()]
-		delete(l.routers, routerAddr.Addr())
+		r, ok := l.routers[sess.router]
+		if ok && r.session != sess.id {
+			l.routerMu.Unlock()
+			return
+		}
+		delete(l.routers, sess.router)
 		l.routerMu.Unlock()
+		sysName := r.sysName
 		if sysName == "" {
 			sysName = remoteAddr
 		}
@@ -244,7 +345,7 @@ func (l *Listener) handleSession(ctx context.Context, conn net.Conn) {
 				return
 			}
 		}
-		l.processMessage(ctx, sessionLog, routerAddr.Addr(), hdr, body)
+		l.processMessage(ctx, sessionLog, sess, hdr, body)
 	}
 }
 
@@ -252,10 +353,15 @@ func (l *Listener) handleSession(ctx context.Context, conn net.Conn) {
 func (l *Listener) processMessage(
 	ctx context.Context,
 	log *slog.Logger,
-	routerAddr netip.Addr,
+	sess *bmpSession,
 	hdr BMPCommonHeader,
 	body []byte,
 ) {
+	// A superseded session's router and peer state belong to its successor.
+	if sess.isRetired() {
+		return
+	}
+	routerAddr := sess.router
 	switch hdr.MsgType {
 	case MsgTypeInitiation:
 		init, err := ParseInitiation(body)
@@ -269,7 +375,7 @@ func (l *Listener) processMessage(
 			sysName = routerAddr.String()
 		}
 		l.routerMu.Lock()
-		l.routers[routerAddr] = sysName
+		l.routers[routerAddr] = routerInfo{sysName: sysName, session: sess.id}
 		l.routerMu.Unlock()
 		metrics.BMPSessionState.WithLabelValues(sysName).Set(1)
 		log.Info("BMP initiation", "sysName", sysName, "sysDescr", init.SysDescr)
@@ -282,7 +388,7 @@ func (l *Listener) processMessage(
 		}
 		key := PeerKey{RouterAddr: routerAddr, PeerAddr: pu.PerPeer.PeerAddr}
 		l.routerMu.RLock()
-		sysName := l.routers[routerAddr]
+		sysName := l.routers[routerAddr].sysName
 		l.routerMu.RUnlock()
 		if sysName == "" {
 			sysName = routerAddr.String()
@@ -297,6 +403,7 @@ func (l *Listener) processMessage(
 			State:    "up",
 			UpSince:  time.Now(),
 			LastMsg:  time.Now(),
+			session:  sess.id,
 		}
 		l.peerMu.Unlock()
 		metrics.BMPPeerState.WithLabelValues(sysName, pu.PerPeer.PeerAddr.String()).Set(1)
@@ -316,7 +423,7 @@ func (l *Listener) processMessage(
 		}
 		key := PeerKey{RouterAddr: routerAddr, PeerAddr: pd.PerPeer.PeerAddr}
 		l.routerMu.RLock()
-		sysName := l.routers[routerAddr]
+		sysName := l.routers[routerAddr].sysName
 		l.routerMu.RUnlock()
 		if sysName == "" {
 			sysName = routerAddr.String()
@@ -334,14 +441,14 @@ func (l *Listener) processMessage(
 		log.Info("BMP peer down", "peer", pd.PerPeer.PeerAddr, "reason", pd.Reason)
 		// Implicitly withdraw everything the peer advertised, as a real BGP
 		// session going down would.
-		l.emit(ctx, types.IngestEvent{Withdrawal: &types.Withdrawal{
+		l.emitFrom(ctx, sess, types.IngestEvent{Withdrawal: &types.Withdrawal{
 			PeerAddr:    pd.PerPeer.PeerAddr,
 			WithdrawAll: true,
 		}})
 
 	case MsgTypeRouteMonitoring:
 		l.routerMu.RLock()
-		sysName := l.routers[routerAddr]
+		sysName := l.routers[routerAddr].sysName
 		l.routerMu.RUnlock()
 		if sysName == "" {
 			sysName = routerAddr.String()
@@ -359,12 +466,12 @@ func (l *Listener) processMessage(
 			return
 		}
 		for i := range routes {
-			if !l.emit(ctx, types.IngestEvent{Route: &routes[i]}) {
+			if !l.emitFrom(ctx, sess, types.IngestEvent{Route: &routes[i]}) {
 				return
 			}
 		}
 		for i := range withdrawals {
-			if !l.emit(ctx, types.IngestEvent{Withdrawal: &withdrawals[i]}) {
+			if !l.emitFrom(ctx, sess, types.IngestEvent{Withdrawal: &withdrawals[i]}) {
 				return
 			}
 		}

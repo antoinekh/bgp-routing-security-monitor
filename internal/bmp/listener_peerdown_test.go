@@ -38,7 +38,7 @@ func TestPeerDownIsNotDroppedWhenIngestIsFull(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processMessage(context.Background(), l.log, router,
+		l.processMessage(context.Background(), l.log, &bmpSession{id: 3, router: router},
 			BMPCommonHeader{Version: 3, MsgType: MsgTypePeerDown}, peerDownBody(peer))
 	}()
 
@@ -50,6 +50,9 @@ func TestPeerDownIsNotDroppedWhenIngestIsFull(t *testing.T) {
 	case ev := <-ingest:
 		if ev.Withdrawal == nil || !ev.Withdrawal.WithdrawAll || ev.Withdrawal.PeerAddr != peer {
 			t.Fatalf("got %+v, want a withdraw-all for %s", ev, peer)
+		}
+		if ev.Session != 3 {
+			t.Errorf("withdraw-all session = %d, want 3 (scoped to the session that saw the peer down)", ev.Session)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no withdraw-all for the downed peer — the signal was dropped")

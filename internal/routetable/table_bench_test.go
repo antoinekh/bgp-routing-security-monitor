@@ -23,10 +23,15 @@ func benchRoutes(n int) []*types.Route {
 			ASPath:          []uint32{64500, uint32(65000 + i%1000)},
 			RIBType:         types.AdjRIBInPre,
 			SecurityPosture: types.PostureOriginOnly,
+			OwnerSession:    benchSession,
 		}
 	}
 	return routes
 }
+
+// benchSession is the BMP session the bench routes arrive on, so peer-downs
+// take the same path as a live session's.
+const benchSession = 1
 
 func buildTable(routes []*types.Route) *Table {
 	tbl := New()
@@ -62,7 +67,7 @@ func BenchmarkWithdrawAllFromPeer(b *testing.B) {
 				b.StopTimer()
 				tbl := buildTable(routes)
 				b.StartTimer()
-				tbl.WithdrawAllFromPeer(peer)
+				tbl.WithdrawAllFromPeer(peer, benchSession)
 			}
 		})
 	}
@@ -93,7 +98,7 @@ func TestIndexMaintenanceScalesLinearly(t *testing.T) {
 			start := time.Now()
 			tbl := buildTable(routes)
 			for p := 0; p < benchPeers; p++ {
-				tbl.WithdrawAllFromPeer(netip.AddrFrom4([4]byte{192, 0, 2, byte(p)}))
+				tbl.WithdrawAllFromPeer(netip.AddrFrom4([4]byte{192, 0, 2, byte(p)}), benchSession)
 			}
 			if d := time.Since(start); d < best {
 				best = d
