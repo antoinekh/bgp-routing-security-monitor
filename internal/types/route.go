@@ -39,6 +39,12 @@ type Route struct {
 	// still active. Stale routes are excluded from Event Engine
 	// evaluation.
 	Stale bool
+
+	// OwnerSession is the ID of the BMP session that last announced this
+	// route (see IngestEvent.Session). Withdraw-alls only remove routes
+	// their own session owns. Zero means no live session owns the route,
+	// e.g. one restored from a snapshot.
+	OwnerSession uint64
 }
 
 // Withdrawal represents a BGP route withdrawal received via BMP.
@@ -46,11 +52,14 @@ type Withdrawal struct {
 	PeerAddr    netip.Addr
 	Prefix      netip.Prefix
 	RIBType     RIBType
-	WithdrawAll bool // if true, withdraw all routes from PeerAddr
+	WithdrawAll bool // if true, withdraw all of the session's routes from PeerAddr
+	// SessionEnd withdraws every route the session owns, from any peer.
+	// PeerAddr and Prefix are ignored.
+	SessionEnd bool
 }
 
 // IngestEvent is one item on the BMP ingest stream. Exactly one of Route or
-// Withdrawal is set.
+// Withdrawal is set, unless Superseded is.
 //
 // Routes and withdrawals share one channel so the Route Table applies them in
 // the order the router sent them. On separate channels a peer-down could be
@@ -59,6 +68,19 @@ type Withdrawal struct {
 type IngestEvent struct {
 	Route      *Route
 	Withdrawal *Withdrawal
+	// Session is the ID of the BMP session the event came from. IDs are
+	// unique and increase with each accepted connection; zero is never
+	// assigned to a live session.
+	//
+	// A router that reconnects while its old socket is still open has two
+	// sessions at once. Without the ID, the old session's withdraw-all on
+	// close removed routes the new session had just re-announced.
+	Session uint64
+	// Superseded marks a control event, with neither Route nor Withdrawal
+	// set: a newer session from the same router has replaced Session. The
+	// Route Table drops any later event from Session except its final
+	// SessionEnd withdrawal.
+	Superseded bool
 }
 
 // OriginASN returns the last ASN in the AS_PATH (the route originator).

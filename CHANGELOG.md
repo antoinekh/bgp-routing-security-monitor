@@ -27,6 +27,21 @@ All notable changes to RAVEN are recorded here.
   with full (non-incremental) RTR syncs, which previously produced a
   false-positive high-severity anomaly on every `raven rtr monitor`
   startup.
+- A router reconnecting while its old BMP session was still open could
+  empty the route table: when the stale session finally closed, its
+  withdraw-all removed the routes the new session had just re-announced
+  (seen in production as 643k → 8k routes). Routes now record the BMP
+  session that announced them, and peer-down and session-end withdraw-alls
+  remove only that session's routes. A new session from a router that
+  already has one open supersedes it: the old socket is closed, a WARN
+  "superseding stale BMP session" is logged, and the old session's
+  in-flight updates are dropped. A peer-down still also removes the peer's
+  routes restored from a snapshot; a session end leaves those to stale
+  eviction. Large withdraw-alls are applied in chunks between ingest
+  events instead of blocking ingest.
+  **Note:** "same router" means same source IP address. Routers that reach
+  RAVEN through one NAT address will supersede each other's BMP sessions;
+  give each router its own address.
   
 ## v0.3.3 (2026-07-02)
 

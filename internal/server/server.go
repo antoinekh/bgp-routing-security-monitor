@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -64,6 +66,36 @@ type Server struct {
 	rtrMu       sync.RWMutex
 	rtrStates   map[string]int64 // cache address → 1 connected, 0 disconnected
 	rtrLastSync map[string]int64 // cache address → unix seconds of last sync
+
+	// Owned by ingestLoop.
+	removals []*pendingRemoval
+	// retired holds BMP sessions a newer session from the same router has
+	// superseded and that have not ended yet, with the number of their
+	// late events dropped so far.
+	retired map[uint64]int
+	// removalsPending mirrors len(removals) for tests.
+	removalsPending atomic.Int64
+}
+
+// A large withdraw-all is applied a chunk at a time so it never holds up
+// ingest: chunks run back to back while no event is waiting, and while events
+// are waiting, one chunk runs per removalEvery events, so the removal still
+// finishes under sustained load, at one route per event applied. Removing a
+// route costs about what ingesting one does, so that at most halves ingest
+// throughput while it lasts. No event waits on more than one chunk.
+const (
+	removalChunk = 256
+	removalEvery = 256
+)
+
+// pendingRemoval is a peer-down or session-end withdraw-all that ingestLoop
+// is still applying.
+type pendingRemoval struct {
+	rm      *routetable.Removal
+	session uint64
+	peer    netip.Addr // invalid for a session end
+	removed int
+	started time.Time
 }
 
 // New creates a new RAVEN server from the given config.
@@ -95,6 +127,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 		rtrReady:    make(chan struct{}),
 		rtrStates:   make(map[string]int64),
 		rtrLastSync: make(map[string]int64),
+		retired:     make(map[uint64]int),
 	}
 
 	// Existing API server
@@ -447,34 +480,112 @@ func (s *Server) ingestLoop(ctx context.Context) {
 	}
 
 	var count uint64
+	stop := func() { s.log.Info("route ingest pipeline stopped", "total_ingested", count) }
+	sinceChunk := 0 // events applied since the last removal chunk
 
 	for {
-		select {
-		case ev := <-s.ingestCh:
-			// Don't start new work once shutdown has begun: select picks
-			// randomly among ready cases, and a withdraw-all queued by a
-			// closing BMP session can take a long time on a large table.
-			if ctx.Err() != nil {
-				s.log.Info("route ingest pipeline stopped", "total_ingested", count)
+		var ev types.IngestEvent
+		if len(s.removals) == 0 {
+			select {
+			case ev = <-s.ingestCh:
+			case <-ctx.Done():
+				stop()
 				return
 			}
+		} else {
+			// Withdraw-alls in progress: events first; a chunk of removal
+			// whenever none is waiting (see removalChunk).
+			select {
+			case ev = <-s.ingestCh:
+			case <-ctx.Done():
+				stop()
+				return
+			default:
+				s.stepRemovals()
+				sinceChunk = 0
+				continue
+			}
+		}
+		// Don't start new work once shutdown has begun: select picks
+		// randomly among ready cases.
+		if ctx.Err() != nil {
+			stop()
+			return
+		}
+		if s.acceptEvent(ev) {
 			switch {
 			case ev.Route != nil:
 				count++
-				s.ingestRoute(*ev.Route, count)
+				s.ingestRoute(*ev.Route, ev.Session, count)
 			case ev.Withdrawal != nil:
-				s.ingestWithdrawal(*ev.Withdrawal)
+				s.ingestWithdrawal(*ev.Withdrawal, ev.Session)
 			}
-		case <-ctx.Done():
-			s.log.Info("route ingest pipeline stopped", "total_ingested", count)
-			return
+		}
+		if sinceChunk++; sinceChunk >= removalEvery {
+			s.stepRemovals()
+			sinceChunk = 0
 		}
 	}
 }
 
-// ingestRoute validates one BMP route and inserts it into the Route Table.
+// acceptEvent tracks superseded BMP sessions and reports whether ev should be
+// applied. The listener stops a superseded session from sending, but an
+// event it had already handed over may still arrive behind the newer
+// session's announcements; applied, it would take a route back from the
+// newer session, and the superseded session's session end would then remove
+// it. Dropping it loses nothing: the session end removes every route the
+// superseded session still owns.
+func (s *Server) acceptEvent(ev types.IngestEvent) bool {
+	if ev.Superseded {
+		s.retired[ev.Session] = 0
+		return false
+	}
+	dropped, ok := s.retired[ev.Session]
+	if !ok {
+		return ev.Route != nil || ev.Withdrawal != nil
+	}
+	if ev.Withdrawal != nil && ev.Withdrawal.SessionEnd {
+		delete(s.retired, ev.Session)
+		if dropped > 0 {
+			s.log.Info("dropped late events from superseded BMP session",
+				"session", ev.Session, "events", dropped)
+		}
+		return true
+	}
+	s.retired[ev.Session] = dropped + 1
+	return false
+}
+
+// stepRemovals removes the next chunk of the oldest withdraw-all in
+// progress, if any.
+func (s *Server) stepRemovals() {
+	if len(s.removals) == 0 {
+		return
+	}
+	p := s.removals[0]
+	n, done := p.rm.Step(removalChunk)
+	p.removed += n
+	if done {
+		s.removals[0] = nil
+		s.removals = s.removals[1:]
+		s.removalsPending.Store(int64(len(s.removals)))
+		if p.peer.IsValid() {
+			s.log.Info("withdrew all routes from BMP peer", "peer", p.peer.String(),
+				"session", p.session, "routes", p.removed, "took", time.Since(p.started))
+		} else {
+			s.log.Info("withdrew all routes of ended BMP session",
+				"session", p.session, "routes", p.removed, "took", time.Since(p.started))
+		}
+	}
+}
+
+// ingestRoute validates one BMP route from BMP session session and inserts
+// it into the Route Table. The latest announcement wins: it replaces any
+// existing route for the key, and the session takes ownership of it.
 // count is the running number of routes ingested, for progress logging.
-func (s *Server) ingestRoute(r types.Route, count uint64) {
+func (s *Server) ingestRoute(r types.Route, session, count uint64) {
+	r.OwnerSession = session
+
 	// Capture old posture before overwriting so we can classify the event.
 	// If the existing route is Stale (snapshot artefact), treat the
 	// incoming live BMP message as a fresh insert → EventTypeNewRoute.
@@ -528,12 +639,20 @@ func (s *Server) ingestRoute(r types.Route, count uint64) {
 	}
 }
 
-// ingestWithdrawal removes one withdrawn route, or every route of a peer
-// that went down, from the Route Table.
-func (s *Server) ingestWithdrawal(w types.Withdrawal) {
-	if w.WithdrawAll {
-		removed := s.table.WithdrawAllFromPeer(w.PeerAddr)
-		s.log.Info("withdrew all routes from BMP peer", "peer", w.PeerAddr.String(), "routes", removed)
+// ingestWithdrawal applies a withdrawal from BMP session session: one
+// withdrawn route, every route of a peer that went down, or every route of a
+// session that ended. Withdraw-alls only remove routes the session owns, so a
+// stale session closing cannot remove what a newer session re-announced.
+func (s *Server) ingestWithdrawal(w types.Withdrawal, session uint64) {
+	// A withdraw-all is detached from the owner index here, in stream
+	// order, so routes announced after it are not taken with it; its
+	// routes are then removed a chunk at a time by stepRemovals.
+	switch {
+	case w.SessionEnd:
+		s.queueRemoval(&pendingRemoval{rm: s.table.DetachSession(session), session: session})
+		return
+	case w.WithdrawAll:
+		s.queueRemoval(&pendingRemoval{rm: s.table.DetachPeer(w.PeerAddr, session), session: session, peer: w.PeerAddr})
 		return
 	}
 	// Capture route before removal so the event carries prefix/posture context.
@@ -542,8 +661,10 @@ func (s *Server) ingestWithdrawal(w types.Withdrawal) {
 		key := types.RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: types.AdjRIBInPre}
 		withdrawn = s.table.Get(key)
 	}
-	s.table.Withdraw(w.PeerAddr, w.Prefix)
-	if s.eventEngine != nil && withdrawn != nil {
+	if s.table.WithdrawFromSession(w.PeerAddr, w.Prefix, session) == 0 {
+		return // nothing to withdraw, or a newer session owns the route
+	}
+	if s.eventEngine != nil && withdrawn != nil && withdrawn.OwnerSession <= session {
 		s.eventEngine.Emit(events.Event{
 			ID:         events.NewID(),
 			Timestamp:  time.Now(),
@@ -553,6 +674,12 @@ func (s *Server) ingestWithdrawal(w types.Withdrawal) {
 			RouterID:   w.PeerAddr.String(),
 		})
 	}
+}
+
+func (s *Server) queueRemoval(p *pendingRemoval) {
+	p.started = time.Now()
+	s.removals = append(s.removals, p)
+	s.removalsPending.Store(int64(len(s.removals)))
 }
 
 // updateRouteMetrics refreshes Prometheus gauges for route counts.

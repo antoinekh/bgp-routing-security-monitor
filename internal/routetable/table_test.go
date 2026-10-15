@@ -117,7 +117,7 @@ func TestWithdrawAllFromPeer(t *testing.T) {
 		t.Fatalf("count = %d, want 3", tbl.Count())
 	}
 
-	removed := tbl.WithdrawAllFromPeer(netip.MustParseAddr("192.0.2.1"))
+	removed := tbl.WithdrawAllFromPeer(netip.MustParseAddr("192.0.2.1"), 0)
 	if removed != 2 {
 		t.Errorf("removed = %d, want 2", removed)
 	}
@@ -159,7 +159,7 @@ func TestWithdrawAllFromPeerCleansAllIndexes(t *testing.T) {
 		t.Fatalf("count before peer down = %d, want %d", got, 2*n+2)
 	}
 
-	if removed := tbl.WithdrawAllFromPeer(down); removed != 2*n {
+	if removed := tbl.WithdrawAllFromPeer(down, 0); removed != 2*n {
 		t.Errorf("removed = %d, want %d", removed, 2*n)
 	}
 

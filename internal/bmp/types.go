@@ -128,6 +128,8 @@ type Peer struct {
 	RouteCount uint64
 	UpSince    time.Time
 	LastMsg    time.Time
+
+	session uint64 // ID of the BMP session whose Peer Up created this entry
 }
 
 // PeerKey uniquely identifies a BMP peer.

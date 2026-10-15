@@ -56,6 +56,45 @@ func (s keySet) keys() []types.RouteKey {
 type shard struct {
 	mu     sync.RWMutex
 	routes map[types.RouteKey]*types.Route
+
+	// owned indexes the shard's routes by owning BMP session and peer, so a
+	// withdraw-all finds the routes it removes without scanning the table.
+	// A route is indexed under the OwnerSession and PeerAddr it had when
+	// inserted; neither may change while it is in the table.
+	owned map[ownerKey]routeSet
+}
+
+type ownerKey struct {
+	session uint64
+	peer    netip.Addr
+}
+
+// routeSet is keyed by pointer rather than RouteKey: 8 bytes per route
+// instead of 64, and a pointer also tells a route apart from a later
+// announcement stored under the same key.
+type routeSet map[*types.Route]struct{}
+
+// own indexes r under its owner. The caller holds s.mu.
+func (s *shard) own(r *types.Route) {
+	k := ownerKey{session: r.OwnerSession, peer: r.PeerAddr}
+	set := s.owned[k]
+	if set == nil {
+		set = make(routeSet)
+		s.owned[k] = set
+	}
+	set[r] = struct{}{}
+}
+
+// disown drops r from the owner index. It is a no-op for a route a Removal
+// has already detached. The caller holds s.mu.
+func (s *shard) disown(r *types.Route) {
+	k := ownerKey{session: r.OwnerSession, peer: r.PeerAddr}
+	if set, ok := s.owned[k]; ok {
+		delete(set, r)
+		if len(set) == 0 {
+			delete(s.owned, k)
+		}
+	}
 }
 
 // Filter holds query parameters for ListRoutes.
@@ -116,6 +155,7 @@ func New() *Table {
 	}
 	for i := range t.shards {
 		t.shards[i].routes = make(map[types.RouteKey]*types.Route)
+		t.shards[i].owned = make(map[ownerKey]routeSet)
 	}
 	return t
 }
@@ -133,6 +173,14 @@ func (t *Table) Insert(route *types.Route) {
 	s.mu.Lock()
 	old := s.routes[key]
 	s.routes[key] = route
+	// RevalidateAll re-inserts the stored pointer itself; its owner is
+	// unchanged.
+	if old != route {
+		if old != nil {
+			s.disown(old)
+		}
+		s.own(route)
+	}
 	s.mu.Unlock()
 
 	// Update prefix index
@@ -207,23 +255,49 @@ func addKey[K comparable](idx map[K]keySet, k K, key types.RouteKey) {
 	set[key] = struct{}{}
 }
 
-// Withdraw removes a route from the table.
+var allRIBTypes = []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost, types.LocRIB}
+
+// Withdraw removes a route from the table, whichever session owns it.
 func (t *Table) Withdraw(peerAddr netip.Addr, prefix netip.Prefix) {
 	// Withdraw across all RIB types
-	for _, rib := range []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost, types.LocRIB} {
-		t.withdrawOne(types.RouteKey{PeerAddr: peerAddr, Prefix: prefix, RIBType: rib})
+	for _, rib := range allRIBTypes {
+		t.withdrawOne(types.RouteKey{PeerAddr: peerAddr, Prefix: prefix, RIBType: rib}, nil)
 	}
 }
 
-func (t *Table) withdrawOne(key types.RouteKey) {
+// WithdrawFromSession removes a route withdrawn by BMP session session,
+// unless a newer session has since re-announced it: a late withdrawal from a
+// superseded session must not remove the newer session's route. It returns
+// the number of routes removed (one per RIB type at most).
+func (t *Table) WithdrawFromSession(peerAddr netip.Addr, prefix netip.Prefix, session uint64) int {
+	count := 0
+	for _, rib := range allRIBTypes {
+		if t.withdrawOne(types.RouteKey{PeerAddr: peerAddr, Prefix: prefix, RIBType: rib},
+			func(r *types.Route) bool { return r.OwnerSession <= session }) {
+			count++
+		}
+	}
+	return count
+}
+
+// withdrawOne removes the route under key. If pred is non-nil the route is
+// only removed when pred reports true; it is checked under the shard lock, so
+// a concurrent Insert cannot slip in between the check and the delete.
+func (t *Table) withdrawOne(key types.RouteKey, pred func(*types.Route) bool) bool {
 	s := t.getShard(key)
 	s.mu.Lock()
 	route, exists := s.routes[key]
-	delete(s.routes, key)
+	if exists && pred != nil && !pred(route) {
+		exists = false
+	}
+	if exists {
+		delete(s.routes, key)
+		s.disown(route)
+	}
 	s.mu.Unlock()
 
 	if !exists {
-		return
+		return false
 	}
 
 	// Clean up prefix index
@@ -250,29 +324,139 @@ func (t *Table) withdrawOne(key types.RouteKey) {
 	t.postureMu.Lock()
 	t.unindexPostureExcept(key, "")
 	t.postureMu.Unlock()
+	return true
 }
 
-// WithdrawAllFromPeer removes all routes from a specific peer.
-func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr) int {
-	count := 0
-	// Scan all shards for routes from this peer
+// WithdrawAllFromPeer removes, at once, what a peer-down from BMP session
+// session removes; see DetachPeer.
+func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr, session uint64) int {
+	return t.DetachPeer(peerAddr, session).Apply()
+}
+
+// WithdrawSession removes, at once, what the end of BMP session session
+// removes; see DetachSession.
+func (t *Table) WithdrawSession(session uint64) int {
+	return t.DetachSession(session).Apply()
+}
+
+// DetachPeer starts the withdraw-all for a peer-down of peerAddr seen by BMP
+// session session. It removes the peer's routes that session owns, and its
+// routes no session owns (restored from a snapshot and not yet confirmed):
+// the peer is down, so those are gone too. Routes of the peer that another
+// session owns, such as a newer session from the same router, are kept.
+//
+// It costs O(shards); the routes themselves are removed by the Removal.
+func (t *Table) DetachPeer(peerAddr netip.Addr, session uint64) *Removal {
+	keys := []ownerKey{{session: session, peer: peerAddr}}
+	if session != 0 {
+		keys = append(keys, ownerKey{peer: peerAddr})
+	}
+	rm := &Removal{t: t}
 	for i := range t.shards {
 		s := &t.shards[i]
-		s.mu.RLock()
-		var toRemove []netip.Prefix
-		for key := range s.routes {
-			if key.PeerAddr == peerAddr {
-				toRemove = append(toRemove, key.Prefix)
+		s.mu.Lock()
+		for _, k := range keys {
+			if set, ok := s.owned[k]; ok {
+				rm.add(set)
+				delete(s.owned, k)
 			}
 		}
-		s.mu.RUnlock()
+		s.mu.Unlock()
+	}
+	return rm
+}
 
-		for _, prefix := range toRemove {
-			t.Withdraw(peerAddr, prefix)
-			count++
+// DetachSession starts the withdraw-all for the end of BMP session session:
+// every route, from any peer, that the session owns. Routes no session owns
+// are left to stale eviction, since the session never confirmed them.
+//
+// It costs O(owner index entries), one per (session, peer) pair per shard;
+// the routes themselves are removed by the Removal.
+func (t *Table) DetachSession(session uint64) *Removal {
+	rm := &Removal{t: t}
+	if session == 0 {
+		return rm // never a live session; nothing to end
+	}
+	for i := range t.shards {
+		s := &t.shards[i]
+		s.mu.Lock()
+		for k, set := range s.owned {
+			if k.session == session {
+				rm.add(set)
+				delete(s.owned, k)
+			}
+		}
+		s.mu.Unlock()
+	}
+	return rm
+}
+
+// Removal is a withdraw-all that has been taken out of the owner index but
+// not yet applied. Its routes stay readable until Step removes them, in
+// bounded chunks so a large withdraw-all does not stall ingest. A route that
+// was replaced or withdrawn in the meantime is skipped, so a later
+// announcement under the same key survives.
+//
+// A Removal is not safe for concurrent use.
+type Removal struct {
+	t    *Table
+	sets []routeSet
+	cur  []*types.Route
+	n    int
+}
+
+func (rm *Removal) add(set routeSet) {
+	rm.sets = append(rm.sets, set)
+	rm.n += len(set)
+}
+
+// Len returns the number of routes detached, including any since replaced.
+func (rm *Removal) Len() int { return rm.n }
+
+// Step removes up to budget routes and reports how many it removed and
+// whether the Removal is finished.
+func (rm *Removal) Step(budget int) (removed int, done bool) {
+	for budget > 0 {
+		if len(rm.cur) == 0 {
+			if len(rm.sets) == 0 {
+				break
+			}
+			// One shard's routes for one (session, peer); copied so the
+			// next Step can resume where this one stopped.
+			set := rm.sets[len(rm.sets)-1]
+			rm.sets = rm.sets[:len(rm.sets)-1]
+			rm.cur = make([]*types.Route, 0, len(set))
+			for r := range set {
+				rm.cur = append(rm.cur, r)
+			}
+			continue
+		}
+		r := rm.cur[len(rm.cur)-1]
+		rm.cur = rm.cur[:len(rm.cur)-1]
+		budget--
+		if rm.t.removeIfCurrent(r) {
+			removed++
 		}
 	}
-	return count
+	return removed, len(rm.cur) == 0 && len(rm.sets) == 0
+}
+
+// Apply removes all of the Removal's routes and returns how many it removed.
+func (rm *Removal) Apply() int {
+	total := 0
+	for {
+		n, done := rm.Step(1 << 16)
+		total += n
+		if done {
+			return total
+		}
+	}
+}
+
+// removeIfCurrent removes r if the table still holds this very route.
+func (t *Table) removeIfCurrent(r *types.Route) bool {
+	key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
+	return t.withdrawOne(key, func(cur *types.Route) bool { return cur == r })
 }
 
 // ─── Query Methods ───
@@ -397,7 +581,7 @@ func (t *Table) EvictStale() int {
 		s.mu.RUnlock()
 	}
 	for _, key := range toEvict {
-		t.withdrawOne(key)
+		t.withdrawOne(key, nil)
 	}
 	return len(toEvict)
 }
