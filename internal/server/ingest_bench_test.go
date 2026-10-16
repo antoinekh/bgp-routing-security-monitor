@@ -111,3 +111,127 @@ func fillSession(s *Server, session uint64, peer netip.Addr, n int) {
 		s.table.Insert(benchRoute(peer, i, session))
 	}
 }
+
+// vrpsCovering covers every benchRoute prefix with VRPs for an AS no bench
+// route originates, so each route is ROV-invalid; with no VRPs at all each
+// is not-found. Switching between the two changes every route's posture.
+var vrpsCovering = func() []types.VRP {
+	var out []types.VRP
+	for o := 1; o <= 255; o++ {
+		out = append(out, types.VRP{Prefix: netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(o), 0, 0, 0}), 8), ASN: 64999, MaxLength: 24})
+	}
+	return out
+}()
+
+// newBenchServer returns a server validating on ingest, as in production,
+// whose table holds n routes of session A validated against vrpsCovering.
+func newBenchServer(b *testing.B, n int) *Server {
+	b.Helper()
+	s, err := New(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		b.Fatal(err)
+	}
+	s.cfg.Validation.ROV = true
+	s.vrpStore.ReplaceAll(vrpsCovering, 1, 1)
+	fillValidated(s, netip.MustParseAddr("192.0.2.1"), sessA, n)
+	return s
+}
+
+// BenchmarkRevalidationPass measures one revalidation pass over a table of
+// routes, run the way ingestLoop runs it, in revalidateChunk chunks, with no
+// ingest competing. With change=false the stores are as they were when the
+// routes were validated (an RTR update that touched none of them); with
+// change=true every route's posture changes. pass-ms is the whole pass and
+// max-chunk-ms the longest any ingest event could wait on it.
+//
+//	go test -run '^$' -bench RevalidationPass -benchtime 3x ./internal/server/
+func BenchmarkRevalidationPass(b *testing.B) {
+	const n = 1_000_000
+	for _, change := range []bool{false, true} {
+		b.Run(fmt.Sprintf("routes=%d/change=%t", n, change), func(b *testing.B) {
+			var pass, maxChunk time.Duration
+			for it := 0; it < b.N; it++ {
+				b.StopTimer()
+				s := newBenchServer(b, n)
+				if change {
+					s.vrpStore.ReplaceAll(nil, 2, 1)
+				}
+				b.StartTimer()
+
+				start := time.Now()
+				rv := s.engine.NewRevalidation()
+				for {
+					c := time.Now()
+					done := rv.Step(revalidateChunk)
+					maxChunk = max(maxChunk, time.Since(c))
+					if done {
+						break
+					}
+				}
+				pass += time.Since(start)
+				want := 0
+				if change {
+					want = n
+				}
+				if rv.Checked != n || rv.Changed != want {
+					b.Fatalf("pass checked %d and changed %d routes, want %d and %d", rv.Checked, rv.Changed, n, want)
+				}
+			}
+			b.ReportMetric(float64(pass.Microseconds())/1000/float64(b.N), "pass-ms")
+			b.ReportMetric(float64(maxChunk.Microseconds())/1000, "max-chunk-ms")
+			b.ReportMetric(0, "ns/op") // includes setup; see the metrics above
+		})
+	}
+}
+
+// BenchmarkIngestDuringRevalidation measures what a revalidation pass costs
+// ingest: a burst of routes from session B on another peer is sent while a
+// pass that changes every one of the table's routes runs, and its ingest
+// rate is compared with the same burst and no pass. burst-µs/route is the
+// burst's ingest cost; pass-ms is when the pass finished, from the start of
+// the burst.
+//
+//	go test -run '^$' -bench IngestDuringRevalidation -benchtime 3x ./internal/server/
+func BenchmarkIngestDuringRevalidation(b *testing.B) {
+	const n, burst = 1_000_000, 200_000
+	for _, revalidate := range []bool{false, true} {
+		b.Run(fmt.Sprintf("routes=%d/burst=%d/revalidating=%t", n, burst, revalidate), func(b *testing.B) {
+			var burstTime, passTime time.Duration
+			for it := 0; it < b.N; it++ {
+				b.StopTimer()
+				s := newBenchServer(b, n)
+				s.vrpStore.ReplaceAll(nil, 2, 1)
+				close(s.rtrReady)
+				ctx, cancel := context.WithCancel(context.Background())
+				go s.ingestLoop(ctx)
+				peerB := netip.MustParseAddr("192.0.2.2")
+				b.StartTimer()
+
+				start := time.Now()
+				if revalidate {
+					s.RequestRevalidation()
+				}
+				for i := 0; i < burst; i++ {
+					s.ingestCh <- types.IngestEvent{Route: benchRoute(peerB, i, 0), Session: sessB}
+				}
+				lastKey := types.RouteKey{PeerAddr: peerB, Prefix: benchRoute(peerB, burst-1, 0).Prefix}
+				for s.table.Get(lastKey) == nil {
+					time.Sleep(100 * time.Microsecond)
+				}
+				burstTime += time.Since(start)
+				for revalidate && s.revalidationPasses.Load() == 0 {
+					time.Sleep(100 * time.Microsecond)
+				}
+				passTime += time.Since(start)
+
+				b.StopTimer()
+				cancel()
+			}
+			b.ReportMetric(float64(burstTime.Microseconds())/float64(b.N)/burst, "burst-µs/route")
+			if revalidate {
+				b.ReportMetric(float64(passTime.Milliseconds())/float64(b.N), "pass-ms")
+			}
+			b.ReportMetric(0, "ns/op") // includes setup; see the metrics above
+		})
+	}
+}

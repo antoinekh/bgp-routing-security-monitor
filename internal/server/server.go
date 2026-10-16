@@ -75,17 +75,35 @@ type Server struct {
 	retired map[uint64]int
 	// removalsPending mirrors len(removals) for tests.
 	removalsPending atomic.Int64
+
+	// revalidateCh carries RTR updates' requests to revalidate the table.
+	// It holds one request at most: a request made while one is already
+	// queued adds nothing.
+	revalidateCh chan struct{}
+	// Owned by ingestLoop: the revalidation pass in progress, and whether
+	// another was requested after it started and must follow it.
+	revalidation    *validation.Revalidation
+	revalidateAgain bool
+	revalidateStart time.Time
+	// For tests: whether a pass is in progress, and how many have finished.
+	revalidating       atomic.Bool
+	revalidationPasses atomic.Int64
+
+	// evictCh carries the stale-eviction timer's request to ingestLoop.
+	evictCh chan struct{}
 }
 
-// A large withdraw-all is applied a chunk at a time so it never holds up
-// ingest: chunks run back to back while no event is waiting, and while events
-// are waiting, one chunk runs per removalEvery events, so the removal still
-// finishes under sustained load, at one route per event applied. Removing a
-// route costs about what ingesting one does, so that at most halves ingest
-// throughput while it lasts. No event waits on more than one chunk.
+// Background work (withdraw-alls and stale eviction, then revalidation
+// passes) is applied a chunk at a time so it never holds up ingest: chunks run back to back while
+// no event is waiting, and while events are waiting, one chunk runs per
+// backgroundEvery events, so the work still finishes under sustained load, at
+// one route per event applied. Removing or revalidating a route costs about
+// what ingesting one does, so that at most halves ingest throughput while it
+// lasts. No event waits on more than one chunk.
 const (
-	removalChunk = 256
-	removalEvery = 256
+	removalChunk    = 256
+	revalidateChunk = 256
+	backgroundEvery = 256
 )
 
 // pendingRemoval is a peer-down or session-end withdraw-all that ingestLoop
@@ -94,6 +112,7 @@ type pendingRemoval struct {
 	rm      *routetable.Removal
 	session uint64
 	peer    netip.Addr // invalid for a session end
+	stale   bool       // stale eviction rather than a withdraw-all
 	removed int
 	started time.Time
 }
@@ -116,18 +135,20 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 	}
 
 	srv := &Server{
-		cfg:         cfg,
-		log:         log,
-		table:       table,
-		bmpListen:   bmp.NewListener(cfg.BMP.Listen, bmpTLS, ingestCh, log),
-		vrpStore:    vrpStore,
-		aspaStore:   aspaStore, // ADD
-		engine:      engine,
-		ingestCh:    ingestCh,
-		rtrReady:    make(chan struct{}),
-		rtrStates:   make(map[string]int64),
-		rtrLastSync: make(map[string]int64),
-		retired:     make(map[uint64]int),
+		cfg:          cfg,
+		log:          log,
+		table:        table,
+		bmpListen:    bmp.NewListener(cfg.BMP.Listen, bmpTLS, ingestCh, log),
+		vrpStore:     vrpStore,
+		aspaStore:    aspaStore, // ADD
+		engine:       engine,
+		ingestCh:     ingestCh,
+		rtrReady:     make(chan struct{}),
+		rtrStates:    make(map[string]int64),
+		rtrLastSync:  make(map[string]int64),
+		retired:      make(map[uint64]int),
+		revalidateCh: make(chan struct{}, 1),
+		evictCh:      make(chan struct{}, 1),
 	}
 
 	// Existing API server
@@ -274,7 +295,7 @@ func (s *Server) Run() error {
 					return
 				}
 				client.SetOnUpdate(func() {
-					s.engine.RevalidateAll()
+					s.RequestRevalidation()
 					// Record last-sync time for StateReader/OTel.
 					s.rtrMu.Lock()
 					s.rtrLastSync[addr] = time.Now().Unix()
@@ -310,8 +331,7 @@ func (s *Server) Run() error {
 			defer wg.Done()
 			select {
 			case <-time.After(s.cfg.Persistence.StaleEvictionTimeout):
-				evicted := s.table.EvictStale()
-				s.log.Info("evicted unconfirmed stale routes", "count", evicted)
+				s.RequestStaleEviction()
 			case <-ctx.Done():
 			}
 		}()
@@ -481,27 +501,39 @@ func (s *Server) ingestLoop(ctx context.Context) {
 
 	var count uint64
 	stop := func() { s.log.Info("route ingest pipeline stopped", "total_ingested", count) }
-	sinceChunk := 0 // events applied since the last removal chunk
+	sinceChunk := 0 // events applied since the last background chunk
 
 	for {
 		var ev types.IngestEvent
-		if len(s.removals) == 0 {
+		if !s.backgroundPending() {
 			select {
 			case ev = <-s.ingestCh:
+			case <-s.revalidateCh:
+				s.startRevalidation()
+				continue
+			case <-s.evictCh:
+				s.startStaleEviction()
+				continue
 			case <-ctx.Done():
 				stop()
 				return
 			}
 		} else {
-			// Withdraw-alls in progress: events first; a chunk of removal
-			// whenever none is waiting (see removalChunk).
+			// Background work in progress: events first; a chunk of it
+			// whenever none is waiting (see backgroundEvery).
 			select {
 			case ev = <-s.ingestCh:
+			case <-s.revalidateCh:
+				s.startRevalidation()
+				continue
+			case <-s.evictCh:
+				s.startStaleEviction()
+				continue
 			case <-ctx.Done():
 				stop()
 				return
 			default:
-				s.stepRemovals()
+				s.stepBackground()
 				sinceChunk = 0
 				continue
 			}
@@ -521,11 +553,89 @@ func (s *Server) ingestLoop(ctx context.Context) {
 				s.ingestWithdrawal(*ev.Withdrawal, ev.Session)
 			}
 		}
-		if sinceChunk++; sinceChunk >= removalEvery {
-			s.stepRemovals()
+		if sinceChunk++; sinceChunk >= backgroundEvery {
+			s.stepBackground()
 			sinceChunk = 0
 		}
 	}
+}
+
+// RequestRevalidation asks ingestLoop to revalidate every route against the
+// current VRP and ASPA stores. Called after each RTR update; safe from any
+// goroutine, and never blocks.
+//
+// Revalidation runs in ingestLoop because that is the Route Table's only
+// writer. Run from the RTR goroutine, it re-inserted routes ingest had since
+// withdrawn or replaced, giving a newer session's route back to an older
+// session or bringing a withdrawn one back, and it changed routes in place
+// while API and metrics readers were reading them.
+func (s *Server) RequestRevalidation() {
+	select {
+	case s.revalidateCh <- struct{}{}:
+	default: // one is already queued; it will see this update's data too
+	}
+}
+
+// RequestStaleEviction asks ingestLoop to remove the routes restored from a
+// snapshot that no live BMP session has confirmed. Safe from any goroutine,
+// and never blocks. Eviction used to run on the timer's goroutine, as a
+// second writer of the table.
+func (s *Server) RequestStaleEviction() {
+	select {
+	case s.evictCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) startStaleEviction() {
+	s.queueRemoval(&pendingRemoval{rm: s.table.DetachUnowned(), stale: true})
+}
+
+// startRevalidation starts a revalidation pass, or, if one is already in
+// progress, schedules one more after it: routes the current pass has already
+// checked were checked against the old data. Any number of requests during a
+// pass make one follow-up pass.
+func (s *Server) startRevalidation() {
+	if s.revalidation != nil {
+		s.revalidateAgain = true
+		return
+	}
+	s.revalidation = s.engine.NewRevalidation()
+	s.revalidateStart = time.Now()
+	s.revalidating.Store(true)
+}
+
+func (s *Server) backgroundPending() bool {
+	return len(s.removals) > 0 || s.revalidation != nil
+}
+
+// stepBackground runs the next chunk of background work. Withdraw-alls go
+// first: there is no point revalidating routes about to be removed.
+func (s *Server) stepBackground() {
+	if len(s.removals) > 0 {
+		s.stepRemovals()
+		return
+	}
+	if s.revalidation != nil {
+		s.stepRevalidation()
+	}
+}
+
+func (s *Server) stepRevalidation() {
+	rv := s.revalidation
+	if !rv.Step(revalidateChunk) {
+		return
+	}
+	s.log.Info("re-validation complete", "total", rv.Checked, "changed", rv.Changed,
+		"skipped_superseded", rv.Skipped, "took", time.Since(s.revalidateStart))
+	s.revalidation = nil
+	s.revalidationPasses.Add(1)
+	if s.revalidateAgain {
+		s.revalidateAgain = false
+		s.startRevalidation()
+		return
+	}
+	s.revalidating.Store(false)
 }
 
 // acceptEvent tracks superseded BMP sessions and reports whether ev should be
@@ -569,10 +679,13 @@ func (s *Server) stepRemovals() {
 		s.removals[0] = nil
 		s.removals = s.removals[1:]
 		s.removalsPending.Store(int64(len(s.removals)))
-		if p.peer.IsValid() {
+		switch {
+		case p.stale:
+			s.log.Info("evicted unconfirmed stale routes", "count", p.removed, "took", time.Since(p.started))
+		case p.peer.IsValid():
 			s.log.Info("withdrew all routes from BMP peer", "peer", p.peer.String(),
 				"session", p.session, "routes", p.removed, "took", time.Since(p.started))
-		} else {
+		default:
 			s.log.Info("withdrew all routes of ended BMP session",
 				"session", p.session, "routes", p.removed, "took", time.Since(p.started))
 		}

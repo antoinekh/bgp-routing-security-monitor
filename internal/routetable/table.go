@@ -173,8 +173,8 @@ func (t *Table) Insert(route *types.Route) {
 	s.mu.Lock()
 	old := s.routes[key]
 	s.routes[key] = route
-	// RevalidateAll re-inserts the stored pointer itself; its owner is
-	// unchanged.
+	// Re-inserting the stored pointer itself changes nothing in the owner
+	// index.
 	if old != route {
 		if old != nil {
 			s.disown(old)
@@ -217,11 +217,12 @@ func (t *Table) Insert(route *types.Route) {
 // unindexPostureExcept removes key from every posture index entry other than
 // keep. The caller holds postureMu.
 //
-// The old posture cannot be read off the stored route: RevalidateAll changes
-// a route's posture in place and re-inserts the same pointer, so by the time
-// Insert runs the stored route already carries the new posture. Checking the
-// old route's posture left the key listed under every posture it had ever
-// had. There are only a handful of postures, so clear them all.
+// The old posture is not read off the stored route. RevalidateAll used to
+// change a route's posture in place and re-insert the same pointer, so by
+// the time Insert ran the stored route already carried the new posture, and
+// checking it left the key listed under every posture it had ever had.
+// Routes are no longer changed in place (see Replace), but there are only a
+// handful of postures, so clearing them all stays cheap and safe.
 func (t *Table) unindexPostureExcept(key types.RouteKey, keep types.SecurityPosture) {
 	for posture, set := range t.postureIdx {
 		if posture != keep {
@@ -391,6 +392,29 @@ func (t *Table) DetachSession(session uint64) *Removal {
 	return rm
 }
 
+// DetachUnowned starts the removal of every route no BMP session owns: the
+// routes restored from a snapshot that no live session has confirmed since
+// (a confirmation is a new route owned by its session). It is stale eviction
+// for a table with a running ingest; see EvictStale.
+//
+// It costs O(owner index entries); the routes themselves are removed by the
+// Removal.
+func (t *Table) DetachUnowned() *Removal {
+	rm := &Removal{t: t}
+	for i := range t.shards {
+		s := &t.shards[i]
+		s.mu.Lock()
+		for k, set := range s.owned {
+			if k.session == 0 {
+				rm.add(set)
+				delete(s.owned, k)
+			}
+		}
+		s.mu.Unlock()
+	}
+	return rm
+}
+
 // Removal is a withdraw-all that has been taken out of the owner index but
 // not yet applied. Its routes stay readable until Step removes them, in
 // bounded chunks so a large withdraw-all does not stall ingest. A route that
@@ -457,6 +481,87 @@ func (rm *Removal) Apply() int {
 func (t *Table) removeIfCurrent(r *types.Route) bool {
 	key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
 	return t.withdrawOne(key, func(cur *types.Route) bool { return cur == r })
+}
+
+// Replace swaps updated in for old, a route the table holds, and reports
+// whether it did. It does nothing if the table no longer holds old itself
+// (it was withdrawn or replaced by a newer announcement since the caller read
+// it) or if a pending Removal has detached old (it is on its way out).
+//
+// updated must be a new object differing from old only in its validation
+// annotations (ROV, ASPA, SecurityPosture); the owner and origin indexes are
+// carried over unchanged. Routes in the table are never modified in place,
+// so readers holding old keep seeing a consistent route.
+func (t *Table) Replace(old, updated *types.Route) bool {
+	key := types.RouteKey{PeerAddr: old.PeerAddr, Prefix: old.Prefix, RIBType: old.RIBType}
+	if old == updated ||
+		updated.PeerAddr != old.PeerAddr || updated.Prefix != old.Prefix || updated.RIBType != old.RIBType ||
+		updated.OwnerSession != old.OwnerSession || updated.OriginASN() != old.OriginASN() {
+		panic("routetable: Replace may only change a route's validation annotations")
+	}
+
+	s := t.getShard(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.routes[key] != old {
+		return false
+	}
+	set := s.owned[ownerKey{session: old.OwnerSession, peer: old.PeerAddr}]
+	if _, indexed := set[old]; !indexed {
+		return false
+	}
+	s.routes[key] = updated
+	delete(set, old)
+	set[updated] = struct{}{}
+
+	// Under the shard lock, so a concurrent withdrawal of the key cannot
+	// unindex it in between and leave updated's posture listed. Lock order
+	// shard → postureMu; no reader holds an index lock while taking a
+	// shard lock.
+	if updated.SecurityPosture != old.SecurityPosture {
+		t.postureMu.Lock()
+		t.unindexPostureExcept(key, updated.SecurityPosture)
+		if updated.SecurityPosture != "" {
+			addKey(t.postureIdx, updated.SecurityPosture, key)
+		}
+		t.postureMu.Unlock()
+	}
+	return true
+}
+
+// Scan walks every route in the table a bounded batch at a time, so a pass
+// over a large table can be interleaved with other work. It reads one shard
+// at a time; routes added to a shard after it has been read are not seen.
+//
+// A Scan is not safe for concurrent use.
+type Scan struct {
+	t    *Table
+	next int // next shard to read
+	buf  []*types.Route
+}
+
+// NewScan starts a Scan over the table.
+func (t *Table) NewScan() *Scan { return &Scan{t: t} }
+
+// Next returns up to n more routes, or none once the scan is finished. The
+// slice is only valid until the next call.
+func (sc *Scan) Next(n int) []*types.Route {
+	for len(sc.buf) < n && sc.next < len(sc.t.shards) {
+		s := &sc.t.shards[sc.next]
+		sc.next++
+		s.mu.RLock()
+		for _, r := range s.routes {
+			sc.buf = append(sc.buf, r)
+		}
+		s.mu.RUnlock()
+	}
+	k := min(n, len(sc.buf))
+	out := sc.buf[:k:k]
+	sc.buf = sc.buf[k:]
+	if len(sc.buf) == 0 {
+		sc.buf = nil // let the backing array go
+	}
+	return out
 }
 
 // ─── Query Methods ───
@@ -565,25 +670,44 @@ func (t *Table) Restore(routes []*types.Route) {
 	}
 }
 
-// EvictStale removes all routes still marked Stale from the table.
-// Returns the number of routes evicted. Called once after
-// stale_eviction_timeout to purge unconfirmed snapshot entries.
+// EvictStale removes all routes still marked Stale from the table and
+// returns the number removed.
+//
+// It is not for a table that ingest is writing to: like any second writer it
+// can unindex a route ingest has just inserted under the same key. The
+// server evicts through DetachUnowned in its ingest loop instead.
 func (t *Table) EvictStale() int {
-	var toEvict []types.RouteKey
+	return t.evictStale(t.staleKeys())
+}
+
+// staleKeys lists the keys of routes marked Stale.
+func (t *Table) staleKeys() []types.RouteKey {
+	var keys []types.RouteKey
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
 		for key, route := range s.routes {
 			if route.Stale {
-				toEvict = append(toEvict, key)
+				keys = append(keys, key)
 			}
 		}
 		s.mu.RUnlock()
 	}
-	for _, key := range toEvict {
-		t.withdrawOne(key, nil)
+	return keys
+}
+
+// evictStale removes the routes under keys that are still Stale. It runs
+// apart from ingest, so the check is made again under the shard lock: a live
+// BMP message may have confirmed a route since staleKeys listed it, and that
+// route must stay.
+func (t *Table) evictStale(keys []types.RouteKey) int {
+	evicted := 0
+	for _, key := range keys {
+		if t.withdrawOne(key, func(r *types.Route) bool { return r.Stale }) {
+			evicted++
+		}
 	}
-	return len(toEvict)
+	return evicted
 }
 
 // CountByPosture returns route counts grouped by security posture.

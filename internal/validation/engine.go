@@ -1,6 +1,8 @@
 package validation
 
 import (
+	"slices"
+
 	"github.com/nokia/bgp-routing-security-monitor/internal/routetable"
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/store"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
@@ -40,23 +42,66 @@ func (e *Engine) ValidateRoute(route *types.Route) {
 	route.SecurityPosture = types.ComputePosture(route.ROV.State, route.ASPA.State)
 }
 
-// RevalidateAll re-runs validation on every route in the table.
-// Called when the VRP store is updated (RTR cache sync).
-func (e *Engine) RevalidateAll() {
-	routes := e.table.All()
-	e.log.Info("re-validating all routes", "count", len(routes))
+// Revalidated returns a copy of route with validation re-run against the
+// current VRP and ASPA stores, and whether any annotation differs from
+// route's. route itself is not modified: routes in the table are read
+// concurrently and must never change in place.
+func (e *Engine) Revalidated(route *types.Route) (types.Route, bool) {
+	cp := *route
+	e.ValidateRoute(&cp)
+	return cp, !sameValidation(route, &cp)
+}
 
-	var changed int
-	for _, route := range routes {
-		oldPosture := route.SecurityPosture
-		e.ValidateRoute(route)
+// sameValidation reports whether a and b carry the same validation results.
+func sameValidation(a, b *types.Route) bool {
+	if a.SecurityPosture != b.SecurityPosture ||
+		a.ROV.State != b.ROV.State || a.ROV.Reason != b.ROV.Reason ||
+		!slices.Equal(a.ROV.MatchedVRPs, b.ROV.MatchedVRPs) ||
+		a.ASPA.State != b.ASPA.State || a.ASPA.Procedure != b.ASPA.Procedure ||
+		!slices.Equal(a.ASPA.HopDetails, b.ASPA.HopDetails) {
+		return false
+	}
+	fa, fb := a.ASPA.FailingHop, b.ASPA.FailingHop
+	return (fa == nil) == (fb == nil) && (fa == nil || *fa == *fb)
+}
 
-		if route.SecurityPosture != oldPosture {
-			changed++
-			// Update posture index in the route table
-			e.table.Insert(route)
+// Revalidation is one pass re-running validation over every route in the
+// table, after the VRP or ASPA store changed. It is applied a chunk at a time
+// by the Route Table's single writer (the ingest loop), between ingest
+// events.
+//
+// A route whose results changed is replaced by a revalidated copy, and only
+// if the table still holds that route; one withdrawn or re-announced since
+// the pass read it is skipped, since a re-announcement was validated on
+// ingest against the current stores.
+type Revalidation struct {
+	e    *Engine
+	scan *routetable.Scan
+
+	Checked int // routes revalidated
+	Changed int // routes replaced with new results
+	Skipped int // routes with new results gone or replaced before they could be applied
+}
+
+// NewRevalidation starts a revalidation pass over the table.
+func (e *Engine) NewRevalidation() *Revalidation {
+	return &Revalidation{e: e, scan: e.table.NewScan()}
+}
+
+// Step revalidates up to budget routes and reports whether the pass is done.
+func (rv *Revalidation) Step(budget int) bool {
+	routes := rv.scan.Next(budget)
+	for _, r := range routes {
+		rv.Checked++
+		updated, changed := rv.e.Revalidated(r)
+		if !changed {
+			continue
+		}
+		if rv.e.table.Replace(r, &updated) {
+			rv.Changed++
+		} else {
+			rv.Skipped++
 		}
 	}
-
-	e.log.Info("re-validation complete", "total", len(routes), "posture_changes", changed)
+	return len(routes) < budget
 }
