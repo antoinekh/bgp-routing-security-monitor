@@ -42,6 +42,18 @@ All notable changes to RAVEN are recorded here.
   **Note:** "same router" means same source IP address. Routers that reach
   RAVEN through one NAT address will supersede each other's BMP sessions;
   give each router its own address.
+- Re-validation after an RTR update could undo BMP ingest: it ran on the
+  RTR goroutine alongside ingest, changed routes in place while the API and
+  metrics were reading them, and re-inserted routes it had read earlier.
+  A route withdrawn in the meantime could come back, and a route a newer
+  BMP session had re-announced could be handed back to the older session
+  (and removed with it when that session ended). Re-validation and stale
+  eviction now run in the ingest loop, the route table's only writer, a
+  chunk at a time between ingest events; RTR updates that arrive during a
+  pass are coalesced into one follow-up pass. Each route is re-validated on
+  a copy and swapped in with `Table.Replace` only if the table still holds
+  that same route, so readers never see a half-updated route.
+  `Engine.RevalidateAll` has been removed.
   
 ## v0.3.3 (2026-07-02)
 

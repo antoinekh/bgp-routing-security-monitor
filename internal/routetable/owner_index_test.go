@@ -47,7 +47,7 @@ func ownedRoute(peer netip.Addr, i int, session uint64) *types.Route {
 }
 
 // The owner index holds exactly the table's routes through overwrites,
-// re-inserts of the same pointer (RevalidateAll), single withdrawals,
+// re-inserts of the same pointer (as RevalidateAll used to do), single withdrawals,
 // detached withdraw-alls and stale eviction: an entry left behind would
 // grow memory without bound on a long-running daemon.
 func TestOwnerIndexTracksTableExactly(t *testing.T) {
@@ -78,7 +78,7 @@ func TestOwnerIndexTracksTableExactly(t *testing.T) {
 
 	for _, r := range tbl.GetByPeer(p) {
 		r.SecurityPosture = types.PostureOriginInvalid
-		tbl.Insert(r) // RevalidateAll re-inserts the stored pointer
+		tbl.Insert(r) // re-insert of the stored pointer, as RevalidateAll used to
 	}
 	check("after same-pointer re-inserts")
 

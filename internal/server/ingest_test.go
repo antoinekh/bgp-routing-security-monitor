@@ -62,7 +62,8 @@ func testRoute(peer netip.Addr, i int, posture types.SecurityPosture) *types.Rou
 }
 
 // drain blocks until every event queued so far has been applied, including
-// the withdraw-alls ingestLoop removes a chunk at a time. The ingest stream
+// the withdraw-alls and revalidation passes ingestLoop applies a chunk at a
+// time. The ingest stream
 // is ordered, so once a marker route queued last is in the table, everything
 // before it has been processed or queued for removal.
 func drain(t *testing.T, s *Server) {
@@ -76,7 +77,7 @@ func drain(t *testing.T, s *Server) {
 	s.ingestCh <- types.IngestEvent{Route: marker}
 	key := types.RouteKey{PeerAddr: marker.PeerAddr, Prefix: marker.Prefix, RIBType: marker.RIBType}
 	deadline := time.Now().Add(5 * time.Second)
-	for s.table.Get(key) == nil || s.removalsPending.Load() != 0 {
+	for s.table.Get(key) == nil || s.removalsPending.Load() != 0 || s.revalidating.Load() {
 		if time.Now().After(deadline) {
 			t.Fatal("ingest loop did not drain within 5s")
 		}

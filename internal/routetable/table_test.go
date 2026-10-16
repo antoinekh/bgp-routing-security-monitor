@@ -233,9 +233,11 @@ func asnListings(tbl *Table, key types.RouteKey) []uint32 {
 	return out
 }
 
-// The RevalidateAll pattern: the stored route's posture is changed in place
-// and the same pointer re-inserted, so Insert cannot read the old posture off
-// the old route. The key must still end up listed under the new posture only.
+// The pattern RevalidateAll used to follow: the stored route's posture is
+// changed in place and the same pointer re-inserted, so Insert cannot read
+// the old posture off the old route. Nothing does this any more (revalidation
+// goes through Replace), but Insert stays safe against it: the key must still
+// end up listed under the new posture only.
 func TestInsertPostureChangedInPlaceLeavesNoStaleKey(t *testing.T) {
 	tbl := New()
 	r := makeRoute("192.0.2.1", "1.0.0.0/24", []uint32{64501, 13335})
@@ -248,7 +250,7 @@ func TestInsertPostureChangedInPlaceLeavesNoStaleKey(t *testing.T) {
 		types.PosturePathSuspect, types.PostureSecured, types.PosturePathSuspect,
 	}
 	for i, p := range flips {
-		r.SecurityPosture = p // in place, as RevalidateAll does
+		r.SecurityPosture = p // in place, as RevalidateAll did
 		tbl.Insert(r)
 		if got := postureListings(tbl, key); len(got) != 1 || got[0] != p {
 			t.Fatalf("after flip %d to %s: key listed under %v, want only [%s]", i+1, p, got, p)
