@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"net/netip"
-	"runtime"
 	"testing"
 	"time"
 
@@ -299,9 +298,11 @@ func TestSessionEndLeavesUnownedRoutes(t *testing.T) {
 	}
 }
 
-// A large withdraw-all is removed a chunk at a time, not in one go: an event
-// that arrives while the removal is under way is applied after at most one
-// chunk, with the removal still far from done.
+// A large withdraw-all is removed a chunk at a time, not in one go, and
+// waiting events go first: events that arrive while the removal is under way
+// are all applied before the next chunk. As in
+// TestRevalidationDoesNotHoldUpIngest, they are sent from inside the removal
+// and its progress read as each is applied: order, not time.
 func TestLargeSessionEndDoesNotHoldUpLaterEvents(t *testing.T) {
 	s := newTestServer(t)
 	p := netip.MustParseAddr("192.0.2.1")
@@ -315,32 +316,40 @@ func TestLargeSessionEndDoesNotHoldUpLaterEvents(t *testing.T) {
 			OwnerSession: sessA,
 		})
 	}
-	close(s.rtrReady)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go s.ingestLoop(ctx)
-
+	const events = 3
+	chunks := 0
+	s.testAfterChunk = func() {
+		if chunks++; chunks == 1 {
+			announce(s, sessB, later, seq(0, events)...)
+		}
+	}
+	removedAtEvent := make(chan int, events) // -1: no removal in progress
+	s.testAfterEvent = func(ev types.IngestEvent) {
+		if ev.Route != nil && ev.Route.PeerAddr == later {
+			removed := -1
+			if len(s.removals) > 0 {
+				removed = s.removals[0].removed
+			}
+			removedAtEvent <- removed
+		}
+	}
 	sessionEnd(s, sessA)
-	deadline := time.Now().Add(10 * time.Second)
-	for s.table.Count() == n { // wait for the removal to get under way
-		if time.Now().After(deadline) {
-			t.Fatal("session end removal did not start within 10s")
+	startLoop(t, s)
+
+	for i := 0; i < events; i++ {
+		select {
+		case removed := <-removedAtEvent:
+			if removed < 0 || removed > removalChunk {
+				t.Errorf("route %d of %d sent after the removal's first chunk was applied with %d of %d routes removed "+
+					"(-1: removal already over), want all applied before the second %d-route chunk",
+					i+1, events, removed, n, removalChunk)
+			}
+		case <-time.After(testWaitBound):
+			t.Fatal("a route sent during the removal was never applied")
 		}
-		runtime.Gosched()
-	}
-	announce(s, sessB, later, 0)
-	for lookup(s, later, 0) == nil {
-		if time.Now().After(deadline) {
-			t.Fatal("route sent during the removal was not applied within 10s")
-		}
-		runtime.Gosched()
-	}
-	if s.removalsPending.Load() == 0 {
-		t.Errorf("all %d routes were removed before a route sent during the removal was applied, "+
-			"want it applied after at most one %d-route chunk", n, removalChunk)
 	}
 	drain(t, s)
-	if got := s.table.Count(); got != 1 {
-		t.Errorf("table count = %d after the removal finished, want 1", got)
+	if got := s.table.Count(); got != events {
+		t.Errorf("table count = %d after the removal finished, want %d", got, events)
 	}
 }

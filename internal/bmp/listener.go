@@ -35,6 +35,10 @@ type Listener struct {
 	lastSession atomic.Uint64 // last session ID handed out; IDs start at 1
 	sessMu      sync.Mutex
 	sessions    map[netip.Addr]*bmpSession // the current session per router address
+
+	// testBeforeSend, nil in production, runs in emitFrom with the
+	// session's send lock held, just before the send.
+	testBeforeSend func(*bmpSession, types.IngestEvent)
 }
 
 // routerInfo is what Initiation told us about a router, and which session
@@ -123,6 +127,9 @@ func (l *Listener) emitFrom(ctx context.Context, sess *bmpSession, ev types.Inge
 		return false
 	}
 	ev.Session = sess.id
+	if l.testBeforeSend != nil {
+		l.testBeforeSend(sess, ev)
+	}
 	return l.emit(ctx, ev)
 }
 

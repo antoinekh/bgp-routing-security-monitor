@@ -141,13 +141,18 @@ func (h *sessionHarness) connectSession(ctx context.Context, t *testing.T) (clie
 	return client, sess, ch
 }
 
+// testWaitBound caps how long a test waits for something to happen. It is
+// not a timing assertion: it only stops a broken test from hanging, so it is
+// far above anything a loaded machine under -race needs.
+const testWaitBound = 60 * time.Second
+
 func (h *sessionHarness) next(t *testing.T) types.IngestEvent {
 	t.Helper()
 	select {
 	case ev := <-h.ingest:
 		return ev
-	case <-time.After(5 * time.Second):
-		t.Fatal("no ingest event within 5s")
+	case <-time.After(testWaitBound):
+		t.Fatalf("no ingest event within %v", testWaitBound)
 		return types.IngestEvent{}
 	}
 }
@@ -163,7 +168,7 @@ func send(t *testing.T, c net.Conn, msgs ...[]byte) {
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBound)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
@@ -210,7 +215,7 @@ func TestNewSessionSupersedesStaleSessionFromSameRouter(t *testing.T) {
 	if ev := h.next(t); !ev.Superseded || ev.Session != sessA {
 		t.Fatalf("got %+v, want the notice that session A (%d) was superseded", ev, sessA)
 	}
-	if err := clientA.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := clientA.SetReadDeadline(time.Now().Add(testWaitBound)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := clientA.Read(make([]byte, 1)); errors.Is(err, os.ErrDeadlineExceeded) {
@@ -317,20 +322,26 @@ func TestTakeoverWaitsOutBlockedSendThenMarksSessionSuperseded(t *testing.T) {
 	peer := netip.MustParseAddr("192.0.2.1")
 	x := netip.MustParsePrefix("10.9.1.0/24")
 
+	// Signalled with session A's send lock held, just before it sends its
+	// route on a stream nobody is reading: from then on A is blocked in that
+	// send until the test reads.
+	aboutToSend := make(chan struct{}, 1)
+	h.l.testBeforeSend = func(_ *bmpSession, ev types.IngestEvent) {
+		if ev.Route != nil && ev.Route.Prefix == x {
+			select {
+			case aboutToSend <- struct{}{}:
+			default: // session B's route later
+			}
+		}
+	}
+
 	clientA, sessA, doneA := h.connectSession(ctx, t)
 	send(t, clientA, peerUpMsg(peer), routeMonitoringMsg(peer, x))
-	// Session A blocks sending its route, holding its send lock. The lock
-	// is also taken briefly per message, so require it to stay held.
-	held := 0
-	waitFor(t, "session A to block sending its route", func() bool {
-		if sessA.mu.TryLock() {
-			sessA.mu.Unlock()
-			held = 0
-			return false
-		}
-		held++
-		return held >= 10
-	})
+	select {
+	case <-aboutToSend:
+	case <-time.After(testWaitBound):
+		t.Fatal("session A never sent its route")
+	}
 
 	clientB, sessB, doneB := h.connectSession(ctx, t)
 

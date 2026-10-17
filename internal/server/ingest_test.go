@@ -61,6 +61,11 @@ func testRoute(peer netip.Addr, i int, posture types.SecurityPosture) *types.Rou
 	}
 }
 
+// testWaitBound caps how long a test waits for a condition. It is not a
+// timing assertion: it only stops a broken test from hanging, so it is far
+// above anything a loaded machine under -race needs.
+const testWaitBound = 60 * time.Second
+
 // drain blocks until every event queued so far has been applied, including
 // the withdraw-alls and revalidation passes ingestLoop applies a chunk at a
 // time. The ingest stream
@@ -76,10 +81,10 @@ func drain(t *testing.T, s *Server) {
 	s.table.Withdraw(marker.PeerAddr, marker.Prefix)
 	s.ingestCh <- types.IngestEvent{Route: marker}
 	key := types.RouteKey{PeerAddr: marker.PeerAddr, Prefix: marker.Prefix, RIBType: marker.RIBType}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBound)
 	for s.table.Get(key) == nil || s.removalsPending.Load() != 0 || s.revalidating.Load() {
 		if time.Now().After(deadline) {
-			t.Fatal("ingest loop did not drain within 5s")
+			t.Fatalf("ingest loop did not drain within %v", testWaitBound)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
