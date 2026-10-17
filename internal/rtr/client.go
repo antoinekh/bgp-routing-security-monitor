@@ -40,11 +40,53 @@ const (
 // RTR header is 8 bytes: version(1) + type(1) + sessionID(2) + length(4)
 const rtrHeaderLen = 8
 
-// rtrReadTimeout bounds a single blocking PDU read. It is refreshed after each
-// successful read, so it only fires when the cache goes silent — at which
-// point a cancelled context shuts the loop down cleanly and a live context
-// triggers a reconnect.
-const rtrReadTimeout = 65 * time.Second
+// Error Report codes (RFC 8210 §12). In an Error Report the header's
+// session ID field carries the code.
+const (
+	errCodeNoDataAvailable     uint16 = 2
+	errCodeUnsupportedProtoVer uint16 = 4
+)
+
+// End of Data timing (RFC 8210 §6): defaults when the cache sends none
+// (version 0) and the allowed ranges, in seconds.
+const (
+	defaultRefresh = 3600
+	defaultRetry   = 600
+	defaultExpire  = 7200
+)
+
+var (
+	refreshRange = [2]uint32{1, 86400}
+	retryRange   = [2]uint32{1, 7200}
+	expireRange  = [2]uint32{600, 172800}
+)
+
+// errCacheNotReady marks a session the cache ended with Error Report code 2
+// (No Data Available): it is still building its data set, typically just
+// after it started. Retry later at the same protocol version.
+var errCacheNotReady = errors.New("cache has no data available yet")
+
+// errVersionUpgrade ends a downgraded session after a re-probe found that the
+// cache now supports the configured version.
+var errVersionUpgrade = errors.New("cache now supports a higher RTR protocol version")
+
+// defaultVersionReprobe is how often a downgraded client re-probes the cache
+// at the configured version unless SetVersionReprobeInterval says otherwise.
+const defaultVersionReprobe = time.Hour
+
+// probeTimeout bounds a version re-probe's connection and first reply.
+const probeTimeout = 30 * time.Second
+
+// rtrKeepAlive detects a dead cache or path within about two minutes (60s
+// idle, then 4 probes 15s apart) whether or not a query is outstanding.
+// Without it a session idle between polls could sit on a dead connection
+// until the next poll's Retry Interval ran out.
+var rtrKeepAlive = net.KeepAliveConfig{
+	Enable:   true,
+	Idle:     60 * time.Second,
+	Interval: 15 * time.Second,
+	Count:    4,
+}
 
 // Client maintains an RTR session with a single RPKI validator cache.
 type Client struct {
@@ -61,8 +103,39 @@ type Client struct {
 	configVersion   uint8 // configured starting version; reset to this on each session
 	protoVersion    uint8 // RTR protocol version (0, 1, or 2)
 	onUpdate        func()
+	onSync          func()
 	readyOnce       sync.Once
 	ready           chan struct{}
+
+	// negotiatedVersion is the version the next session opens at. It
+	// starts at configVersion and is lowered only when the cache rejects a
+	// version with Error Report code 4 (Unsupported Protocol Version), or
+	// answers at a lower one.
+	negotiatedVersion uint8
+
+	// State of the cache's data as of the last End of Data. Owned by the
+	// goroutine running Start.
+	sessionID     uint16
+	serial        uint32
+	haveSerial    bool
+	refresh       uint32 // seconds (see unit)
+	retry         uint32
+	expire        uint32
+	expireTimer   *time.Timer // fires Expire after the last End of Data
+	expired       bool
+	sessionSynced bool // the current session has completed a sync
+
+	// unit is what one second of an End of Data interval lasts. Only tests
+	// shorten it.
+	unit time.Duration
+
+	// Version re-probing after a downgrade: how often, and when the cache
+	// last turned the configured version down.
+	reprobeInterval time.Duration
+	downgradedAt    time.Time
+
+	// connHook, if set, sees each session's connection. Tests only.
+	connHook func(net.Conn)
 
 	// Telemetry (optional). A nil recorder is a safe no-op.
 	tel           *telemetry.Recorder
@@ -95,6 +168,13 @@ func NewClient(address string, transport string, tlsCfg *config.TLSConfig, vrpSt
 		configVersion: configVersion,
 		protoVersion:  configVersion,
 		ready:         make(chan struct{}),
+
+		negotiatedVersion: configVersion,
+		refresh:           defaultRefresh,
+		retry:             defaultRetry,
+		expire:            defaultExpire,
+		unit:              time.Second,
+		reprobeInterval:   defaultVersionReprobe,
 	}
 
 	if transport == "tls" {
@@ -143,9 +223,27 @@ func (c *Client) Ready() <-chan struct{} {
 	return c.ready
 }
 
-// SetOnUpdate sets a callback invoked after each VRP store update.
+// SetOnUpdate sets a callback invoked after a sync that changed the VRP or
+// ASPA data: a full sync, a new serial, or any records applied. A poll that
+// finds the cache's serial unchanged does not call it.
 func (c *Client) SetOnUpdate(fn func()) {
 	c.onUpdate = fn
+}
+
+// SetOnSync sets a callback invoked after every completed sync (End of
+// Data), whether or not the data changed. For a sync that changed the data
+// it runs after the update callback.
+func (c *Client) SetOnSync(fn func()) {
+	c.onSync = fn
+}
+
+// SetVersionReprobeInterval sets how often, after a cache has made the client
+// downgrade, it checks whether the cache now supports the configured version
+// (default one hour). Zero or less keeps the default.
+func (c *Client) SetVersionReprobeInterval(d time.Duration) {
+	if d > 0 {
+		c.reprobeInterval = d
+	}
 }
 
 // SetTelemetry attaches a telemetry recorder. Passing nil (or never calling
@@ -158,72 +256,173 @@ func (c *Client) SetTelemetry(rec *telemetry.Recorder) {
 // Reconnects with exponential backoff on failure. Blocks until ctx is cancelled.
 func (c *Client) Start(ctx context.Context) {
 	retryDelay := c.retryMin
+	metrics.RTRDataExpired.WithLabelValues(c.address).Set(0)
+	defer func() {
+		if c.expireTimer != nil {
+			c.expireTimer.Stop()
+		}
+	}()
 
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
+		c.sessionSynced = false
 		err := c.runSession(ctx)
 		if ctx.Err() != nil {
 			return
 		}
+		if c.sessionSynced {
+			retryDelay = c.retryMin
+		}
 
-		c.log.Error("RTR session failed, reconnecting", "error", err, "retry_in", retryDelay)
+		switch {
+		case errors.Is(err, errVersionUpgrade):
+			c.log.Info("RTR reconnecting to upgrade protocol version", "protocol_version", c.negotiatedVersion)
+			retryDelay = 0
+		case errors.Is(err, errCacheNotReady):
+			c.log.Warn("RTR cache not ready, reconnecting", "error", err, "retry_in", retryDelay,
+				"protocol_version", c.negotiatedVersion)
+		default:
+			c.log.Error("RTR session failed, reconnecting", "error", err, "retry_in", retryDelay)
+		}
 
-		select {
-		case <-time.After(retryDelay):
-			retryDelay = retryDelay * 2
-			if retryDelay > c.retryMax {
-				retryDelay = c.retryMax
+		// Keep watching for expiry while disconnected: a cache that is
+		// unreachable is exactly when the data goes stale.
+		wait := time.NewTimer(retryDelay)
+	backoff:
+		for {
+			select {
+			case <-wait.C:
+				break backoff
+			case <-timerC(c.expireTimer):
+				c.expireTimer = nil
+				c.markExpired()
+			case <-ctx.Done():
+				wait.Stop()
+				return
 			}
-		case <-ctx.Done():
+		}
+		retryDelay = min(max(retryDelay*2, c.retryMin), c.retryMax)
+	}
+}
+
+// dialer returns the dialer for RTR connections, with TCP keepalive on. TLS
+// connections use it for their underlying TCP connection too.
+func (c *Client) dialer() *net.Dialer {
+	return &net.Dialer{Timeout: 10 * time.Second, KeepAliveConfig: rtrKeepAlive}
+}
+
+// dial connects to the cache over the configured transport. It also returns
+// the underlying TCP connection, if there is one.
+func (c *Client) dial(ctx context.Context) (net.Conn, *net.TCPConn, error) {
+	switch c.transport {
+	case "tls":
+		// tls.DialWithDialer ignores DialContext's deadline, so we bound the
+		// handshake via the dialer's own Timeout.
+		tconn, err := tls.DialWithDialer(c.dialer(), "tcp", c.address, c.tlsCfg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("connect (tls): %w", err)
+		}
+		// Reach through tls.Conn to the underlying TCP socket so we can apply
+		// the same buffer tunings used on plaintext sessions.
+		tc, _ := tconn.NetConn().(*net.TCPConn)
+		return tconn, tc, nil
+	default:
+		pc, err := c.dialer().DialContext(ctx, "tcp", c.address)
+		if err != nil {
+			return nil, nil, fmt.Errorf("connect: %w", err)
+		}
+		tc, _ := pc.(*net.TCPConn)
+		return pc, tc, nil
+	}
+}
+
+// probeResult is what a version re-probe found.
+type probeResult int
+
+const (
+	probeInconclusive probeResult = iota // no answer, or one that says nothing about the version
+	probeSupported                       // the cache answered at the version
+	probeUnsupported                     // Error Report code 4
+)
+
+// probeVersion opens a separate, short connection and sends a Reset Query at
+// version, to learn whether the cache now supports it without disturbing the
+// running session. It reads only the first reply.
+func (c *Client) probeVersion(ctx context.Context, version uint8) (probeResult, string) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	conn, _, err := c.dial(ctx)
+	if err != nil {
+		return probeInconclusive, err.Error()
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(probeTimeout))
+	if err := c.sendResetQuery(conn, version); err != nil {
+		return probeInconclusive, err.Error()
+	}
+	v, pduType, code, payload, err := c.readPDU(bufio.NewReader(conn))
+	switch {
+	case err != nil:
+		return probeInconclusive, err.Error()
+	case pduType == PDUCacheResponse && v == version:
+		return probeSupported, ""
+	case pduType == PDUErrorReport && code == errCodeUnsupportedProtoVer:
+		return probeUnsupported, c.parseErrorReport(payload)
+	case pduType == PDUErrorReport:
+		return probeInconclusive, fmt.Sprintf("error report code %d: %s", code, c.parseErrorReport(payload))
+	default:
+		return probeInconclusive, fmt.Sprintf("unexpected PDU type %d at version %d", pduType, v)
+	}
+}
+
+// pduResult is one PDU, or the read error that ended the session.
+type pduResult struct {
+	version   uint8
+	pduType   uint8
+	sessionID uint16
+	payload   []byte
+	err       error
+}
+
+// readLoop reads PDUs into out until a read fails or stop is closed. It runs
+// on its own goroutine so the session loop can wait on PDUs and its timers
+// at once.
+func (c *Client) readLoop(r *bufio.Reader, out chan<- pduResult, stop <-chan struct{}) {
+	for {
+		var res pduResult
+		res.version, res.pduType, res.sessionID, res.payload, res.err = c.readPDU(r)
+		select {
+		case out <- res:
+		case <-stop:
+			return
+		}
+		if res.err != nil {
 			return
 		}
 	}
 }
 
 // runSession handles a single RTR connection lifecycle.
+//
+// After the initial Reset Query it keeps the data current two ways: it sends
+// a Serial Query when the cache sends a Serial Notify, and, since a cache
+// need not notify, whenever the Refresh Interval from the last End of Data
+// passes without one (RFC 8210 §6). A query that gets no response within
+// the Retry Interval fails the session.
 func (c *Client) runSession(ctx context.Context) error {
-	// Reset to the configured starting version on each new session attempt.
-	// Transient errors (e.g. "Running initial validation" during cache startup)
-	// must not permanently downgrade the version across reconnects.
-	// Version negotiation will still fall back within this session if the cache
-	// genuinely rejects the starting version with an error report.
-	c.protoVersion = c.configVersion
+	c.protoVersion = c.negotiatedVersion
 
-	var (
-		conn   net.Conn
-		tcpRaw *net.TCPConn
-	)
-
-	switch c.transport {
-	case "tls":
-		// tls.DialWithDialer ignores DialContext's deadline, so we bound the
-		// handshake via the dialer's own Timeout.
-		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		tconn, err := tls.DialWithDialer(dialer, "tcp", c.address, c.tlsCfg)
-		if err != nil {
-			return fmt.Errorf("connect (tls): %w", err)
-		}
-		conn = tconn
-		// Reach through tls.Conn to the underlying TCP socket so we can apply
-		// the same buffer tunings used on plaintext sessions.
-		if tc, ok := tconn.NetConn().(*net.TCPConn); ok {
-			tcpRaw = tc
-		}
-	default:
-		dialer := net.Dialer{Timeout: 10 * time.Second}
-		pc, err := dialer.DialContext(ctx, "tcp", c.address)
-		if err != nil {
-			return fmt.Errorf("connect: %w", err)
-		}
-		conn = pc
-		if tc, ok := pc.(*net.TCPConn); ok {
-			tcpRaw = tc
-		}
+	conn, tcpRaw, err := c.dial(ctx)
+	if err != nil {
+		return err
 	}
 	defer conn.Close()
+	if c.connHook != nil {
+		c.connHook(conn)
+	}
 
 	// Tune TCP buffers to handle large VRP table dumps
 	if tcpRaw != nil && c.transport != "tls" {
@@ -232,7 +431,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		tcpRaw.SetWriteBuffer(1 * 1024 * 1024)
 	}
 
-	c.log.Info("RTR session established", "transport", c.transport)
+	c.log.Info("RTR connected", "transport", c.transport, "protocol_version", c.protoVersion)
 	c.tel.Record(telemetry.SessionEvent{
 		Cache:        c.address,
 		EventType:    telemetry.EventConnected,
@@ -243,51 +442,127 @@ func (c *Client) runSession(ctx context.Context) error {
 	metrics.RTRVRPCount.WithLabelValues(c.address).Set(float64(c.vrpStore.Count()))
 	metrics.RTRASPACount.WithLabelValues(c.address).Set(float64(c.aspaStore.Count()))
 
+	// Timers: refresh fires the next poll and is armed only after an End of
+	// Data; response bounds the wait for an answer to the outstanding query
+	// and is non-nil exactly while one is outstanding.
+	//
+	// reprobe, on a session below the configured version, fires the next
+	// version re-probe; probed delivers its result.
+	var refresh, response, reprobe *time.Timer
+	probed := make(chan probeResult, 1)
+	var probeDetail string
+	defer func() {
+		for _, t := range []*time.Timer{refresh, response, reprobe} {
+			if t != nil {
+				t.Stop()
+			}
+		}
+	}()
+	query := func(send func() error) error {
+		if refresh != nil {
+			refresh.Stop()
+			refresh = nil
+		}
+		c.syncStart = time.Now()
+		if err := send(); err != nil {
+			return err
+		}
+		response = time.NewTimer(c.interval(c.retry))
+		return nil
+	}
+
 	// Send Reset Query to get the full VRP set
 	c.fullSyncPending = true
-	c.syncStart = time.Now()
-	if err := c.sendResetQuery(conn); err != nil {
+	if err := query(func() error { return c.sendResetQuery(conn, c.protoVersion) }); err != nil {
 		return fmt.Errorf("send reset query: %w", err)
 	}
 
 	// Buffered reader — critical for draining large VRP table dumps
 	reader := bufio.NewReaderSize(conn, 4*1024*1024) // 4MB read buffer
+	pdus := make(chan pduResult)
+	stop := make(chan struct{})
+	defer close(stop) // runs before conn.Close, which unblocks the reader
+	go c.readLoop(reader, pdus, stop)
 
-	// Bound each blocking read so ctx cancellation can unblock the loop within
-	// the deadline window instead of parking indefinitely on a silent cache.
-	// The deadline is refreshed after every successful PDU read below.
-	conn.SetReadDeadline(time.Now().Add(rtrReadTimeout))
+	established := false
+	var notifiedSerial uint32
+	notifyPending := false // a Serial Notify arrived while a query was outstanding
 
-	// Read PDUs until the session ends
 	for {
-		if ctx.Err() != nil {
+		var res pduResult
+		select {
+		case <-ctx.Done():
 			return nil
-		}
-		pduType, sessionID, payload, err := c.readPDU(reader)
-		if err != nil {
-			// A read deadline timeout is benign: it exists only so ctx
-			// cancellation can unblock this parked read. If the context is
-			// cancelled, shut down cleanly; otherwise the cache is merely idle,
-			// so refresh the deadline and keep waiting — never reconnect.
-			if isTimeout(err) {
-				if ctx.Err() != nil {
-					return nil
-				}
-				conn.SetReadDeadline(time.Now().Add(rtrReadTimeout))
-				continue
+		case <-timerC(c.expireTimer):
+			c.expireTimer = nil
+			c.markExpired()
+			continue
+		case <-timerC(refresh):
+			refresh = nil
+			c.log.Debug("refresh interval elapsed, polling cache", "serial", c.serial)
+			if err := query(func() error { return c.sendSerialQuery(conn, c.sessionID, c.serial) }); err != nil {
+				return fmt.Errorf("send serial query: %w", err)
 			}
-			// Non-timeout failure: exit cleanly if we're shutting down,
-			// otherwise propagate so Start reconnects with backoff.
+			continue
+		case <-timerC(response):
+			return fmt.Errorf("no response from cache within the retry interval (%s)", c.interval(c.retry))
+		case <-timerC(reprobe):
+			reprobe = nil
+			c.log.Info("re-probing RTR protocol version", "version", c.configVersion,
+				"current_version", c.protoVersion)
+			go func() {
+				r, detail := c.probeVersion(ctx, c.configVersion)
+				probeDetail = detail
+				probed <- r
+			}()
+			continue
+		case r := <-probed:
+			switch r {
+			case probeSupported:
+				c.log.Info("cache now supports the configured RTR protocol version; upgrading",
+					"version", c.configVersion, "current_version", c.protoVersion)
+				c.negotiatedVersion = c.configVersion
+				c.downgradedAt = time.Time{}
+				return errVersionUpgrade
+			case probeUnsupported:
+				c.downgradedAt = time.Now()
+				c.log.Warn("cache still does not support the configured RTR protocol version; staying downgraded",
+					"version", c.configVersion, "current_version", c.protoVersion,
+					"next_reprobe_in", c.reprobeInterval, "error_text", probeDetail)
+			default:
+				c.log.Warn("RTR protocol version re-probe inconclusive; staying downgraded",
+					"version", c.configVersion, "current_version", c.protoVersion,
+					"next_reprobe_in", c.reprobeInterval, "detail", probeDetail)
+			}
+			reprobe = time.NewTimer(c.reprobeInterval)
+			continue
+		case res = <-pdus:
+		}
+		if res.err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("read PDU: %w", err)
+			return fmt.Errorf("read PDU: %w", res.err)
 		}
-		conn.SetReadDeadline(time.Now().Add(rtrReadTimeout))
+		// The cache is answering; a large dump may take a while to arrive.
+		if response != nil {
+			response.Reset(c.interval(c.retry))
+		}
+		pduType, sessionID, payload := res.pduType, res.sessionID, res.payload
 
 		switch pduType {
 		case PDUCacheResponse:
 			c.log.Debug("cache response", "session_id", sessionID)
+			if !established {
+				established = true
+				c.sessionEstablished(res.version)
+				if c.protoVersion < c.configVersion {
+					if c.downgradedAt.IsZero() {
+						c.downgradedAt = time.Now()
+					}
+					reprobe = time.NewTimer(max(0, time.Until(c.downgradedAt.Add(c.reprobeInterval))))
+				}
+			}
 			// Reset per-sync counters at the start of each cache response so
 			// the EndOfData telemetry reflects only this sync's deltas.
 			c.vrpAnnounced, c.vrpWithdrawn = 0, 0
@@ -347,69 +622,47 @@ func (c *Client) runSession(ctx context.Context) error {
 			}
 
 		case PDUEndOfData:
-			serial, err := c.parseEndOfData(payload)
+			eod, err := c.parseEndOfData(res.version, payload)
 			if err != nil {
 				c.log.Error("bad end-of-data PDU", "error", err)
 				continue
 			}
-			c.vrpStore.SetSerial(serial, sessionID)
-			c.vrpStore.RebuildIndex() // build index once after full sync
-
-			// Emit sync telemetry before clearing fullSyncPending, which
-			// distinguishes a full (Reset Query) from an incremental sync.
-			now := time.Now()
-			syncType := telemetry.SyncTypeIncremental
-			if c.fullSyncPending {
-				syncType = telemetry.SyncTypeFull
+			if response != nil {
+				response.Stop()
+				response = nil
 			}
-			ev := telemetry.SessionEvent{
-				Timestamp:     now,
-				Cache:         c.address,
-				EventType:     telemetry.EventSync,
-				Serial:        serial,
-				VRPTotal:      int(c.vrpStore.Count()),
-				VRPAnnounced:  c.vrpAnnounced,
-				VRPWithdrawn:  c.vrpWithdrawn,
-				ASPATotal:     c.aspaStore.Count(),
-				ASPAAnnounced: c.aspaAnnounced,
-				ASPAWithdrawn: c.aspaWithdrawn,
-				SyncDuration:  now.Sub(c.syncStart),
-				SyncType:      syncType,
-			}
-			if !c.lastSyncTime.IsZero() {
-				ev.IntervalSince = now.Sub(c.lastSyncTime)
-			}
-			c.tel.Record(ev)
-			c.lastSyncTime = now
-
-			c.fullSyncPending = false
-			metrics.RTRVRPCount.WithLabelValues(c.address).Set(float64(c.vrpStore.Count()))
-			metrics.RTRASPACount.WithLabelValues(c.address).Set(float64(c.aspaStore.Count()))
-			metrics.RTRLastSync.WithLabelValues(c.address).Set(float64(time.Now().Unix()))
-			c.log.Info("RTR sync complete",
-				"vrp_count", c.vrpStore.Count(),
-				"aspa_count", c.aspaStore.Count(),
-				"serial", serial,
-				"session_id", sessionID,
-			)
-			if c.onUpdate != nil {
-				c.onUpdate()
-				c.readyOnce.Do(func() { close(c.ready) })
-			}
-
-			// After initial sync, wait for Serial Notify from cache
-			// and send Serial Query for incremental updates
+			c.endOfData(sessionID, eod)
+			c.sessionSynced = true
 			c.hasReset = true
 
-		case PDUSerialNotify:
-			if len(payload) >= 4 {
-				serial := binary.BigEndian.Uint32(payload[0:4])
-				c.log.Debug("serial notify", "serial", serial)
-				// Send Serial Query for incremental update
-				c.syncStart = time.Now()
-				if err := c.sendSerialQuery(conn, sessionID, c.vrpStore.Serial()); err != nil {
+			// A notify for a serial this sync did not reach: ask again now.
+			if notifyPending && notifiedSerial != c.serial {
+				notifyPending = false
+				if err := query(func() error { return c.sendSerialQuery(conn, c.sessionID, c.serial) }); err != nil {
 					return fmt.Errorf("send serial query: %w", err)
 				}
+				continue
+			}
+			notifyPending = false
+			refresh = time.NewTimer(c.interval(c.refresh))
+
+		case PDUSerialNotify:
+			if len(payload) < 4 {
+				continue
+			}
+			serial := binary.BigEndian.Uint32(payload[0:4])
+			c.log.Debug("serial notify", "serial", serial)
+			if response != nil {
+				// A query is already outstanding; its End of Data may or
+				// may not reach this serial.
+				notifiedSerial, notifyPending = serial, true
+				continue
+			}
+			if !c.haveSerial || serial == c.serial {
+				continue
+			}
+			if err := query(func() error { return c.sendSerialQuery(conn, c.sessionID, c.serial) }); err != nil {
+				return fmt.Errorf("send serial query: %w", err)
 			}
 
 		case PDUCacheReset:
@@ -420,34 +673,12 @@ func (c *Client) runSession(ctx context.Context) error {
 				ResetReason: telemetry.ResetReasonCacheResetPDU,
 			})
 			c.fullSyncPending = true
-			c.syncStart = time.Now()
-			if err := c.sendResetQuery(conn); err != nil {
+			if err := query(func() error { return c.sendResetQuery(conn, c.protoVersion) }); err != nil {
 				return fmt.Errorf("send reset query after cache reset: %w", err)
 			}
 
 		case PDUErrorReport:
-			errMsg := c.parseErrorReport(payload)
-			c.log.Error("RTR error report from cache", "error_text", errMsg)
-			c.tel.Record(telemetry.SessionEvent{
-				Cache:        c.address,
-				EventType:    telemetry.EventError,
-				ErrorText:    errMsg,
-				ProtoVersion: c.protoVersion,
-			})
-
-			// Version negotiation fallback: 2 → 1 → 0
-			switch c.protoVersion {
-			case 2:
-				c.log.Info("falling back to RTR protocol version 1")
-				c.protoVersion = 1
-				return fmt.Errorf("cache sent error report (trying version 1): %s", errMsg)
-			case 1:
-				c.log.Info("falling back to RTR protocol version 0")
-				c.protoVersion = 0
-				return fmt.Errorf("cache sent error report (trying version 0): %s", errMsg)
-			default:
-				return fmt.Errorf("cache sent error report: %s", errMsg)
-			}
+			return c.errorReport(res.version, sessionID, payload)
 
 		default:
 			c.log.Debug("unknown RTR PDU type", "type", pduType)
@@ -455,36 +686,194 @@ func (c *Client) runSession(ctx context.Context) error {
 	}
 }
 
-// isTimeout reports whether err is an I/O deadline expiry, covering both the
-// os.ErrDeadlineExceeded sentinel and the net.Error Timeout() interface.
-func isTimeout(err error) bool {
-	if errors.Is(err, os.ErrDeadlineExceeded) {
-		return true
+// sessionEstablished records the protocol version the cache answered at,
+// which the rest of the session (and the next) uses.
+func (c *Client) sessionEstablished(version uint8) {
+	if version < c.protoVersion {
+		// The cache answered at a version below the one asked for.
+		c.protoVersion = version
+		c.negotiatedVersion = version
 	}
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
+	c.log.Info("RTR session established", "transport", c.transport, "protocol_version", c.protoVersion)
+	metrics.RTRProtocolVersion.WithLabelValues(c.address).Set(float64(c.protoVersion))
+	if c.protoVersion < 2 {
+		// ASPA records exist only from version 2. Drop any left from an
+		// earlier version 2 session rather than validate against them
+		// indefinitely.
+		c.aspaStore.Clear()
+		metrics.RTRASPACount.WithLabelValues(c.address).Set(0)
+		c.log.Warn("RTR session below protocol version 2: ASPA validation is unavailable",
+			"protocol_version", c.protoVersion)
+	}
+}
+
+// endOfData completes a sync: it records the cache's serial and timing,
+// updates metrics and telemetry, re-arms the expiry timer and, if the data
+// changed, notifies the update callback.
+func (c *Client) endOfData(sessionID uint16, eod endOfData) {
+	serialChanged := !c.haveSerial || eod.serial != c.serial
+	applied := c.vrpAnnounced + c.vrpWithdrawn + c.aspaAnnounced + c.aspaWithdrawn
+	dataChanged := c.fullSyncPending || serialChanged || applied > 0
+	c.sessionID, c.serial, c.haveSerial = sessionID, eod.serial, true
+	c.refresh, c.retry, c.expire = eod.refresh, eod.retry, eod.expire
+
+	c.vrpStore.SetSerial(eod.serial, sessionID)
+	if dataChanged {
+		c.vrpStore.RebuildIndex()
+	}
+
+	// Emit sync telemetry before clearing fullSyncPending, which
+	// distinguishes a full (Reset Query) from an incremental sync.
+	now := time.Now()
+	syncType := telemetry.SyncTypeIncremental
+	if c.fullSyncPending {
+		syncType = telemetry.SyncTypeFull
+	}
+	ev := telemetry.SessionEvent{
+		Timestamp:     now,
+		Cache:         c.address,
+		EventType:     telemetry.EventSync,
+		Serial:        eod.serial,
+		SerialChanged: &serialChanged,
+		VRPTotal:      int(c.vrpStore.Count()),
+		VRPAnnounced:  c.vrpAnnounced,
+		VRPWithdrawn:  c.vrpWithdrawn,
+		ASPATotal:     c.aspaStore.Count(),
+		ASPAAnnounced: c.aspaAnnounced,
+		ASPAWithdrawn: c.aspaWithdrawn,
+		SyncDuration:  now.Sub(c.syncStart),
+		SyncType:      syncType,
+	}
+	if !c.lastSyncTime.IsZero() {
+		ev.IntervalSince = now.Sub(c.lastSyncTime)
+	}
+	c.tel.Record(ev)
+	c.lastSyncTime = now
+	c.fullSyncPending = false
+
+	metrics.RTRVRPCount.WithLabelValues(c.address).Set(float64(c.vrpStore.Count()))
+	metrics.RTRASPACount.WithLabelValues(c.address).Set(float64(c.aspaStore.Count()))
+	metrics.RTRLastSync.WithLabelValues(c.address).Set(float64(now.Unix()))
+	if serialChanged {
+		metrics.RTRLastSerialChange.WithLabelValues(c.address).Set(float64(now.Unix()))
+	}
+
+	if c.expired {
+		c.log.Info("RTR data current again", "serial", eod.serial)
+	}
+	c.expired = false
+	metrics.RTRDataExpired.WithLabelValues(c.address).Set(0)
+	if c.expireTimer != nil {
+		c.expireTimer.Stop()
+	}
+	c.expireTimer = time.NewTimer(c.interval(c.expire))
+
+	c.log.Info("RTR sync complete",
+		"vrp_count", c.vrpStore.Count(),
+		"aspa_count", c.aspaStore.Count(),
+		"serial", eod.serial,
+		"serial_changed", serialChanged,
+		"session_id", sessionID,
+		"refresh", eod.refresh, "retry", eod.retry, "expire", eod.expire,
+	)
+	// Update before sync: whoever sees the sync recorded can rely on the
+	// update (in raven serve, the revalidation request) having been made.
+	if dataChanged && c.onUpdate != nil {
+		c.onUpdate()
+	}
+	if c.onSync != nil {
+		c.onSync()
+	}
+	c.readyOnce.Do(func() { close(c.ready) })
+}
+
+// markExpired flags the cache's data as expired: no sync has completed within
+// its Expire Interval. The data is kept; validation goes on using it.
+func (c *Client) markExpired() {
+	if c.expired {
+		return
+	}
+	c.expired = true
+	metrics.RTRDataExpired.WithLabelValues(c.address).Set(1)
+	c.log.Error("RTR data expired: no sync with the cache completed within its expire interval; still validating with the last data received",
+		"expire_interval", c.interval(c.expire), "last_sync", c.lastSyncTime, "serial", c.serial)
+}
+
+// errorReport handles an Error Report from the cache, which ends the session,
+// and returns the error to end it with.
+func (c *Client) errorReport(version uint8, code uint16, payload []byte) error {
+	errMsg := c.parseErrorReport(payload)
+	c.tel.Record(telemetry.SessionEvent{
+		Cache:        c.address,
+		EventType:    telemetry.EventError,
+		ErrorText:    errMsg,
+		ErrorCode:    &code,
+		ProtoVersion: c.protoVersion,
+	})
+
+	switch code {
+	case errCodeNoDataAvailable:
+		// Not a version problem: the cache is still building its data
+		// (Routinator sends "Running initial validation" at startup).
+		// Retry later, at the same version.
+		return fmt.Errorf("%w (%s)", errCacheNotReady, errMsg)
+
+	case errCodeUnsupportedProtoVer:
+		if c.protoVersion == 0 {
+			c.log.Error("cache rejected RTR protocol version 0", "error_text", errMsg)
+			return fmt.Errorf("cache does not support RTR protocol version 0: %s", errMsg)
+		}
+		next := c.protoVersion - 1
+		if version < c.protoVersion {
+			next = version // the cache's own version, from its Error Report
+		}
+		c.log.Warn("cache does not support this RTR protocol version, downgrading",
+			"protocol_version", c.protoVersion, "next_version", next, "error_text", errMsg,
+			"reprobe_in", c.reprobeInterval)
+		c.negotiatedVersion = next
+		c.downgradedAt = time.Now()
+		return fmt.Errorf("cache does not support RTR protocol version %d (retrying at %d): %s", c.protoVersion, next, errMsg)
+
+	default:
+		c.log.Error("RTR error report from cache", "code", code, "error_text", errMsg)
+		return fmt.Errorf("cache sent error report (code %d): %s", code, errMsg)
+	}
+}
+
+// interval converts an End of Data interval to a duration.
+func (c *Client) interval(seconds uint32) time.Duration {
+	return time.Duration(seconds) * c.unit
+}
+
+// timerC returns t's channel, or nil (never ready) for no timer.
+func timerC(t *time.Timer) <-chan time.Time {
+	if t == nil {
+		return nil
+	}
+	return t.C
 }
 
 // readPDU reads a single RTR PDU from the connection.
-func (c *Client) readPDU(r *bufio.Reader) (pduType uint8, sessionID uint16, payload []byte, err error) {
+func (c *Client) readPDU(r *bufio.Reader) (version, pduType uint8, sessionID uint16, payload []byte, err error) {
 	hdr := make([]byte, rtrHeaderLen)
 	if _, err = io.ReadFull(r, hdr); err != nil {
-		return 0, 0, nil, err
+		return 0, 0, 0, nil, err
 	}
+	version = hdr[0]
 	pduType = hdr[1]
 	sessionID = binary.BigEndian.Uint16(hdr[2:4])
 	length := binary.BigEndian.Uint32(hdr[4:8])
 	if length < rtrHeaderLen {
-		return pduType, sessionID, nil, fmt.Errorf("PDU length %d < header size", length)
+		return version, pduType, sessionID, nil, fmt.Errorf("PDU length %d < header size", length)
 	}
 	payloadLen := int(length) - rtrHeaderLen
 	if payloadLen > 0 {
 		payload = make([]byte, payloadLen)
 		if _, err = io.ReadFull(r, payload); err != nil {
-			return pduType, sessionID, nil, err
+			return version, pduType, sessionID, nil, err
 		}
 	}
-	return pduType, sessionID, payload, nil
+	return version, pduType, sessionID, payload, nil
 }
 
 // parseASPAPDU parses an ASPA PDU (type 11) from RTR v2.
@@ -513,10 +902,10 @@ func (c *Client) parseASPAPDU(sessionID uint16, data []byte) (customerASN uint32
 	return customerASN, providerASNs, withdraw, nil
 }
 
-// sendResetQuery sends an RTR Reset Query PDU.
-func (c *Client) sendResetQuery(conn net.Conn) error {
+// sendResetQuery sends an RTR Reset Query PDU at the given version.
+func (c *Client) sendResetQuery(conn net.Conn, version uint8) error {
 	pdu := make([]byte, 8)
-	pdu[0] = c.protoVersion
+	pdu[0] = version
 	pdu[1] = PDUResetQuery
 	// session_id = 0
 	binary.BigEndian.PutUint32(pdu[4:8], 8) // length = 8
@@ -594,12 +983,40 @@ func (c *Client) parseIPv6Prefix(data []byte) (types.VRP, bool, error) {
 	}, withdraw, nil
 }
 
-// parseEndOfData parses an End of Data PDU payload and returns the serial number.
-func (c *Client) parseEndOfData(data []byte) (uint32, error) {
+// endOfData is an End of Data PDU's serial and timing parameters, in seconds.
+type endOfData struct {
+	serial                 uint32
+	refresh, retry, expire uint32
+}
+
+// parseEndOfData parses an End of Data PDU payload. Version 0 carries only
+// the serial; versions 1 and 2 add the Refresh, Retry and Expire Intervals
+// (RFC 8210 §5.8). Absent or out-of-range intervals take the RFC defaults.
+func (c *Client) parseEndOfData(version uint8, data []byte) (endOfData, error) {
 	if len(data) < 4 {
-		return 0, fmt.Errorf("end-of-data PDU too short: %d", len(data))
+		return endOfData{}, fmt.Errorf("end-of-data PDU too short: %d", len(data))
 	}
-	return binary.BigEndian.Uint32(data[0:4]), nil
+	eod := endOfData{
+		serial:  binary.BigEndian.Uint32(data[0:4]),
+		refresh: defaultRefresh,
+		retry:   defaultRetry,
+		expire:  defaultExpire,
+	}
+	if version == 0 || len(data) < 16 {
+		return eod, nil
+	}
+	field := func(name string, v uint32, valid [2]uint32, def uint32) uint32 {
+		if v < valid[0] || v > valid[1] {
+			c.log.Warn("cache sent an out-of-range End of Data interval; using the default",
+				"interval", name, "value", v, "default", def)
+			return def
+		}
+		return v
+	}
+	eod.refresh = field("refresh", binary.BigEndian.Uint32(data[4:8]), refreshRange, defaultRefresh)
+	eod.retry = field("retry", binary.BigEndian.Uint32(data[8:12]), retryRange, defaultRetry)
+	eod.expire = field("expire", binary.BigEndian.Uint32(data[12:16]), expireRange, defaultExpire)
+	return eod, nil
 }
 
 // parseErrorReport extracts the error text from an RTR Error Report PDU.

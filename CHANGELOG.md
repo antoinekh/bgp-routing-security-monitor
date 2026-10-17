@@ -54,6 +54,37 @@ All notable changes to RAVEN are recorded here.
   a copy and swapped in with `Table.Replace` only if the table still holds
   that same route, so readers never see a half-updated route.
   `Engine.RevalidateAll` has been removed.
+- The RTR client only queried a cache after a Serial Notify, so a cache that
+  does not notify was never polled, and a quiet cache looked the same as a
+  stuck client. It now polls at the Refresh Interval from each End of Data
+  (RFC 8210 defaults when the cache sends none), fails a query unanswered
+  within the Retry Interval, and logs an ERROR and sets
+  `raven_rtr_data_expired{cache}` to 1 when no sync completes within the
+  Expire Interval; the data is kept. `raven_rtr_last_sync_seconds` still
+  records every completed sync; the new
+  `raven_rtr_last_serial_change_seconds` records syncs that brought a new
+  serial, and `rtr monitor` sync events carry `serial_changed`. A poll that
+  finds nothing new no longer triggers a revalidation pass in `raven serve`.
+  RTR connections (plain TCP and TLS) now use TCP keepalive (60s idle, 4
+  probes 15s apart), so a dead cache or path is detected in about two
+  minutes even between polls.
+- RTR version negotiation treated every cache Error Report as a version
+  problem and logged "falling back to RTR protocol version 1", but never
+  actually stayed at the lower version, so a version-1-only cache could not
+  be used at all. RAVEN now downgrades only on Error Report code 4
+  (Unsupported Protocol Version) and keeps the negotiated version across
+  reconnects. A downgraded client re-probes the configured version on a
+  separate short connection every `rtr.version-reprobe-interval` (default
+  1h), logging INFO; if the cache now accepts it the session reconnects at
+  that version and ASPA sync resumes, otherwise a WARN says it stays
+  downgraded for another interval and the running session is untouched.
+  Code 2 (No Data Available, e.g. Routinator's "Running initial
+  validation" at startup) is retried later at the same version, and
+  `rtr monitor` reports it as a low-severity `cache_not_ready` event rather
+  than a high-severity anomaly. The negotiated version is logged on every
+  session and exported as `raven_rtr_protocol_version{cache}`; on a version
+  0 or 1 session the ASPA store is cleared and a WARN says ASPA validation
+  is unavailable.
   
 ## v0.3.3 (2026-07-02)
 

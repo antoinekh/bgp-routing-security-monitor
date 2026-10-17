@@ -294,14 +294,8 @@ func (s *Server) Run() error {
 					s.log.Error("failed to build RTR client", "cache", addr, "error", err)
 					return
 				}
-				client.SetOnUpdate(func() {
-					s.RequestRevalidation()
-					// Record last-sync time for StateReader/OTel.
-					s.rtrMu.Lock()
-					s.rtrLastSync[addr] = time.Now().Unix()
-					s.rtrStates[addr] = 1
-					s.rtrMu.Unlock()
-				})
+				client.SetVersionReprobeInterval(s.cfg.RTR.VersionReprobeInterval)
+				s.wireRTRClient(client, addr)
 				// Signal server when first RTR sync completes
 				go func() {
 					<-client.Ready()
@@ -558,6 +552,21 @@ func (s *Server) ingestLoop(ctx context.Context) {
 			sinceChunk = 0
 		}
 	}
+}
+
+// wireRTRClient connects an RTR client's callbacks to the server. Every
+// completed sync records the cache as synced; only a sync that changed the
+// VRP or ASPA data requests a revalidation pass, so a refresh poll that finds
+// the cache's serial unchanged costs no pass over the table.
+func (s *Server) wireRTRClient(client *rtr.Client, addr string) {
+	client.SetOnUpdate(s.RequestRevalidation)
+	client.SetOnSync(func() {
+		// Last-sync time for StateReader/OTel.
+		s.rtrMu.Lock()
+		s.rtrLastSync[addr] = time.Now().Unix()
+		s.rtrStates[addr] = 1
+		s.rtrMu.Unlock()
+	})
 }
 
 // RequestRevalidation asks ingestLoop to revalidate every route against the

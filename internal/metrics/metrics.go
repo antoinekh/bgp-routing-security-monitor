@@ -45,7 +45,26 @@ var (
 	// Unix timestamp of last successful RTR sync. Label: cache.
 	RTRLastSync = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_rtr_last_sync_seconds",
-		Help: "Unix timestamp of last successful RTR sync.",
+		Help: "Unix timestamp of the last completed RTR sync (End of Data), whether or not the data changed.",
+	}, []string{"cache"})
+
+	// Unix timestamp of the last RTR sync that advanced the serial. Label: cache.
+	RTRLastSerialChange = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "raven_rtr_last_serial_change_seconds",
+		Help: "Unix timestamp of the last RTR sync whose serial differed from the previous one.",
+	}, []string{"cache"})
+
+	// RTR data expiry: 1 when no sync has completed within the cache's
+	// Expire Interval. Label: cache.
+	RTRDataExpired = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "raven_rtr_data_expired",
+		Help: "1 if no RTR sync with the cache has completed within its Expire Interval, else 0.",
+	}, []string{"cache"})
+
+	// RTR protocol version of the current session. Label: cache.
+	RTRProtocolVersion = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "raven_rtr_protocol_version",
+		Help: "RTR protocol version negotiated with the cache (0, 1 or 2; ASPA needs 2).",
 	}, []string{"cache"})
 
 	// RTR anomalies detected by the adaptive detector. Labels: cache, severity.

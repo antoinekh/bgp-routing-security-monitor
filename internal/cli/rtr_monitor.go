@@ -117,33 +117,8 @@ client; no validation or BMP ingestion happens here.`,
 
 				syncsSinceSave := 0
 				for ev := range rec.Events() {
-					var anomaly *telemetry.AnomalyEvent
-					switch ev.EventType {
-					case telemetry.EventSync:
-						// Full syncs (Reset Query table dumps) report near the
-						// entire VRP/ASPA table as "announced", which is not
-						// comparable to the incremental deltas the baseline is
-						// built from. Feeding them to the detector would both
-						// trip a false positive (the first sync after connect is
-						// always full) and poison the rolling windows. Skip
-						// statistical evaluation entirely and leave the windows
-						// untouched; the sync is still recorded to NDJSON by the
-						// recorder for operator visibility.
-						if ev.SyncType == telemetry.SyncTypeFull {
-							log.Info("full RTR resync, not evaluated by anomaly detector",
-								"cache", ev.Cache, "vrp_total", ev.VRPTotal, "aspa_total", ev.ASPATotal)
-							break
-						}
-
-						anomaly = detector.ObserveSync(ev.Cache, ev.Timestamp, map[string]float64{
-							telemetry.MetricIntervalSince: float64(ev.IntervalSince),
-							telemetry.MetricSyncDuration:  float64(ev.SyncDuration),
-							telemetry.MetricVRPAnnounced:  float64(ev.VRPAnnounced),
-							telemetry.MetricVRPWithdrawn:  float64(ev.VRPWithdrawn),
-							telemetry.MetricASPAAnnounced: float64(ev.ASPAAnnounced),
-							telemetry.MetricASPAWithdrawn: float64(ev.ASPAWithdrawn),
-						})
-
+					anomaly, observed := observeRTREvent(detector, ev, log)
+					if observed {
 						syncsSinceSave++
 						if syncsSinceSave >= rtrMonitorSaveEvery {
 							syncsSinceSave = 0
@@ -151,10 +126,6 @@ client; no validation or BMP ingestion happens here.`,
 								log.Warn("periodic anomaly baseline save failed", "path", snapshotPath, "error", err)
 							}
 						}
-					case telemetry.EventReset:
-						anomaly = detector.ObserveStructural(ev.Cache, "cache_reset", ev.Timestamp)
-					case telemetry.EventError:
-						anomaly = detector.ObserveStructural(ev.Cache, "error_report", ev.Timestamp)
 					}
 
 					if anomaly != nil {
@@ -226,6 +197,41 @@ client; no validation or BMP ingestion happens here.`,
 // directory, mirroring the helper in internal/snapshot so path flags behave
 // consistently across the project. On any lookup error the path is returned
 // unchanged.
+// observeRTREvent feeds one telemetry event to the detector and returns the
+// anomaly it raises, if any, and whether it was a sync the detector's
+// baseline took in.
+func observeRTREvent(d *telemetry.Detector, ev telemetry.SessionEvent, log *slog.Logger) (*telemetry.AnomalyEvent, bool) {
+	switch ev.EventType {
+	case telemetry.EventSync:
+		// Full syncs (Reset Query table dumps) report near the entire
+		// VRP/ASPA table as "announced", which is not comparable to the
+		// incremental deltas the baseline is built from. Feeding them to the
+		// detector would both trip a false positive (the first sync after
+		// connect is always full) and poison the rolling windows. Skip
+		// statistical evaluation entirely and leave the windows untouched;
+		// the sync is still recorded to NDJSON by the recorder for operator
+		// visibility.
+		if ev.SyncType == telemetry.SyncTypeFull {
+			log.Info("full RTR resync, not evaluated by anomaly detector",
+				"cache", ev.Cache, "vrp_total", ev.VRPTotal, "aspa_total", ev.ASPATotal)
+			return nil, false
+		}
+		return d.ObserveSync(ev.Cache, ev.Timestamp, map[string]float64{
+			telemetry.MetricIntervalSince: float64(ev.IntervalSince),
+			telemetry.MetricSyncDuration:  float64(ev.SyncDuration),
+			telemetry.MetricVRPAnnounced:  float64(ev.VRPAnnounced),
+			telemetry.MetricVRPWithdrawn:  float64(ev.VRPWithdrawn),
+			telemetry.MetricASPAAnnounced: float64(ev.ASPAAnnounced),
+			telemetry.MetricASPAWithdrawn: float64(ev.ASPAWithdrawn),
+		}), true
+	case telemetry.EventReset:
+		return d.ObserveStructural(ev.Cache, "cache_reset", ev.Timestamp), false
+	case telemetry.EventError:
+		return d.ObserveError(ev.Cache, ev.ErrorCode, ev.Timestamp), false
+	}
+	return nil, false
+}
+
 func expandHome(path string) string {
 	if !strings.HasPrefix(path, "~/") {
 		return path
