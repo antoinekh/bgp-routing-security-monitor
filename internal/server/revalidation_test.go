@@ -68,12 +68,19 @@ func TestRTRUpdatesDuringRevalidationCoalesce(t *testing.T) {
 	})
 
 	t.Run("ingest loop", func(t *testing.T) {
-		s := startIngest(t)
+		s := newTestServer(t)
 		fillValidated(s, netip.MustParseAddr("192.0.2.1"), sessA, 50_000)
+		// Two RTR updates arrive after the first pass's first chunk, so
+		// certainly during it: the pass has about 200 chunks.
+		chunks := 0
+		s.testAfterChunk = func() {
+			if chunks++; chunks == 1 {
+				s.RequestRevalidation()
+				s.RequestRevalidation()
+			}
+		}
 		s.RequestRevalidation()
-		waitUntil(t, "the first pass to start", s.revalidating.Load)
-		s.RequestRevalidation()
-		s.RequestRevalidation()
+		startLoop(t, s)
 		// A follow-up starts inline as a pass ends, so once none is in
 		// progress the count is final.
 		waitUntil(t, "the passes to finish", func() bool {
@@ -86,29 +93,70 @@ func TestRTRUpdatesDuringRevalidationCoalesce(t *testing.T) {
 	})
 }
 
-// A revalidation pass runs a chunk at a time between ingest events: an event
-// that arrives during the pass is applied while the pass is still going.
+// A revalidation pass runs a chunk at a time between ingest events, and
+// waiting events go first: events that arrive during the pass are all
+// applied before the pass goes on. They are sent from inside the pass, after
+// its first chunk, and the pass's progress is read as each is applied, so the
+// check is about order, not time.
 func TestRevalidationDoesNotHoldUpIngest(t *testing.T) {
-	s := startIngest(t)
+	s := newTestServer(t)
 	s.vrpStore.ReplaceAll(vrpsMatching, 1, 1)
-	fillValidated(s, netip.MustParseAddr("192.0.2.1"), sessA, 400*revalidateChunk)
+	const n = 400 * revalidateChunk
+	fillValidated(s, netip.MustParseAddr("192.0.2.1"), sessA, n)
 	s.vrpStore.ReplaceAll(vrpsOther, 2, 1)
-	s.RequestRevalidation()
-	waitUntil(t, "the pass to start", s.revalidating.Load)
 
 	later := netip.MustParseAddr("192.0.2.2")
-	announce(s, sessB, later, 0)
-	waitUntil(t, "the route sent during the pass", func() bool { return lookup(s, later, 0) != nil })
-	if !s.revalidating.Load() {
-		t.Errorf("the whole %d-route pass ran before a route sent during it was applied, "+
-			"want it applied after at most one %d-route chunk", 400*revalidateChunk, revalidateChunk)
+	const events = 3
+	chunks := 0
+	s.testAfterChunk = func() {
+		if chunks++; chunks == 1 {
+			announce(s, sessB, later, seq(0, events)...)
+		}
+	}
+	checkedAtEvent := make(chan int, events) // -1: no pass in progress
+	s.testAfterEvent = func(ev types.IngestEvent) {
+		if ev.Route != nil && ev.Route.PeerAddr == later {
+			checked := -1
+			if s.revalidation != nil {
+				checked = s.revalidation.Checked
+			}
+			checkedAtEvent <- checked
+		}
+	}
+	s.RequestRevalidation()
+	startLoop(t, s)
+
+	for i := 0; i < events; i++ {
+		select {
+		case checked := <-checkedAtEvent:
+			if checked < 0 || checked > revalidateChunk {
+				t.Errorf("route %d of %d sent after the pass's first chunk was applied with %d of %d routes checked "+
+					"(-1: pass already over), want all applied before the second %d-route chunk",
+					i+1, events, checked, n, revalidateChunk)
+			}
+		case <-time.After(testWaitBound):
+			t.Fatal("a route sent during the pass was never applied")
+		}
 	}
 	drain(t, s)
+	if got := s.revalidationPasses.Load(); got != 1 {
+		t.Errorf("%d passes ran, want 1", got)
+	}
+}
+
+// startLoop starts ingestLoop with RTR ready; it stops when the test ends.
+// Set any test hooks before calling it.
+func startLoop(t *testing.T, s *Server) {
+	t.Helper()
+	close(s.rtrReady)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go s.ingestLoop(ctx)
 }
 
 func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testWaitBound)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)

@@ -91,6 +91,13 @@ type Server struct {
 
 	// evictCh carries the stale-eviction timer's request to ingestLoop.
 	evictCh chan struct{}
+
+	// Test hooks, nil in production. Both run on ingestLoop's goroutine:
+	// testAfterEvent after an event has been applied, testAfterChunk after
+	// each chunk of background work. They let a test act and observe at
+	// exact points in the loop instead of racing it.
+	testAfterEvent func(types.IngestEvent)
+	testAfterChunk func()
 }
 
 // Background work (withdraw-alls and stale eviction, then revalidation
@@ -546,6 +553,9 @@ func (s *Server) ingestLoop(ctx context.Context) {
 			case ev.Withdrawal != nil:
 				s.ingestWithdrawal(*ev.Withdrawal, ev.Session)
 			}
+			if s.testAfterEvent != nil {
+				s.testAfterEvent(ev)
+			}
 		}
 		if sinceChunk++; sinceChunk >= backgroundEvery {
 			s.stepBackground()
@@ -621,12 +631,16 @@ func (s *Server) backgroundPending() bool {
 // stepBackground runs the next chunk of background work. Withdraw-alls go
 // first: there is no point revalidating routes about to be removed.
 func (s *Server) stepBackground() {
-	if len(s.removals) > 0 {
+	switch {
+	case len(s.removals) > 0:
 		s.stepRemovals()
+	case s.revalidation != nil:
+		s.stepRevalidation()
+	default:
 		return
 	}
-	if s.revalidation != nil {
-		s.stepRevalidation()
+	if s.testAfterChunk != nil {
+		s.testAfterChunk()
 	}
 }
 

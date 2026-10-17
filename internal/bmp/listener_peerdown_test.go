@@ -54,7 +54,7 @@ func TestPeerDownIsNotDroppedWhenIngestIsFull(t *testing.T) {
 		if ev.Session != 3 {
 			t.Errorf("withdraw-all session = %d, want 3 (scoped to the session that saw the peer down)", ev.Session)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("no withdraw-all for the downed peer — the signal was dropped")
 	}
 	<-done
