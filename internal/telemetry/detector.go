@@ -179,7 +179,7 @@ type AnomalyEvent struct {
 	Cache     string
 	Category  string // "structural" | "statistical"
 	Trigger   string // metric name, or "correlated", or event type
-	Severity  string // "high" | "medium"
+	Severity  string // "high" | "medium" | "low"
 	ZScores   map[string]float64
 	Raw       map[string]float64
 }
@@ -211,6 +211,28 @@ func (d *Detector) ObserveStructural(cache, eventType string, ts time.Time) *Ano
 		Trigger:   eventType,
 		Severity:  "high",
 	}
+}
+
+// ErrorCodeNoDataAvailable is RTR Error Report code 2 (RFC 8210 §12): the
+// cache has no data to serve yet, typically because it is still running its
+// first validation after starting.
+const ErrorCodeNoDataAvailable uint16 = 2
+
+// ObserveError classifies an Error Report from the cache. No Data Available
+// is a cache that is starting up, not a fault: it is reported as a
+// low-severity "cache_not_ready" event. Any other error is a high-severity
+// structural anomaly.
+func (d *Detector) ObserveError(cache string, code *uint16, ts time.Time) *AnomalyEvent {
+	if code != nil && *code == ErrorCodeNoDataAvailable {
+		return &AnomalyEvent{
+			Timestamp: ts,
+			Cache:     cache,
+			Category:  "cache_state",
+			Trigger:   "cache_not_ready",
+			Severity:  "low",
+		}
+	}
+	return d.ObserveStructural(cache, "error_report", ts)
 }
 
 // ObserveSync evaluates one sync's metrics against the rolling windows and

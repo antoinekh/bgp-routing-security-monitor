@@ -197,6 +197,10 @@ type RTRConfig struct {
 	Caches         []RTRCacheConfig `mapstructure:"caches"`
 	RTRVersion     string           `mapstructure:"rtr-version"`     // "auto", "1", "2"
 	ExpireInterval int              `mapstructure:"expire-interval"` // seconds, 0 = use cache default
+	// VersionReprobeInterval is how often a client that a cache made
+	// downgrade (Error Report code 4) checks whether the cache now supports
+	// the configured version.
+	VersionReprobeInterval time.Duration `mapstructure:"version-reprobe-interval"`
 }
 
 type RTRCacheConfig struct {
@@ -288,6 +292,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("persistence.stale_eviction_timeout", 5*time.Minute)
 	viper.SetDefault("bmp.listen", ":11019")
 	viper.SetDefault("rtr.rtr-version", "auto")
+	viper.SetDefault("rtr.version-reprobe-interval", time.Hour)
 	viper.SetDefault("validation.rov", true)
 	viper.SetDefault("validation.aspa", true)
 	viper.SetDefault("validation.aspa-default-procedure", "upstream")

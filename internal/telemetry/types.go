@@ -52,12 +52,18 @@ type SessionEvent struct {
 	IntervalSince time.Duration `json:"interval_since_ns,omitempty"`
 	SyncType      SyncType      `json:"sync_type,omitempty"`
 
+	// SerialChanged is set on sync events: whether the serial differs from
+	// the previous sync's, i.e. whether the cache had anything new. A poll
+	// of a quiet cache completes a sync with SerialChanged false.
+	SerialChanged *bool `json:"serial_changed,omitempty"`
+
 	// Reset fields — populated when EventType == EventReset.
 	ResetReason ResetReason `json:"reset_reason,omitempty"`
 
 	// Error fields — populated when EventType == EventError.
-	ErrorText    string `json:"error_text,omitempty"`
-	ProtoVersion uint8  `json:"proto_version,omitempty"`
+	ErrorText    string  `json:"error_text,omitempty"`
+	ErrorCode    *uint16 `json:"error_code,omitempty"` // RFC 8210 §12 error code
+	ProtoVersion uint8   `json:"proto_version,omitempty"`
 
 	// Disconnect fields — populated when EventType == EventDisconnected.
 	DisconnectReason string `json:"disconnect_reason,omitempty"`
