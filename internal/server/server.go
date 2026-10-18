@@ -30,6 +30,7 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/snapshot"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 	"github.com/nokia/bgp-routing-security-monitor/internal/validation"
+	"github.com/nokia/bgp-routing-security-monitor/internal/validation/aspa"
 	"github.com/nokia/bgp-routing-security-monitor/internal/whatif"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -130,7 +131,11 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 	vrpStore := store.NewVRPStore()
 	aspaStore := store.NewASPAStore() // ADD
 	table := routetable.New()
-	engine := validation.NewEngine(vrpStore, aspaStore, table, log)
+	if cfg.Validation.ASPADefaultProcedure == "auto" {
+		log.Warn("aspa-default-procedure auto has no BGP Role source yet; routes from peers not in aspa-peers fall back to upstream")
+	}
+	aspaSel := aspa.NewSelector(cfg.Validation.ASPADefaultProcedure, cfg.Validation.ASPAPeers)
+	engine := validation.NewEngine(vrpStore, aspaStore, aspaSel, table, log)
 
 	var bmpTLS *tls.Config
 	if cfg.BMP.TLS != nil {

@@ -224,10 +224,14 @@ var routesCmd = &cobra.Command{
 			ROV       string   `json:"rov"`
 			ASPA      string   `json:"aspa"`
 			Posture   string   `json:"posture"`
+
+			ASPAProcedure       string `json:"aspa_procedure"`
+			ASPAProcedureSource string `json:"aspa_procedure_source"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&routes); err != nil {
 			return err
 		}
+		wide := format == "wide"
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		prefixes := make([]string, len(routes))
@@ -235,15 +239,23 @@ var routesCmd = &cobra.Command{
 			prefixes[i] = r.Prefix
 		}
 		pw := prefixColWidth(prefixes)
-		fmt.Fprintf(tw, "%-*s\tPEER\tORIGIN\tROV\tASPA\tPOSTURE\n", pw, "PREFIX")
+		fmt.Fprintf(tw, "%-*s\tPEER\tORIGIN\tROV\tASPA\tPOSTURE", pw, "PREFIX")
+		if wide {
+			fmt.Fprint(tw, "\tASPA PROCEDURE\tPROCEDURE SOURCE")
+		}
+		fmt.Fprintln(tw)
 		for _, r := range routes {
 			asPathStr := formatASPath(r.ASPath)
 			origin := fmt.Sprintf("AS%d", r.OriginASN)
 			if r.OriginASN == 0 {
 				origin = "-"
 			}
-			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s",
 				pw, r.Prefix, r.PeerAddr, origin, r.ROV, r.ASPA, r.Posture)
+			if wide {
+				fmt.Fprintf(tw, "\t%s\t%s", r.ASPAProcedure, r.ASPAProcedureSource)
+			}
+			fmt.Fprintln(tw)
 			_ = asPathStr
 		}
 		tw.Flush()
@@ -422,7 +434,7 @@ func init() {
 	routesCmd.Flags().Uint32("origin-asn", 0, "filter by origin ASN")
 	routesCmd.Flags().String("peer", "", "filter by BMP peer address")
 	routesCmd.Flags().String("posture", "", "filter by security posture")
-	routesCmd.Flags().String("format", "table", "output format: table, json")
+	routesCmd.Flags().String("format", "table", "output format: table, wide, json")
 
 	// validate flags
 	validateCmd.Flags().String("prefix", "", "prefix to validate (required)")

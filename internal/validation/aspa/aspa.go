@@ -3,6 +3,8 @@
 package aspa
 
 import (
+	"fmt"
+
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/store"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
@@ -21,6 +23,27 @@ func NewAnnotator(aspaStore *store.ASPAStore) *Annotator {
 // for routes received from a customer, lateral peer, RS or RS-client).
 func (a *Annotator) Validate(route *types.Route) types.ASPAResult {
 	return a.ValidateProcedure(route, types.ASPAUpstream)
+}
+
+// ValidateSelection verifies a route with the selected procedure. When the
+// selection asks for it, the neighbor-AS check (§5.4/§5.5 step 2) runs first:
+// if the most recently added AS is not the peer's ASN, the route is Invalid.
+// Prepend collapsing never changes the most recently added AS. Routes with an
+// empty AS_PATH or an unknown peer ASN skip the check.
+func (a *Annotator) ValidateSelection(route *types.Route, sel Selection) types.ASPAResult {
+	var res types.ASPAResult
+	if sel.NeighborCheck && len(route.ASPath) > 0 && route.PeerASN != 0 && route.ASPath[0] != route.PeerASN {
+		res = types.ASPAResult{
+			State:     types.ASPAInvalid,
+			Procedure: sel.Procedure,
+			Reason: fmt.Sprintf("neighbor-AS check failed: first AS in AS_PATH is AS%d, peer is AS%d",
+				route.ASPath[0], route.PeerASN),
+		}
+	} else {
+		res = a.ValidateProcedure(route, sel.Procedure)
+	}
+	res.ProcedureSource = sel.Source
+	return res
 }
 
 // ValidateProcedure performs AS_PATH verification on a route using the given
@@ -47,7 +70,8 @@ func (a *Annotator) Validate(route *types.Route) types.ASPAResult {
 //
 // A path with N=1 therefore always verifies as Valid under both procedures.
 //
-// The neighbor-AS check (§5.4/§5.5 step 2) is not performed here.
+// The neighbor-AS check (§5.4/§5.5 step 2) is not performed here; see
+// ValidateSelection.
 func (a *Annotator) ValidateProcedure(route *types.Route, proc types.ASPAProcedure) types.ASPAResult {
 	// Check for AS_SET segments — unverifiable per the draft
 	for _, seg := range route.ASPathRaw {

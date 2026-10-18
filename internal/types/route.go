@@ -224,6 +224,33 @@ const (
 	ASPADownstream ASPAProcedure = 1
 )
 
+func (p ASPAProcedure) String() string {
+	if p == ASPADownstream {
+		return "downstream"
+	}
+	return "upstream"
+}
+
+// ASPAProcedureSource records where a route's ASPA procedure came from.
+type ASPAProcedureSource uint8
+
+const (
+	ASPASourceDefault       ASPAProcedureSource = 0 // validation.aspa-default-procedure
+	ASPASourceConfigAddress ASPAProcedureSource = 1 // validation.aspa-peers entry by address
+	ASPASourceConfigASN     ASPAProcedureSource = 2 // validation.aspa-peers entry by asn
+)
+
+func (s ASPAProcedureSource) String() string {
+	switch s {
+	case ASPASourceConfigAddress:
+		return "config-address"
+	case ASPASourceConfigASN:
+		return "config-asn"
+	default:
+		return "default"
+	}
+}
+
 type HopAuth uint8
 
 const (
@@ -245,6 +272,10 @@ type ASPAResult struct {
 	FailingHop *ASPAHop  // non-nil if State == Invalid
 	HopDetails []ASPAHop // per-hop breakdown
 	Procedure  ASPAProcedure
+	// ProcedureSource says whether Procedure came from aspa-peers or the default.
+	ProcedureSource ASPAProcedureSource
+	// Reason explains an Invalid that no hop accounts for (neighbor-AS check).
+	Reason string
 }
 
 // ASPARecord is a snapshot-friendly representation of a validated ASPA object.
