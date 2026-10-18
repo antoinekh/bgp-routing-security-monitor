@@ -21,6 +21,7 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/bmp"
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 	"github.com/nokia/bgp-routing-security-monitor/internal/events"
+	"github.com/nokia/bgp-routing-security-monitor/internal/external"
 	"github.com/nokia/bgp-routing-security-monitor/internal/external/ripestat"
 	"github.com/nokia/bgp-routing-security-monitor/internal/flowspec"
 	"github.com/nokia/bgp-routing-security-monitor/internal/metrics"
@@ -225,6 +226,7 @@ func (s *Server) Run() error {
 			if err != nil {
 				return fmt.Errorf("external.ripestat: %w", err)
 			}
+			external.InitMetrics(client.Name())
 			opts = append(opts, events.WithGlobalVisibility(client, rs.CacheTTL))
 			s.log.Info("external global-visibility correlation enabled",
 				"source", client.Name(),
@@ -684,9 +686,9 @@ func (s *Server) stepRevalidation() {
 		return
 	}
 	took := time.Since(s.revalidateStart)
-	mode := "incremental"
+	mode := metrics.RevalidationModeIncremental
 	if rv.Full {
-		mode = "full"
+		mode = metrics.RevalidationModeFull
 	}
 	attrs := []any{"mode", mode, "candidates", rv.Candidates, "checked", rv.Checked,
 		"changed", rv.Changed, "skipped_superseded", rv.Skipped, "took", took}
@@ -695,8 +697,8 @@ func (s *Server) stepRevalidation() {
 	}
 	s.log.Info("re-validation complete", attrs...)
 	metrics.RevalidationDuration.WithLabelValues(mode).Observe(took.Seconds())
-	metrics.RevalidationRoutesTotal.WithLabelValues(mode, "checked").Add(float64(rv.Checked))
-	metrics.RevalidationRoutesTotal.WithLabelValues(mode, "changed").Add(float64(rv.Changed))
+	metrics.RevalidationRoutesTotal.WithLabelValues(mode, metrics.RevalidationResultChecked).Add(float64(rv.Checked))
+	metrics.RevalidationRoutesTotal.WithLabelValues(mode, metrics.RevalidationResultChanged).Add(float64(rv.Changed))
 	s.revalidation = nil
 	s.revalidationPasses.Add(1)
 	if s.revalidateAgain {

@@ -30,6 +30,11 @@ const (
 	EventSync         EventType = "sync"
 	EventReset        EventType = "reset"
 	EventError        EventType = "error"
+	// EventCacheNotReady is an Error Report with code 2 (No Data Available):
+	// the cache is still building its first data set, e.g. Routinator's
+	// "Running initial validation" at startup. Not a fault; the client
+	// retries at the same version. Carries ErrorCode and ErrorText.
+	EventCacheNotReady EventType = "cache_not_ready"
 )
 
 // SessionEvent captures a single RTR session lifecycle or sync event.
@@ -60,7 +65,8 @@ type SessionEvent struct {
 	// Reset fields — populated when EventType == EventReset.
 	ResetReason ResetReason `json:"reset_reason,omitempty"`
 
-	// Error fields — populated when EventType == EventError.
+	// Error fields — populated when EventType is EventError or
+	// EventCacheNotReady.
 	ErrorText    string  `json:"error_text,omitempty"`
 	ErrorCode    *uint16 `json:"error_code,omitempty"` // RFC 8210 §12 error code
 	ProtoVersion uint8   `json:"proto_version,omitempty"`

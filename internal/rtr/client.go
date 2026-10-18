@@ -296,7 +296,7 @@ func (c *Client) Start(ctx context.Context) {
 			c.log.Info("RTR reconnecting to upgrade protocol version", "protocol_version", c.negotiatedVersion)
 			retryDelay = 0
 		case errors.Is(err, errCacheNotReady):
-			c.log.Warn("RTR cache not ready, reconnecting", "error", err, "retry_in", retryDelay,
+			c.log.Info("RTR cache not ready, reconnecting", "error", err, "retry_in", retryDelay,
 				"protocol_version", c.negotiatedVersion)
 		default:
 			c.log.Error("RTR session failed, reconnecting", "error", err, "retry_in", retryDelay)
@@ -831,9 +831,13 @@ func (c *Client) markExpired() {
 // and returns the error to end it with.
 func (c *Client) errorReport(version uint8, code uint16, payload []byte) error {
 	errMsg := c.parseErrorReport(payload)
+	evType := telemetry.EventError
+	if code == errCodeNoDataAvailable {
+		evType = telemetry.EventCacheNotReady
+	}
 	c.tel.Record(telemetry.SessionEvent{
 		Cache:        c.address,
-		EventType:    telemetry.EventError,
+		EventType:    evType,
 		ErrorText:    errMsg,
 		ErrorCode:    &code,
 		ProtoVersion: c.protoVersion,

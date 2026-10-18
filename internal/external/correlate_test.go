@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // fakeProvider is a GlobalVisibilityProvider stand-in. It records the calls it
@@ -292,4 +294,41 @@ func TestCorrelateFailsOpen(t *testing.T) {
 			t.Errorf("GlobalOrigins = %+v, want the observations retained", got.GlobalOrigins)
 		}
 	})
+}
+
+// A provider's global-visibility series are exported at 0 once it is set up,
+// one per consensus result.
+func TestInitMetricsExportsZeroSeries(t *testing.T) {
+	InitMetrics("zero-test")
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"raven_global_check_total/match": false, "raven_global_check_total/divergent": false,
+		"raven_global_check_total/local_only": false, "raven_global_check_total/inconclusive": false,
+		"raven_global_check_rate_limited_total/": false, "raven_global_check_cache_hits_total/": false,
+	}
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			src, result := "", ""
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case "source":
+					src = l.GetValue()
+				case "result":
+					result = l.GetValue()
+				}
+			}
+			k := mf.GetName() + "/" + result
+			if _, ok := want[k]; ok && src == "zero-test" && m.GetCounter().GetValue() == 0 {
+				want[k] = true
+			}
+		}
+	}
+	for k, ok := range want {
+		if !ok {
+			t.Errorf("%s{source=zero-test} not exported at 0", k)
+		}
+	}
 }

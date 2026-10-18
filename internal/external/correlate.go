@@ -88,6 +88,16 @@ func Correlate(
 	return result
 }
 
+// InitMetrics creates provider source's global-visibility series at 0, one
+// per consensus result, so they are exported before the first check.
+func InitMetrics(source string) {
+	for _, c := range []GlobalConsensus{ConsensusMatch, ConsensusDivergent, ConsensusLocalOnly, ConsensusInconclusive} {
+		metrics.GlobalCheckTotal.WithLabelValues(source, string(c))
+	}
+	metrics.GlobalCheckRateLimited.WithLabelValues(source)
+	metrics.GlobalCheckCacheHits.WithLabelValues(source)
+}
+
 // observe records the Prometheus series for a completed correlation: always
 // the check counter, then either the latency histogram or the cache-hit
 // counter.

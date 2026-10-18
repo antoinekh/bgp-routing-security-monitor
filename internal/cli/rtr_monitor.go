@@ -104,6 +104,7 @@ client; no validation or BMP ingestion happens here.`,
 				return fmt.Errorf("create RTR client: %w", err)
 			}
 			client.SetTelemetry(rec)
+			initAnomalyMetrics(cache)
 
 			// Consume the telemetry event channel: feed sync/structural events to
 			// the detector, emit any resulting anomaly as an NDJSON record on the
@@ -197,6 +198,14 @@ client; no validation or BMP ingestion happens here.`,
 // directory, mirroring the helper in internal/snapshot so path flags behave
 // consistently across the project. On any lookup error the path is returned
 // unchanged.
+// initAnomalyMetrics exports raven_rtr_anomaly_total for cache at 0 for every
+// severity, so a scrape shows 0 before the first anomaly rather than nothing.
+func initAnomalyMetrics(cache string) {
+	for _, sev := range telemetry.AnomalySeverities {
+		metrics.RTRAnomalyTotal.WithLabelValues(cache, sev)
+	}
+}
+
 // observeRTREvent feeds one telemetry event to the detector and returns the
 // anomaly it raises, if any, and whether it was a sync the detector's
 // baseline took in.
@@ -226,6 +235,17 @@ func observeRTREvent(d *telemetry.Detector, ev telemetry.SessionEvent, log *slog
 		}), true
 	case telemetry.EventReset:
 		return d.ObserveStructural(ev.Cache, "cache_reset", ev.Timestamp), false
+	case telemetry.EventCacheNotReady:
+		// Error Report code 2: the cache is still building its data (e.g.
+		// Routinator at startup). Recorded to NDJSON by the recorder; not an
+		// anomaly, and the baseline is untouched.
+		code := uint16(0)
+		if ev.ErrorCode != nil {
+			code = *ev.ErrorCode
+		}
+		log.Info("RTR cache not ready yet, not an anomaly",
+			"cache", ev.Cache, "error_code", code, "error_text", ev.ErrorText)
+		return nil, false
 	case telemetry.EventError:
 		return d.ObserveError(ev.Cache, ev.ErrorCode, ev.Timestamp), false
 	}

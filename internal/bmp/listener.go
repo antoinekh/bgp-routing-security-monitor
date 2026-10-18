@@ -259,9 +259,9 @@ func (l *Listener) admit(conn net.Conn) bool {
 	if len(l.allowed) == 0 {
 		return true
 	}
-	reason := "not_allowed"
+	reason := metrics.RejectReasonNotAllowed
 	if src, ok := remoteIP(conn); !ok {
-		reason = "bad_remote_addr"
+		reason = metrics.RejectReasonBadRemoteAddr
 	} else if l.permits(src) {
 		return true
 	}
