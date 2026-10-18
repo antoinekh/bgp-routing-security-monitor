@@ -17,111 +17,136 @@ func NewAnnotator(aspaStore *store.ASPAStore) *Annotator {
 	return &Annotator{aspaStore: aspaStore}
 }
 
-// Validate performs upstream AS_PATH verification on a route.
-// Returns an ASPAResult with State, per-hop details, and failing hop if any.
-//
-// Algorithm per draft-ietf-sidrops-aspa-verification-24 §6.1 (upstream):
-//
-//  1. If AS_PATH contains an AS_SET → Unverifiable
-//  2. Walk pairs (AS[i], AS[i-1]) from origin toward the verifying AS,
-//     down to (AS[1], AS[0]):
-//     - If ASPA exists for AS[i] and AS[i-1] is in provider set → Authorized
-//     - If ASPA exists for AS[i] and AS[i-1] is NOT in provider set → Invalid
-//     - If no ASPA for AS[i] → NoASPA (unknown for this hop)
-//  3. Final hop: AS[0] (the neighbor the route was learned from) is itself
-//     a customer whose provider is the monitoring router (route.LocalASN).
-//     Checked the same way as any other hop — this is what catches a leak
-//     at the point it's actually received, rather than relying on an
-//     upstream AS further out in the path having an ASPA record.
-//     Skipped if route.LocalASN is unknown (0).
-//  4. Result:
-//     - Any hop Invalid → ASPAInvalid
-//     - All hops Authorized → ASPAValid
-//     - Mix of Authorized + NoASPA → ASPAUnknown
-//     - No hops evaluated (self-originated, or single-AS path with local AS
-//     unknown) → ASPAUnknown
+// Validate performs upstream AS_PATH verification on a route (draft §5.4,
+// for routes received from a customer, lateral peer, RS or RS-client).
 func (a *Annotator) Validate(route *types.Route) types.ASPAResult {
+	return a.ValidateProcedure(route, types.ASPAUpstream)
+}
+
+// ValidateProcedure performs AS_PATH verification on a route using the given
+// procedure. Returns an ASPAResult with State, per-hop details, and failing
+// hop if any.
+//
+// Algorithm per draft-ietf-sidrops-aspa-verification-24 §5:
+//
+//  1. If AS_PATH contains an AS_SET → Unverifiable. (The draft says Invalid;
+//     RAVEN reports these separately.)
+//  2. Empty AS_PATH (self-originated / iBGP) → Unknown. (The draft says
+//     Invalid, but it only defines verification for eBGP-learned routes.)
+//  3. Collapse prepends into COMPRESSED_AS_PATH {AS(N), ..., AS(1)}, where
+//     AS(1) is the origin and AS(N) is the neighbor the route was learned
+//     from (§5.1). The verifying AS itself is not part of the path: the
+//     relationship with AS(N) is what selects the procedure, so the
+//     AS(N)→verifier edge is never checked.
+//  4. Compute the up-ramp and down-ramp lengths from authorized() (§5.2,
+//     §5.3), then:
+//     - upstream (§5.4): max_up_ramp < N → Invalid; min_up_ramp < N →
+//     Unknown; else Valid.
+//     - downstream (§5.5): max_up_ramp + max_down_ramp < N → Invalid;
+//     min_up_ramp + min_down_ramp < N → Unknown; else Valid.
+//
+// A path with N=1 therefore always verifies as Valid under both procedures.
+//
+// The neighbor-AS check (§5.4/§5.5 step 2) is not performed here.
+func (a *Annotator) ValidateProcedure(route *types.Route, proc types.ASPAProcedure) types.ASPAResult {
 	// Check for AS_SET segments — unverifiable per the draft
 	for _, seg := range route.ASPathRaw {
 		if seg.Type == types.ASSegmentSet {
 			return types.ASPAResult{
 				State:     types.ASPAUnverifiable,
-				Procedure: types.ASPAUpstream,
+				Procedure: proc,
 			}
 		}
 	}
 
-	path := route.ASPath
-	if len(path) == 0 {
+	path := compress(route.ASPath)
+	n := len(path)
+	if n == 0 {
 		// Self-originated route — no path to verify
 		return types.ASPAResult{
 			State:     types.ASPAUnknown,
-			Procedure: types.ASPAUpstream,
+			Procedure: proc,
 		}
 	}
 
-	// Walk pairs from origin (path[len-1]) toward the immediate neighbor
-	// (path[1]/path[0]). AS_PATH is stored as [neighbor, ..., origin] so we
-	// walk right to left.
-	hops := make([]types.ASPAHop, 0, len(path))
-	hasInvalid := false
-	hasNoASPA := false
+	hops := make([]types.ASPAHop, 0, 2*(n-1))
 
-	for i := len(path) - 1; i > 0; i-- {
-		hop := a.checkHop(path[i], path[i-1])
-		switch hop.Authorization {
-		case types.HopNotAuthorized:
-			hasInvalid = true
-		case types.HopNoASPA:
-			hasNoASPA = true
-		}
+	// Up-ramp (§5.3): walk authorized(AS(I), AS(I+1)) from the origin.
+	// max_up_ramp is the first I that is "Not Provider+", min_up_ramp the
+	// first I that is "No Attestation" or "Not Provider+"; N if none.
+	maxUp, minUp := n, n
+	var upFail *types.ASPAHop
+	for i := 1; i < n; i++ {
+		hop := a.checkHop(path[i-1], path[i])
 		hops = append(hops, hop)
-	}
-
-	// Final hop: is the monitoring router's own AS an authorized provider
-	// for AS[0], the neighbor we received this route from?
-	if route.LocalASN != 0 {
-		hop := a.checkHop(path[0], route.LocalASN)
-		switch hop.Authorization {
-		case types.HopNotAuthorized:
-			hasInvalid = true
-		case types.HopNoASPA:
-			hasNoASPA = true
+		if hop.Authorization != types.HopAuthorized && minUp == n {
+			minUp = i
 		}
-		hops = append(hops, hop)
+		if hop.Authorization == types.HopNotAuthorized && maxUp == n {
+			maxUp = i
+			upFail = &hop
+		}
 	}
 
-	result := types.ASPAResult{
-		HopDetails: hops,
-		Procedure:  types.ASPAUpstream,
-	}
+	result := types.ASPAResult{Procedure: proc}
 
-	switch {
-	case hasInvalid:
-		result.State = types.ASPAInvalid
-		// Find the first failing hop
-		for i := range hops {
-			if hops[i].Authorization == types.HopNotAuthorized {
-				h := hops[i]
-				result.FailingHop = &h
-				break
+	if proc == types.ASPADownstream {
+		// Down-ramp (§5.3): walk authorized(AS(J), AS(J-1)) from the neighbor.
+		// max_down_ramp is N-J+1 for the largest J that is "Not Provider+",
+		// min_down_ramp likewise for "No Attestation" or "Not Provider+"; N if
+		// none.
+		maxDown, minDown := n, n
+		for j := n; j > 1; j-- {
+			hop := a.checkHop(path[j-1], path[j-2])
+			hops = append(hops, hop)
+			if hop.Authorization != types.HopAuthorized && minDown == n {
+				minDown = n - j + 1
+			}
+			if hop.Authorization == types.HopNotAuthorized && maxDown == n {
+				maxDown = n - j + 1
 			}
 		}
-	case hasNoASPA:
-		// Mix of authorized and unknown hops — can't confirm validity
-		result.State = types.ASPAUnknown
-	case len(hops) == 0:
-		// Nothing could be evaluated (single-AS path, local AS unknown)
-		result.State = types.ASPAUnknown
-	default:
-		// All hops authorized
-		result.State = types.ASPAValid
+		switch {
+		case maxUp+maxDown < n:
+			result.State = types.ASPAInvalid
+			result.FailingHop = upFail
+		case minUp+minDown < n:
+			result.State = types.ASPAUnknown
+		default:
+			result.State = types.ASPAValid
+		}
+	} else {
+		switch {
+		case maxUp < n:
+			result.State = types.ASPAInvalid
+			result.FailingHop = upFail
+		case minUp < n:
+			result.State = types.ASPAUnknown
+		default:
+			result.State = types.ASPAValid
+		}
 	}
 
+	result.HopDetails = hops
 	return result
 }
 
-// checkHop evaluates a single customer/provider edge against the ASPA store.
+// compress returns the AS_PATH as COMPRESSED_AS_PATH (draft §5.1) in
+// verification order: consecutive duplicates (prepends) collapsed, origin
+// first, neighbor last. AS_PATH is stored as [neighbor, ..., origin].
+func compress(asPath []uint32) []uint32 {
+	out := make([]uint32, 0, len(asPath))
+	for i := len(asPath) - 1; i >= 0; i-- {
+		if len(out) > 0 && out[len(out)-1] == asPath[i] {
+			continue
+		}
+		out = append(out, asPath[i])
+	}
+	return out
+}
+
+// checkHop implements authorized(customer, provider) (draft §5.2) against
+// the ASPA store.
 func (a *Annotator) checkHop(customerASN, providerASN uint32) types.ASPAHop {
 	hop := types.ASPAHop{
 		CustomerASN: customerASN,
@@ -129,13 +154,13 @@ func (a *Annotator) checkHop(customerASN, providerASN uint32) types.ASPAHop {
 	}
 
 	if !a.aspaStore.HasRecord(customerASN) {
-		// No ASPA object for this customer — unknown
+		// No ASPA object for this customer — "No Attestation"
 		hop.Authorization = types.HopNoASPA
 	} else if a.aspaStore.HasProvider(customerASN, providerASN) {
-		// Provider is authorized
+		// Provider is authorized — "Provider+"
 		hop.Authorization = types.HopAuthorized
 	} else {
-		// ASPA exists but provider not in set — invalid
+		// ASPA exists but provider not in set — "Not Provider+"
 		hop.Authorization = types.HopNotAuthorized
 	}
 	return hop
