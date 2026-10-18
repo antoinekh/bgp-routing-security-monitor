@@ -64,7 +64,7 @@ func BenchmarkIngestDuringSessionEnd(b *testing.B) {
 					for i := 0; i < burst; i++ {
 						s.ingestCh <- types.IngestEvent{Route: benchRoute(peerB, i, 0), Session: sessB}
 					}
-					lastKey := types.RouteKey{PeerAddr: peerB, Prefix: benchRoute(peerB, burst-1, 0).Prefix}
+					lastKey := types.RouteKey{Peer: types.PeerRef{Addr: peerB}, Prefix: benchRoute(peerB, burst-1, 0).Prefix}
 					for r := s.table.Get(lastKey); r == nil || r.OwnerSession != sessB; r = s.table.Get(lastKey) {
 						time.Sleep(100 * time.Microsecond)
 					}
@@ -215,7 +215,7 @@ func BenchmarkIngestDuringRevalidation(b *testing.B) {
 				for i := 0; i < burst; i++ {
 					s.ingestCh <- types.IngestEvent{Route: benchRoute(peerB, i, 0), Session: sessB}
 				}
-				lastKey := types.RouteKey{PeerAddr: peerB, Prefix: benchRoute(peerB, burst-1, 0).Prefix}
+				lastKey := types.RouteKey{Peer: types.PeerRef{Addr: peerB}, Prefix: benchRoute(peerB, burst-1, 0).Prefix}
 				for s.table.Get(lastKey) == nil {
 					time.Sleep(100 * time.Microsecond)
 				}

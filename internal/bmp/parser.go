@@ -33,6 +33,12 @@ func ParseCommonHeader(data []byte) (BMPCommonHeader, error) {
 	return h, nil
 }
 
+// Distinguisher returns the Peer Distinguisher as a number: zero for a
+// global-instance peer, the VRF's route distinguisher for an RD-instance one.
+func (h *BMPPerPeerHeader) Distinguisher() uint64 {
+	return binary.BigEndian.Uint64(h.PeerDistinguisher[:])
+}
+
 // ParsePerPeerHeader parses the 42-byte per-peer header from the given data.
 func ParsePerPeerHeader(data []byte) (BMPPerPeerHeader, error) {
 	if len(data) < PerPeerHeaderLen {
@@ -171,49 +177,104 @@ func ParsePeerUp(data []byte) (BMPPeerUp, error) {
 
 	// Sent OPEN Message: the BGP OPEN the monitored router sent to this
 	// peer. Its My Autonomous System field (or the 4-octet ASN capability,
-	// if present) is the monitoring router's own AS on this session.
-	if localASN, err := parseOpenLocalASN(body[20:]); err == nil {
-		pu.LocalASN = localASN
+	// if present) is the monitoring router's own AS on this session. The
+	// Received OPEN, from the peer, follows it.
+	//
+	// A malformed/missing embedded OPEN is not fatal to Peer Up processing:
+	// LocalASN stays 0 (unknown) and ADD-PATH is taken as off.
+	sent, err := parseOpen(body[20:])
+	if err != nil {
+		return pu, nil
 	}
-	// A malformed/missing embedded OPEN is not fatal to Peer Up processing —
-	// LocalASN just stays 0 (unknown) for this session.
-
+	pu.LocalASN = sent.asn
+	if sent.length >= len(body[20:]) {
+		return pu, nil
+	}
+	recv, err := parseOpen(body[20+sent.length:])
+	if err != nil {
+		return pu, nil
+	}
+	pu.AddPath = negotiateAddPath(sent.addPath, recv.addPath)
 	return pu, nil
+}
+
+// negotiateAddPath works out, from the ADD-PATH capabilities in the OPEN the
+// monitored router sent (local) and the one it received from the peer, where
+// path identifiers are in use (RFC 7911 §4). Updates from the peer (the
+// Adj-RIB-In) carry them for an address family if the router said it can
+// receive and the peer said it can send; updates to the peer (Adj-RIB-Out)
+// if the router can send and the peer can receive.
+func negotiateAddPath(local, peer map[afiSafi]uint8) AddPathState {
+	var st AddPathState
+	for fam, bit := range map[afiSafi]AFIMask{{afi: 1, safi: 1}: AFIIPv4Unicast, {afi: 2, safi: 1}: AFIIPv6Unicast} {
+		if local[fam]&addPathReceive != 0 && peer[fam]&addPathSend != 0 {
+			st.In |= bit
+		}
+		if local[fam]&addPathSend != 0 && peer[fam]&addPathReceive != 0 {
+			st.Out |= bit
+		}
+	}
+	return st
 }
 
 // BGP message header: 16-byte marker + 2-byte length + 1-byte type.
 const bgpHeaderLen = 19
 const bgpMsgTypeOpen = 1
 
-// BGP OPEN optional parameter / capability codes (RFC 4271, RFC 5492, RFC 6793).
+// BGP OPEN optional parameter / capability codes (RFC 4271, RFC 5492,
+// RFC 6793, RFC 7911).
 const (
 	bgpOptParamCapabilities uint8 = 2
 	bgpCap4ByteASN          uint8 = 65
+	bgpCapAddPath           uint8 = 69
 )
 
-// parseOpenLocalASN extracts the local AS number from a BGP OPEN message:
-// the 2-byte "My Autonomous System" field, overridden by the 4-octet AS
-// Number capability (RFC 6793) when present — the same override routers
-// apply when AS_TRANS (23456) appears in the fixed-width field.
-func parseOpenLocalASN(data []byte) (uint32, error) {
+// ADD-PATH capability Send/Receive values (RFC 7911 §4): 1 receive, 2 send,
+// 3 both.
+const (
+	addPathReceive uint8 = 1
+	addPathSend    uint8 = 2
+)
+
+// afiSafi is an address family (AFI) and subsequent address family (SAFI).
+type afiSafi struct {
+	afi  uint16
+	safi uint8
+}
+
+// openInfo is what RAVEN reads from a BGP OPEN.
+type openInfo struct {
+	length  int    // the whole message, header included
+	asn     uint32 // My AS, or the 4-octet AS capability if present
+	addPath map[afiSafi]uint8
+}
+
+// parseOpen reads a BGP OPEN message: its length, the AS number (the 2-byte
+// "My Autonomous System" field, overridden by the 4-octet AS Number
+// capability, RFC 6793, when present, as routers do when AS_TRANS (23456)
+// is in the fixed-width field), and the ADD-PATH capability's Send/Receive
+// value per address family.
+func parseOpen(data []byte) (openInfo, error) {
+	var o openInfo
 	if len(data) < bgpHeaderLen {
-		return 0, fmt.Errorf("OPEN message too short: %d bytes", len(data))
+		return o, fmt.Errorf("OPEN message too short: %d bytes", len(data))
 	}
 	if data[18] != bgpMsgTypeOpen {
-		return 0, fmt.Errorf("expected BGP OPEN (type %d), got type %d", bgpMsgTypeOpen, data[18])
+		return o, fmt.Errorf("expected BGP OPEN (type %d), got type %d", bgpMsgTypeOpen, data[18])
 	}
 
 	msgLen := int(binary.BigEndian.Uint16(data[16:18]))
 	if msgLen < bgpHeaderLen || msgLen > len(data) {
 		msgLen = len(data) // tolerate a truncated/misreported length
 	}
+	o.length = msgLen
 	body := data[bgpHeaderLen:msgLen]
 
 	// Fixed OPEN fields: Version(1) + My AS(2) + Hold Time(2) + BGP ID(4) + Opt Parm Len(1)
 	if len(body) < 10 {
-		return 0, fmt.Errorf("OPEN body too short: %d bytes", len(body))
+		return o, fmt.Errorf("OPEN body too short: %d bytes", len(body))
 	}
-	myASN := uint32(binary.BigEndian.Uint16(body[1:3]))
+	o.asn = uint32(binary.BigEndian.Uint16(body[1:3]))
 	optParmLen := int(body[9])
 
 	optParams := body[10:]
@@ -223,7 +284,7 @@ func parseOpenLocalASN(data []byte) (uint32, error) {
 	optParams = optParams[:optParmLen]
 
 	// Walk optional parameters for the Capabilities parameter, then walk
-	// capabilities for the 4-octet AS Number capability.
+	// capabilities for the 4-octet AS Number and ADD-PATH capabilities.
 	off := 0
 	for off+2 <= len(optParams) {
 		paramType := optParams[off]
@@ -250,13 +311,22 @@ func parseOpenLocalASN(data []byte) (uint32, error) {
 			capVal := paramVal[capOff : capOff+capLen]
 			capOff += capLen
 
-			if capCode == bgpCap4ByteASN && capLen == 4 {
-				return binary.BigEndian.Uint32(capVal), nil
+			switch {
+			case capCode == bgpCap4ByteASN && capLen == 4:
+				o.asn = binary.BigEndian.Uint32(capVal)
+			case capCode == bgpCapAddPath:
+				for i := 0; i+4 <= len(capVal); i += 4 {
+					if o.addPath == nil {
+						o.addPath = make(map[afiSafi]uint8)
+					}
+					fam := afiSafi{afi: binary.BigEndian.Uint16(capVal[i : i+2]), safi: capVal[i+2]}
+					o.addPath[fam] = capVal[i+3]
+				}
 			}
 		}
 	}
 
-	return myASN, nil
+	return o, nil
 }
 
 // ParsePeerDown parses a BMP Peer Down message body.

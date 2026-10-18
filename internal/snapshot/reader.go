@@ -18,6 +18,11 @@ import (
 // with a cold start — never crash on this error.
 var ErrVersionMismatch = errors.New("snapshot: version mismatch, discarding")
 
+// ErrFormatMismatch is returned when routes.snap is in another format than
+// this RAVEN reads (snapshotv1.RouteFormatVersion). It is not migrated:
+// callers log a warning and cold start, as for ErrVersionMismatch.
+var ErrFormatMismatch = errors.New("snapshot: route format mismatch, discarding")
+
 // Reader handles snapshot reads from disk.
 type Reader struct {
 	dir     string
@@ -48,6 +53,10 @@ func (r *Reader) ReadRoutes() ([]*types.Route, error) {
 		return nil, fmt.Errorf("snapshot: decode routes.snap: %w", err)
 	}
 
+	if snap.FormatVersion != snapshotv1.RouteFormatVersion {
+		return nil, fmt.Errorf("%w: routes.snap is format %d, this RAVEN reads format %d",
+			ErrFormatMismatch, snap.FormatVersion, snapshotv1.RouteFormatVersion)
+	}
 	if snap.RavenVersion != r.version {
 		return nil, ErrVersionMismatch
 	}
@@ -122,6 +131,10 @@ func recordToRoute(rec snapshotv1.RouteRecord) (*types.Route, error) {
 		return nil, fmt.Errorf("invalid peer addr %q: %w", rec.PeerAddr, err)
 	}
 
+	router, err := parseAddr(rec.Router)
+	if err != nil {
+		return nil, fmt.Errorf("invalid router %q: %w", rec.Router, err)
+	}
 	routerID, _ := parseAddr(rec.RouterID)
 	nextHop, _ := parseAddr(rec.NextHop)
 
@@ -130,18 +143,22 @@ func recordToRoute(rec snapshotv1.RouteRecord) (*types.Route, error) {
 	aspaState := parseASPAState(rec.ASPAState)
 
 	return &types.Route{
-		Prefix:          prefix,
-		PeerAddr:        peerAddr,
-		PeerASN:         rec.PeerASN,
-		RouterID:        routerID,
-		ASPath:          rec.ASPath,
-		NextHop:         nextHop,
-		Timestamp:       time.Unix(0, rec.TimestampUnix),
-		RIBType:         rib,
-		ROV:             types.ROVResult{State: rovState},
-		ASPA:            types.ASPAResult{State: aspaState},
-		SecurityPosture: types.SecurityPosture(rec.Posture),
-		Stale:           true, // always stale on restore
+		Prefix:            prefix,
+		Router:            router,
+		PeerDistinguisher: rec.PeerDistinguisher,
+		PeerType:          rec.PeerType,
+		PathID:            rec.PathID,
+		PeerAddr:          peerAddr,
+		PeerASN:           rec.PeerASN,
+		RouterID:          routerID,
+		ASPath:            rec.ASPath,
+		NextHop:           nextHop,
+		Timestamp:         time.Unix(0, rec.TimestampUnix),
+		RIBType:           rib,
+		ROV:               types.ROVResult{State: rovState},
+		ASPA:              types.ASPAResult{State: aspaState},
+		SecurityPosture:   types.SecurityPosture(rec.Posture),
+		Stale:             true, // always stale on restore
 	}, nil
 }
 

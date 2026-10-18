@@ -22,11 +22,10 @@ func ownerIndexSize(t *testing.T, tbl *Table) int {
 				t.Errorf("owner index keeps an empty set for %+v", k)
 			}
 			for r := range set {
-				key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
-				if s.routes[key] != r {
+				if s.routes[r.Key()] != r {
 					t.Errorf("owner index lists %s from %s, which the table no longer holds", r.Prefix, r.PeerAddr)
 				}
-				if k.session != r.OwnerSession || k.peer != r.PeerAddr {
+				if k.session != r.OwnerSession || k.peer != r.Peer() {
 					t.Errorf("route %s indexed under %+v, owned by session %d", r.Prefix, k, r.OwnerSession)
 				}
 			}
@@ -82,8 +81,8 @@ func TestOwnerIndexTracksTableExactly(t *testing.T) {
 	}
 	check("after same-pointer re-inserts")
 
-	tbl.WithdrawFromSession(p, ownedRoute(p, 70, 0).Prefix, 1) // owned by 1: removed
-	tbl.WithdrawFromSession(p, ownedRoute(p, 10, 0).Prefix, 1) // owned by 2: kept
+	tbl.WithdrawFromSession(types.RouteKey{Peer: types.PeerRef{Addr: p}, Prefix: ownedRoute(p, 70, 0).Prefix}, 1) // owned by 1: removed
+	tbl.WithdrawFromSession(types.RouteKey{Peer: types.PeerRef{Addr: p}, Prefix: ownedRoute(p, 10, 0).Prefix}, 1) // owned by 2: kept
 	check("after single withdrawals")
 
 	rm := tbl.DetachSession(1)
@@ -91,12 +90,12 @@ func TestOwnerIndexTracksTableExactly(t *testing.T) {
 	if got := rm.Apply(); got != 38 {
 		t.Errorf("session 1's end removed %d routes, want 38 (60..99 less 70 and 80)", got)
 	}
-	if r := tbl.Get(types.RouteKey{PeerAddr: p, Prefix: ownedRoute(p, 80, 0).Prefix}); r == nil || r.OwnerSession != 2 {
+	if r := tbl.Get(types.RouteKey{Peer: types.PeerRef{Addr: p}, Prefix: ownedRoute(p, 80, 0).Prefix}); r == nil || r.OwnerSession != 2 {
 		t.Errorf("route 80 = %+v, want session 2's re-announcement kept", r)
 	}
 	check("after session end")
 
-	if got := tbl.WithdrawAllFromPeer(q, 2); got != 50 {
+	if got := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: q}, 2); got != 50 {
 		t.Errorf("peer-down of %s removed %d routes, want its 50 unowned ones", q, got)
 	}
 	tbl.Restore([]*types.Route{ownedRoute(q, 1, 0)})
@@ -104,7 +103,7 @@ func TestOwnerIndexTracksTableExactly(t *testing.T) {
 		t.Errorf("EvictStale removed %d routes, want 1", got)
 	}
 	check("after peer down and eviction")
-	if got := tbl.WithdrawAllFromPeer(p, 2); got != 61 {
+	if got := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: p}, 2); got != 61 {
 		t.Errorf("peer-down of %s removed %d routes, want 61", p, got)
 	}
 	check("when empty")

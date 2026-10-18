@@ -12,8 +12,19 @@ import (
 type Route struct {
 	// Populated by BMP Ingest
 	Timestamp time.Time
-	PeerAddr  netip.Addr
-	PeerASN   uint32
+	// Router is the monitored router the route was learned on: the source
+	// address of its BMP session, IPv4 in plain form.
+	Router netip.Addr
+	// PeerDistinguisher is the BMP per-peer header's Peer Distinguisher
+	// (RFC 7854 §4.2): zero for global-instance peers, the VRF's RD for
+	// RD-instance peers. PeerType is that header's peer type.
+	PeerDistinguisher uint64
+	PeerType          uint8
+	PeerAddr          netip.Addr
+	PeerASN           uint32
+	// PathID is the ADD-PATH path identifier (RFC 7911), or 0 when ADD-PATH
+	// is not in effect for the peer and address family.
+	PathID uint32
 	// LocalASN is the monitoring router's own AS on the BMP session this
 	// route was learned over (from the Peer Up message's Sent OPEN). Zero
 	// if unknown. Not used by ASPA verification: the draft never checks the
@@ -50,10 +61,13 @@ type Route struct {
 
 // Withdrawal represents a BGP route withdrawal received via BMP.
 type Withdrawal struct {
-	PeerAddr    netip.Addr
-	Prefix      netip.Prefix
-	RIBType     RIBType
-	WithdrawAll bool // if true, withdraw all of the session's routes from PeerAddr
+	Router            netip.Addr
+	PeerDistinguisher uint64
+	PeerAddr          netip.Addr
+	Prefix            netip.Prefix
+	PathID            uint32
+	RIBType           RIBType
+	WithdrawAll       bool // if true, withdraw all of the session's routes from the peer
 	// SessionEnd withdraws every route the session owns, from any peer.
 	// PeerAddr and Prefix are ignored.
 	SessionEnd bool
@@ -92,11 +106,49 @@ func (r *Route) OriginASN() uint32 {
 	return r.ASPath[len(r.ASPath)-1]
 }
 
-// RouteKey uniquely identifies a route in the Route Table.
+// PeerRef identifies a BGP peer as one monitored router sees it: the router,
+// the peer's instance (Peer Distinguisher) and its address. The same peer
+// address on two routers, or in two VRFs of one router, is two peers.
+// Addresses are IPv4 in plain form (see NewPeerRef).
+type PeerRef struct {
+	Router        netip.Addr
+	Distinguisher uint64
+	Addr          netip.Addr
+}
+
+// NewPeerRef returns the PeerRef for a peer, normalising IPv4-mapped
+// addresses to plain IPv4.
+func NewPeerRef(router netip.Addr, distinguisher uint64, addr netip.Addr) PeerRef {
+	return PeerRef{Router: router.Unmap(), Distinguisher: distinguisher, Addr: addr.Unmap()}
+}
+
+// RouteKey uniquely identifies a route in the Route Table: one path (PathID,
+// with ADD-PATH) to one prefix from one peer, in one RIB.
 type RouteKey struct {
-	PeerAddr netip.Addr
-	Prefix   netip.Prefix
-	RIBType  RIBType
+	Peer    PeerRef
+	Prefix  netip.Prefix
+	PathID  uint32
+	RIBType RIBType
+}
+
+// Peer returns the route's peer.
+func (r *Route) Peer() PeerRef {
+	return NewPeerRef(r.Router, r.PeerDistinguisher, r.PeerAddr)
+}
+
+// Key returns the route's Route Table key.
+func (r *Route) Key() RouteKey {
+	return RouteKey{Peer: r.Peer(), Prefix: r.Prefix, PathID: r.PathID, RIBType: r.RIBType}
+}
+
+// Peer returns the withdrawal's peer.
+func (w *Withdrawal) Peer() PeerRef {
+	return NewPeerRef(w.Router, w.PeerDistinguisher, w.PeerAddr)
+}
+
+// Key returns the Route Table key of the route the withdrawal removes.
+func (w *Withdrawal) Key() RouteKey {
+	return RouteKey{Peer: w.Peer(), Prefix: w.Prefix, PathID: w.PathID, RIBType: w.RIBType}
 }
 
 // ─── AS_PATH types ───

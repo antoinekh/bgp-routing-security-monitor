@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/routetable"
@@ -19,12 +20,26 @@ type routeFilter struct {
 	origin  uint32       // origin ASN; 0 = any
 	peer    netip.Addr   // BMP peer, unmapped; invalid = any
 	posture types.SecurityPosture
+	// routers, when byRouter, are the monitored routers a route must come
+	// from: the one router address given, or the routers whose sysName is
+	// the name given (none, if no router has it).
+	byRouter bool
+	routers  []netip.Addr
 }
 
-// parseRouteFilter reads the prefix, origin-asn, peer and posture query
-// parameters.
-func parseRouteFilter(q url.Values) (routeFilter, error) {
+// parseRouteFilter reads the prefix, origin-asn, peer, posture and router
+// query parameters. router is a router address or a BMP sysName; named
+// resolves a sysName to the routers that have it.
+func parseRouteFilter(q url.Values, named func(string) []netip.Addr) (routeFilter, error) {
 	var f routeFilter
+	if v := q.Get("router"); v != "" {
+		f.byRouter = true
+		if a, err := netip.ParseAddr(v); err == nil {
+			f.routers = []netip.Addr{a.Unmap()}
+		} else if named != nil {
+			f.routers = named(v)
+		}
+	}
 	if v := q.Get("prefix"); v != "" {
 		p, err := netip.ParsePrefix(v)
 		if err != nil {
@@ -56,7 +71,8 @@ func (f *routeFilter) match(r *types.Route) bool {
 	return (!f.prefix.IsValid() || r.Prefix == f.prefix) &&
 		(f.origin == 0 || r.OriginASN() == f.origin) &&
 		(!f.peer.IsValid() || r.PeerAddr.Unmap() == f.peer) &&
-		(f.posture == "" || r.SecurityPosture == f.posture)
+		(f.posture == "" || r.SecurityPosture == f.posture) &&
+		(!f.byRouter || slices.Contains(f.routers, r.Router.Unmap()))
 }
 
 // routes returns the table's pre-policy routes that pass the filter, starting
@@ -72,6 +88,8 @@ func (f *routeFilter) routes(t *routetable.Table) []*types.Route {
 		candidates = t.GetByPeer(f.peer)
 	case f.posture != "":
 		candidates = t.GetByPosture(f.posture)
+	case f.byRouter:
+		candidates = t.AllPrePolicy()
 	default:
 		return t.AllPrePolicy()
 	}

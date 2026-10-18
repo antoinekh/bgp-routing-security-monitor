@@ -26,12 +26,16 @@ type StateReader interface {
 	RTRCacheCounts() []RTRCacheCount
 }
 
-// PeerRouteCount holds the route count for a single BGP peer.
+// PeerRouteCount holds the route count for a single BGP peer on one
+// monitored router (Router, its BMP session address) and in one instance
+// (PeerDistinguisher, "" for a global-instance peer).
 type PeerRouteCount struct {
-	PeerAddr string
-	PeerASN  uint32
-	Posture  string
-	Count    int64
+	Router            string
+	PeerDistinguisher string
+	PeerAddr          string
+	PeerASN           uint32
+	Posture           string
+	Count             int64
 }
 
 // BMPSessionState holds the up/down state for one router's BMP session.

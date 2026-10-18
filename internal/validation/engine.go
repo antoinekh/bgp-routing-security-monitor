@@ -239,7 +239,7 @@ func (rv *Revalidation) stepASPAScan() {
 	start := time.Now()
 	matched, examined, done := rv.aspaScan.Next()
 	for _, r := range matched {
-		if _, ok := rv.vrpSet[types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}]; ok {
+		if _, ok := rv.vrpSet[r.Key()]; ok {
 			continue
 		}
 		rv.pending = append(rv.pending, r)

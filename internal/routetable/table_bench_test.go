@@ -67,7 +67,7 @@ func BenchmarkWithdrawAllFromPeer(b *testing.B) {
 				b.StopTimer()
 				tbl := buildTable(routes)
 				b.StartTimer()
-				tbl.WithdrawAllFromPeer(peer, benchSession)
+				tbl.WithdrawAllFromPeer(types.PeerRef{Addr: peer}, benchSession)
 			}
 		})
 	}
@@ -98,7 +98,7 @@ func TestIndexMaintenanceScalesLinearly(t *testing.T) {
 			start := time.Now()
 			tbl := buildTable(routes)
 			for p := 0; p < benchPeers; p++ {
-				tbl.WithdrawAllFromPeer(netip.AddrFrom4([4]byte{192, 0, 2, byte(p)}), benchSession)
+				tbl.WithdrawAllFromPeer(types.PeerRef{Addr: netip.AddrFrom4([4]byte{192, 0, 2, byte(p)})}, benchSession)
 			}
 			if d := time.Since(start); d < best {
 				best = d

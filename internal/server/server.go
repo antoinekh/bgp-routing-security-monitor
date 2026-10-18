@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
 	"sync"
@@ -131,8 +130,8 @@ const (
 type pendingRemoval struct {
 	rm      *routetable.Removal
 	session uint64
-	peer    netip.Addr // invalid for a session end
-	stale   bool       // stale eviction rather than a withdraw-all
+	peer    types.PeerRef // zero for a session end
+	stale   bool          // stale eviction rather than a withdraw-all
 	removed int
 	started time.Time
 }
@@ -248,34 +247,8 @@ func (s *Server) Run() error {
 	fsHandler := api.NewFlowspecHandler(s.fsManagers)
 	fsHandler.RegisterRoutes(s.apiSrv.Mux())
 
-	// ── Warm-start restore (before BMP/RTR sessions open) ─────────────────
-	if s.cfg.Persistence.Enabled {
-		reader := snapshot.NewReader(s.cfg.Persistence.SnapshotDir, Version)
-
-		if routes, err := reader.ReadRoutes(); err != nil {
-			if !errors.Is(err, snapshot.ErrVersionMismatch) {
-				s.log.Warn("failed to read route snapshot", "err", err)
-			} else {
-				s.log.Warn("route snapshot version mismatch, starting cold")
-			}
-		} else if routes != nil {
-			s.table.Restore(routes)
-			s.log.Info("restored route snapshot", "routes", len(routes))
-		}
-
-		if vrps, aspas, serial, err := reader.ReadRPKI(); err != nil {
-			if !errors.Is(err, snapshot.ErrVersionMismatch) {
-				s.log.Warn("failed to read RPKI snapshot", "err", err)
-			} else {
-				s.log.Warn("RPKI snapshot version mismatch, starting cold")
-			}
-		} else if vrps != nil {
-			s.vrpStore.Restore(vrps)
-			s.aspaStore.Restore(aspas)
-			s.log.Info("restored RPKI snapshot",
-				"vrps", len(vrps), "aspas", len(aspas), "serial", serial)
-		}
-	}
+	// Warm-start restore, before BMP/RTR sessions open.
+	s.restoreSnapshots()
 
 	var wg sync.WaitGroup
 
@@ -753,8 +726,9 @@ func (s *Server) stepRemovals() {
 		switch {
 		case p.stale:
 			s.log.Info("evicted unconfirmed stale routes", "count", p.removed, "took", time.Since(p.started))
-		case p.peer.IsValid():
-			s.log.Info("withdrew all routes from BMP peer", "peer", p.peer.String(),
+		case p.peer.Addr.IsValid():
+			s.log.Info("withdrew all routes from BMP peer", "peer", p.peer.Addr.String(),
+				"router", p.peer.Router.String(), "peer_distinguisher", p.peer.Distinguisher,
 				"session", p.session, "routes", p.removed, "took", time.Since(p.started))
 		default:
 			s.log.Info("withdrew all routes of ended BMP session",
@@ -775,8 +749,7 @@ func (s *Server) ingestRoute(r types.Route, session, count uint64) {
 	// incoming live BMP message as a fresh insert → EventTypeNewRoute.
 	var oldPosture types.SecurityPosture
 	if s.eventEngine != nil {
-		key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
-		if old := s.table.Get(key); old != nil && !old.Stale {
+		if old := s.table.Get(r.Key()); old != nil && !old.Stale {
 			oldPosture = old.SecurityPosture
 		}
 	}
@@ -836,16 +809,16 @@ func (s *Server) ingestWithdrawal(w types.Withdrawal, session uint64) {
 		s.queueRemoval(&pendingRemoval{rm: s.table.DetachSession(session), session: session})
 		return
 	case w.WithdrawAll:
-		s.queueRemoval(&pendingRemoval{rm: s.table.DetachPeer(w.PeerAddr, session), session: session, peer: w.PeerAddr})
+		s.queueRemoval(&pendingRemoval{rm: s.table.DetachPeer(w.Peer(), session), session: session, peer: w.Peer()})
 		return
 	}
 	// Capture route before removal so the event carries prefix/posture context.
+	key := w.Key()
 	var withdrawn *types.Route
 	if s.eventEngine != nil {
-		key := types.RouteKey{PeerAddr: w.PeerAddr, Prefix: w.Prefix, RIBType: types.AdjRIBInPre}
 		withdrawn = s.table.Get(key)
 	}
-	if s.table.WithdrawFromSession(w.PeerAddr, w.Prefix, session) == 0 {
+	if !s.table.WithdrawFromSession(key, session) {
 		return // nothing to withdraw, or a newer session owns the route
 	}
 	if s.eventEngine != nil && withdrawn != nil && withdrawn.OwnerSession <= session {
@@ -904,6 +877,46 @@ func (s *Server) updateRouteMetrics() {
 			metrics.RoutesTotal.WithLabelValues(posture, afi).Set(float64(n))
 		}
 	}
+}
+
+// restoreSnapshots warm-starts the route table and the RPKI stores from the
+// persistence snapshots, if persistence is enabled. Any snapshot it cannot
+// use (unreadable, another RAVEN version, an older route format) is skipped
+// with a warning: that part starts cold.
+func (s *Server) restoreSnapshots() {
+	if !s.cfg.Persistence.Enabled {
+		return
+	}
+	reader := snapshot.NewReader(s.cfg.Persistence.SnapshotDir, Version)
+
+	if routes, err := reader.ReadRoutes(); err != nil {
+		if errors.Is(err, snapshot.ErrFormatMismatch) {
+			// Not migrated: an old-format route key cannot say which
+			// router or instance a route was from.
+			s.log.Warn("route snapshot is in an older format, starting the route table cold", "err", err)
+		} else if !errors.Is(err, snapshot.ErrVersionMismatch) {
+			s.log.Warn("failed to read route snapshot", "err", err)
+		} else {
+			s.log.Warn("route snapshot version mismatch, starting cold")
+		}
+	} else if routes != nil {
+		s.table.Restore(routes)
+		s.log.Info("restored route snapshot", "routes", len(routes))
+	}
+
+	if vrps, aspas, serial, err := reader.ReadRPKI(); err != nil {
+		if !errors.Is(err, snapshot.ErrVersionMismatch) {
+			s.log.Warn("failed to read RPKI snapshot", "err", err)
+		} else {
+			s.log.Warn("RPKI snapshot version mismatch, starting cold")
+		}
+	} else if vrps != nil {
+		s.vrpStore.Restore(vrps)
+		s.aspaStore.Restore(aspas)
+		s.log.Info("restored RPKI snapshot",
+			"vrps", len(vrps), "aspas", len(aspas), "serial", serial)
+	}
+
 }
 
 // bindListeners binds the BMP, API, metrics and pprof listeners, starts

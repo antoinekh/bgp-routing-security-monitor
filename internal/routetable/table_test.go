@@ -94,7 +94,7 @@ func TestWithdraw(t *testing.T) {
 		t.Fatalf("count before withdraw = %d, want 1", tbl.Count())
 	}
 
-	tbl.Withdraw(netip.MustParseAddr("192.0.2.1"), netip.MustParsePrefix("1.0.0.0/24"))
+	tbl.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: netip.MustParseAddr("192.0.2.1")}, Prefix: netip.MustParsePrefix("1.0.0.0/24")})
 
 	if tbl.Count() != 0 {
 		t.Fatalf("count after withdraw = %d, want 0", tbl.Count())
@@ -117,7 +117,7 @@ func TestWithdrawAllFromPeer(t *testing.T) {
 		t.Fatalf("count = %d, want 3", tbl.Count())
 	}
 
-	removed := tbl.WithdrawAllFromPeer(netip.MustParseAddr("192.0.2.1"), 0)
+	removed := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: netip.MustParseAddr("192.0.2.1")}, 0)
 	if removed != 2 {
 		t.Errorf("removed = %d, want 2", removed)
 	}
@@ -159,7 +159,7 @@ func TestWithdrawAllFromPeerCleansAllIndexes(t *testing.T) {
 		t.Fatalf("count before peer down = %d, want %d", got, 2*n+2)
 	}
 
-	if removed := tbl.WithdrawAllFromPeer(down, 0); removed != 2*n {
+	if removed := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: down}, 0); removed != 2*n {
 		t.Errorf("removed = %d, want %d", removed, 2*n)
 	}
 
@@ -176,7 +176,7 @@ func TestWithdrawAllFromPeerCleansAllIndexes(t *testing.T) {
 		p := netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 1, byte(i), 0}), 24)
 		keys, ok := tbl.prefixIdx.Get(p)
 		for _, k := range keys {
-			if k.PeerAddr == down {
+			if k.Peer.Addr == down {
 				t.Errorf("prefix index still holds %v", k)
 			}
 		}
@@ -184,21 +184,21 @@ func TestWithdrawAllFromPeerCleansAllIndexes(t *testing.T) {
 			t.Errorf("prefix index still has an entry for %s, want it deleted", p)
 		}
 	}
-	if keys, _ := tbl.prefixIdx.Get(netip.MustParsePrefix("10.1.0.0/24")); len(keys) != 1 || keys[0].PeerAddr != other {
+	if keys, _ := tbl.prefixIdx.Get(netip.MustParsePrefix("10.1.0.0/24")); len(keys) != 1 || keys[0].Peer.Addr != other {
 		t.Errorf("shared prefix keys = %v, want only the other peer's", keys)
 	}
 
 	// Origin-ASN and posture indexes hold no key for the downed peer.
 	for asn, keys := range tbl.asnIdx {
 		for k := range keys {
-			if k.PeerAddr == down {
+			if k.Peer.Addr == down {
 				t.Errorf("ASN index AS%d still holds %v", asn, k)
 			}
 		}
 	}
 	for posture, keys := range tbl.postureIdx {
 		for k := range keys {
-			if k.PeerAddr == down {
+			if k.Peer.Addr == down {
 				t.Errorf("posture index %q still holds %v", posture, k)
 			}
 		}
@@ -243,7 +243,7 @@ func TestInsertPostureChangedInPlaceLeavesNoStaleKey(t *testing.T) {
 	r := makeRoute("192.0.2.1", "1.0.0.0/24", []uint32{64501, 13335})
 	r.SecurityPosture = types.PostureSecured
 	tbl.Insert(r)
-	key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
+	key := types.RouteKey{Peer: types.PeerRef{Addr: r.PeerAddr}, Prefix: r.Prefix, RIBType: r.RIBType}
 
 	flips := []types.SecurityPosture{
 		types.PosturePathSuspect, types.PostureSecured,
@@ -257,7 +257,7 @@ func TestInsertPostureChangedInPlaceLeavesNoStaleKey(t *testing.T) {
 		}
 	}
 
-	tbl.Withdraw(r.PeerAddr, r.Prefix)
+	tbl.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: r.PeerAddr}, Prefix: r.Prefix})
 	if got := postureListings(tbl, key); len(got) != 0 {
 		t.Errorf("after withdrawal: key still listed under %v, want nowhere", got)
 	}
@@ -276,9 +276,9 @@ func TestInsertOriginChangeLeavesNoStaleASNKey(t *testing.T) {
 	tbl.Insert(makeRoute("192.0.2.1", "1.0.0.0/24", []uint32{64501, 13335}))
 	tbl.Insert(makeRoute("192.0.2.1", "1.0.0.0/24", []uint32{64501, 64666})) // new origin
 	key := types.RouteKey{
-		PeerAddr: netip.MustParseAddr("192.0.2.1"),
-		Prefix:   netip.MustParsePrefix("1.0.0.0/24"),
-		RIBType:  types.AdjRIBInPre,
+		Peer:    types.PeerRef{Addr: netip.MustParseAddr("192.0.2.1")},
+		Prefix:  netip.MustParsePrefix("1.0.0.0/24"),
+		RIBType: types.AdjRIBInPre,
 	}
 
 	if got := asnListings(tbl, key); len(got) != 1 || got[0] != 64666 {
@@ -288,7 +288,7 @@ func TestInsertOriginChangeLeavesNoStaleASNKey(t *testing.T) {
 		t.Errorf("GetByOriginASN(13335) returned %s with origin AS%d", r.Prefix, r.OriginASN())
 	}
 
-	tbl.Withdraw(key.PeerAddr, key.Prefix)
+	tbl.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: key.Peer.Addr}, Prefix: key.Prefix})
 	if got := asnListings(tbl, key); len(got) != 0 {
 		t.Errorf("after withdrawal: key still listed under ASNs %v, want none", got)
 	}

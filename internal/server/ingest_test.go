@@ -78,9 +78,9 @@ func drain(t *testing.T, s *Server) {
 		Prefix:   netip.MustParsePrefix("203.0.113.0/24"),
 		RIBType:  types.AdjRIBInPre,
 	}
-	s.table.Withdraw(marker.PeerAddr, marker.Prefix)
+	s.table.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: marker.PeerAddr}, Prefix: marker.Prefix})
 	s.ingestCh <- types.IngestEvent{Route: marker}
-	key := types.RouteKey{PeerAddr: marker.PeerAddr, Prefix: marker.Prefix, RIBType: marker.RIBType}
+	key := types.RouteKey{Peer: types.PeerRef{Addr: marker.PeerAddr}, Prefix: marker.Prefix, RIBType: marker.RIBType}
 	deadline := time.Now().Add(testWaitBound)
 	for s.table.Get(key) == nil || s.removalsPending.Load() != 0 || s.revalidating.Load() {
 		if time.Now().After(deadline) {
@@ -88,7 +88,7 @@ func drain(t *testing.T, s *Server) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	s.table.Withdraw(marker.PeerAddr, marker.Prefix)
+	s.table.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: marker.PeerAddr}, Prefix: marker.Prefix})
 }
 
 // End to end through the ingest loop: a peer's routes are counted in the

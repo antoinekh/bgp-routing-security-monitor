@@ -105,15 +105,10 @@ var statusCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		var status struct {
-			Version string `json:"version"`
-			Uptime  string `json:"uptime"`
-			BMP     []struct {
-				Addr       string `json:"addr"`
-				ASN        uint32 `json:"asn"`
-				State      string `json:"state"`
-				RouteCount uint64 `json:"route_count"`
-			} `json:"bmp_peers"`
-			RTR struct {
+			Version string    `json:"version"`
+			Uptime  string    `json:"uptime"`
+			BMP     []peerRow `json:"bmp_peers"`
+			RTR     struct {
 				VRPCount uint64 `json:"vrp_count"`
 				Serial   uint32 `json:"serial"`
 			} `json:"rtr"`
@@ -137,9 +132,9 @@ var statusCmd = &cobra.Command{
 
 		fmt.Printf("\nBMP Peers: %d\n", len(status.BMP))
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "  PEER\tASN\tSTATE\tROUTES\n")
+		fmt.Fprintf(tw, "  ROUTER\tPEER\tASN\tSTATE\tROUTES\n")
 		for _, p := range status.BMP {
-			fmt.Fprintf(tw, "  %s\t%d\t%s\t%d\n", p.Addr, p.ASN, p.State, p.RouteCount)
+			fmt.Fprintf(tw, "  %s\t%s\t%d\t%s\t%d\n", p.router(), p.peer(), p.ASN, p.State, p.RouteCount)
 		}
 		tw.Flush()
 		return nil
@@ -147,6 +142,39 @@ var statusCmd = &cobra.Command{
 }
 
 // ─── peers ───
+
+// peerRow is a BMP peer as /api/v1/status and /api/v1/peers report it: one
+// peer on one router, in one instance, with its route count there.
+type peerRow struct {
+	Router            string `json:"router"`
+	RouterName        string `json:"router_name"`
+	PeerDistinguisher string `json:"peer_distinguisher"`
+	Addr              string `json:"addr"`
+	ASN               uint32 `json:"asn"`
+	RouterID          string `json:"router_id"`
+	State             string `json:"state"`
+	RouteCount        uint64 `json:"route_count"`
+	UpSince           string `json:"up_since"`
+}
+
+// router is the ROUTER column: the router's sysName, or its address.
+func (p peerRow) router() string { return routerLabel(p.Router, p.RouterName) }
+
+// peer is the PEER column: the address, with the VRF's RD for a peer that
+// is not in the global instance.
+func (p peerRow) peer() string {
+	if p.PeerDistinguisher != "" {
+		return p.Addr + " rd " + p.PeerDistinguisher
+	}
+	return p.Addr
+}
+
+func routerLabel(addr, name string) string {
+	if name != "" {
+		return name
+	}
+	return addr
+}
 
 var peersCmd = &cobra.Command{
 	Use:   "peers",
@@ -159,23 +187,16 @@ var peersCmd = &cobra.Command{
 		}
 		defer resp.Body.Close()
 
-		var peers []struct {
-			Addr       string `json:"addr"`
-			ASN        uint32 `json:"asn"`
-			RouterID   string `json:"router_id"`
-			State      string `json:"state"`
-			RouteCount uint64 `json:"route_count"`
-			UpSince    string `json:"up_since"`
-		}
+		var peers []peerRow
 		if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
 			return err
 		}
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "PEER\tASN\tROUTER ID\tSTATE\tROUTES\tUP SINCE\n")
+		fmt.Fprintf(tw, "ROUTER\tPEER\tASN\tROUTER ID\tSTATE\tROUTES\tUP SINCE\n")
 		for _, p := range peers {
-			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\t%s\n",
-				p.Addr, p.ASN, p.RouterID, p.State, p.RouteCount, p.UpSince)
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d\t%s\n",
+				p.router(), p.peer(), p.ASN, p.RouterID, p.State, p.RouteCount, p.UpSince)
 		}
 		tw.Flush()
 		return nil
@@ -203,6 +224,9 @@ var routesCmd = &cobra.Command{
 		if v, _ := cmd.Flags().GetString("posture"); v != "" {
 			params.Set("posture", v)
 		}
+		if v, _ := cmd.Flags().GetString("router"); v != "" {
+			params.Set("router", v)
+		}
 
 		resp, err := apiGet(addr, "/api/v1/routes", params)
 		if err != nil {
@@ -217,13 +241,16 @@ var routesCmd = &cobra.Command{
 		}
 
 		var routes []struct {
-			Prefix    string   `json:"prefix"`
-			PeerAddr  string   `json:"peer"`
-			OriginASN uint32   `json:"origin_asn"`
-			ASPath    []uint32 `json:"as_path"`
-			ROV       string   `json:"rov"`
-			ASPA      string   `json:"aspa"`
-			Posture   string   `json:"posture"`
+			Prefix     string   `json:"prefix"`
+			Router     string   `json:"router"`
+			RouterName string   `json:"router_name"`
+			PeerAddr   string   `json:"peer"`
+			PathID     uint32   `json:"path_id"`
+			OriginASN  uint32   `json:"origin_asn"`
+			ASPath     []uint32 `json:"as_path"`
+			ROV        string   `json:"rov"`
+			ASPA       string   `json:"aspa"`
+			Posture    string   `json:"posture"`
 
 			ASPAProcedure       string `json:"aspa_procedure"`
 			ASPAProcedureSource string `json:"aspa_procedure_source"`
@@ -243,7 +270,7 @@ var routesCmd = &cobra.Command{
 			prefixes[i] = r.Prefix
 		}
 		pw := prefixColWidth(prefixes)
-		fmt.Fprintf(tw, "%-*s\tPEER\tORIGIN\tROV\tASPA\tPOSTURE", pw, "PREFIX")
+		fmt.Fprintf(tw, "%-*s\tROUTER\tPEER\tORIGIN\tROV\tASPA\tPOSTURE", pw, "PREFIX")
 		if wide {
 			fmt.Fprint(tw, "\tASPA PROCEDURE\tPROCEDURE SOURCE\tFAILING HOP")
 		}
@@ -254,8 +281,12 @@ var routesCmd = &cobra.Command{
 			if r.OriginASN == 0 {
 				origin = "-"
 			}
-			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s",
-				pw, r.Prefix, r.PeerAddr, origin, r.ROV, r.ASPA, r.Posture)
+			peer := r.PeerAddr
+			if r.PathID != 0 {
+				peer = fmt.Sprintf("%s path %d", peer, r.PathID)
+			}
+			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s\t%s",
+				pw, r.Prefix, routerLabel(r.Router, r.RouterName), peer, origin, r.ROV, r.ASPA, r.Posture)
 			if wide {
 				hop := "-"
 				if h := r.ASPAFailingHop; h != nil {
@@ -362,6 +393,9 @@ var watchCmd = &cobra.Command{
 		if v, _ := cmd.Flags().GetString("posture"); v != "" {
 			params.Set("posture", v)
 		}
+		if v, _ := cmd.Flags().GetString("router"); v != "" {
+			params.Set("router", v)
+		}
 
 		u := fmt.Sprintf("http://%s/api/v1/watch", addr)
 		if len(params) > 0 {
@@ -452,6 +486,7 @@ func init() {
 	routesCmd.Flags().Uint32("origin-asn", 0, "filter by origin ASN")
 	routesCmd.Flags().String("peer", "", "filter by BMP peer address")
 	routesCmd.Flags().String("posture", "", "filter by security posture")
+	routesCmd.Flags().String("router", "", "filter by monitored router: its address or BMP sysName")
 	routesCmd.Flags().String("format", "table", "output format: table, wide, json")
 
 	// validate flags
@@ -464,4 +499,5 @@ func init() {
 	watchCmd.Flags().Uint32("origin-asn", 0, "filter by origin ASN")
 	watchCmd.Flags().String("peer", "", "filter by peer")
 	watchCmd.Flags().String("posture", "", "filter by posture")
+	watchCmd.Flags().String("router", "", "filter by monitored router: its address or BMP sysName")
 }

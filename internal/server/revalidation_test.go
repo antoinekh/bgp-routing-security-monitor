@@ -319,7 +319,7 @@ func TestConcurrentIngestAndRTRUpdates(t *testing.T) {
 // lookup2 returns benchRoute(peer, i)'s route in the table, or nil.
 func lookup2(s *Server, peer netip.Addr, i int) *types.Route {
 	r := benchRoute(peer, i, 0)
-	return s.table.Get(types.RouteKey{PeerAddr: peer, Prefix: r.Prefix, RIBType: r.RIBType})
+	return s.table.Get(types.RouteKey{Peer: types.PeerRef{Addr: peer}, Prefix: r.Prefix, RIBType: r.RIBType})
 }
 
 // Stale eviction is applied by ingestLoop like a withdraw-all, not by the
