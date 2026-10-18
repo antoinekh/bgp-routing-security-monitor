@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -39,8 +40,14 @@ import (
 // checking. Set at build time via -ldflags "-X ...server.Version=v1.2.3".
 var Version = "dev"
 
-// DefaultAPIListen is the address the JSON API server binds to.
-const DefaultAPIListen = ":11020"
+// APIListen is the address the JSON API server binds to: api.listen, or
+// config.DefaultAPIListen (loopback only) when unset.
+func APIListen(cfg *config.Config) string {
+	if cfg.API.Listen != "" {
+		return cfg.API.Listen
+	}
+	return config.DefaultAPIListen
+}
 
 // otelShutdownTimeout bounds the OTel exporter's final flush on shutdown.
 const otelShutdownTimeout = 5 * time.Second
@@ -141,6 +148,11 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 	aspaSel := aspa.NewSelector(cfg.Validation.ASPADefaultProcedure, cfg.Validation.ASPAPeers)
 	engine := validation.NewEngine(vrpStore, aspaStore, aspaSel, table, log)
 
+	allowed, err := config.ParseAllowedRouters(cfg.BMP.AllowedRouters)
+	if err != nil {
+		return nil, err
+	}
+
 	var bmpTLS *tls.Config
 	if cfg.BMP.TLS != nil {
 		built, err := bmp.BuildTLSConfig(cfg.BMP.TLS)
@@ -168,6 +180,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 	}
 
 	// Existing API server
+	srv.bmpListen.SetAllowedRouters(allowed)
 	srv.apiSrv = api.NewServer(table, srv.bmpListen, vrpStore, log, "dev")
 
 	// Phase 2b: what-if + recommender
@@ -264,6 +277,10 @@ func (s *Server) Run() error {
 
 	var wg sync.WaitGroup
 
+	if err := s.bindListeners(ctx, &wg); err != nil {
+		return err
+	}
+
 	// Route ingestion pipeline
 	wg.Add(1)
 	go func() {
@@ -347,18 +364,6 @@ func (s *Server) Run() error {
 		}()
 	}
 
-	// Prometheus metrics endpoint
-	if s.cfg.Outputs.Prometheus != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.runPrometheus(ctx)
-		}()
-	}
-
-	// pprof profiling endpoint — opt-in via debug.pprof.listen, off by default.
-	s.startPprof(ctx, &wg)
-
 	// OTel metrics exporter — non-fatal if collector is unreachable.
 	if s.cfg.Outputs.OTel.Enabled {
 		otelCfg := otelexporter.OTelConfig{
@@ -426,15 +431,6 @@ func (s *Server) Run() error {
 			mgr.Run(ctx)
 		}()
 	}
-
-	// API server for CLI queries and watch streaming
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := s.apiSrv.Start(ctx, DefaultAPIListen); err != nil {
-			s.log.Error("API server failed", "error", err)
-		}
-	}()
 
 	s.log.Info("RAVEN started",
 		"bmp_listen", s.cfg.BMP.Listen,
@@ -908,9 +904,52 @@ func (s *Server) updateRouteMetrics() {
 	}
 }
 
-// runPrometheus starts the Prometheus metrics HTTP server.
-func (s *Server) runPrometheus(ctx context.Context) {
-	addr := s.cfg.Outputs.Prometheus.Listen
+// bindListeners binds the BMP, API, metrics and pprof listeners, starts
+// serving all but BMP (Run's BMP goroutine accepts on the bound listener),
+// and logs one line with every bound address.
+func (s *Server) bindListeners(ctx context.Context, wg *sync.WaitGroup) error {
+	// Bind every listener before serving any, so one line can say where
+	// each one is. A BMP bind failure is fatal; the others are logged and
+	// the daemon runs without them, as before.
+	bmpAddr, err := s.bmpListen.Listen()
+	if err != nil {
+		return err
+	}
+	listeners := []any{"bmp", bmpAddr.String()}
+	if ln, err := net.Listen("tcp", APIListen(s.cfg)); err != nil {
+		s.log.Error("API server failed", "addr", APIListen(s.cfg), "error", err)
+	} else {
+		listeners = append(listeners, "api", ln.Addr().String())
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.apiSrv.Serve(ctx, ln); err != nil {
+				s.log.Error("API server failed", "error", err)
+			}
+		}()
+	}
+	if p := s.cfg.Outputs.Prometheus; p != nil {
+		if ln, err := net.Listen("tcp", p.Listen); err != nil {
+			s.log.Error("Prometheus server error", "addr", p.Listen, "error", err)
+		} else {
+			listeners = append(listeners, "metrics", ln.Addr().String())
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.runPrometheus(ctx, ln)
+			}()
+		}
+	}
+	// pprof profiling endpoint — opt-in via debug.pprof.listen, off by default.
+	if a := s.startPprof(ctx, wg); a != nil {
+		listeners = append(listeners, "pprof", a.String())
+	}
+	s.log.Info("listeners bound", listeners...)
+	return nil
+}
+
+// runPrometheus serves the Prometheus metrics endpoint on ln.
+func (s *Server) runPrometheus(ctx context.Context, ln net.Listener) {
 	path := s.cfg.Outputs.Prometheus.Path
 
 	mux := http.NewServeMux()
@@ -920,14 +959,14 @@ func (s *Server) runPrometheus(ctx context.Context) {
 		fmt.Fprintln(w, "ok")
 	})
 
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{Handler: mux}
 	go func() {
 		<-ctx.Done()
 		srv.Close()
 	}()
 
-	s.log.Info("Prometheus metrics endpoint started", "addr", addr, "path", path)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	s.log.Info("Prometheus metrics endpoint started", "addr", ln.Addr().String(), "path", path)
+	if err := srv.Serve(ln); err != http.ErrServerClosed {
 		s.log.Error("Prometheus server error", "error", err)
 	}
 }

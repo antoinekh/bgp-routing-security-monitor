@@ -13,6 +13,7 @@ import (
 // Config is the top-level RAVEN configuration, mapping 1:1 to raven.yaml.
 type Config struct {
 	BMP         BMPConfig         `mapstructure:"bmp"`
+	API         APIConfig         `mapstructure:"api"`
 	RTR         RTRConfig         `mapstructure:"rtr"`
 	Validation  ValidationConfig  `mapstructure:"validation"`
 	Outputs     OutputsConfig     `mapstructure:"outputs"`
@@ -186,6 +187,46 @@ type BMPConfig struct {
 	Listen string       `mapstructure:"listen"`
 	TLS    *TLSConfig   `mapstructure:"tls"`   // nil = plain TCP (default)
 	Kafka  *KafkaIngest `mapstructure:"kafka"` // Phase 4 — nil means embedded BMP receiver
+	// AllowedRouters lists the addresses and prefixes BMP connections are
+	// accepted from; empty allows any source. See ParseAllowedRouters.
+	AllowedRouters []string `mapstructure:"allowed-routers"`
+}
+
+// APIConfig configures the HTTP API the CLI talks to.
+type APIConfig struct {
+	// Listen is the API's bind address. The default, 127.0.0.1:11020,
+	// serves only this host; set it to expose the API.
+	Listen string `mapstructure:"listen"`
+}
+
+// DefaultAPIListen is the API's bind address when api.listen is not set.
+const DefaultAPIListen = "127.0.0.1:11020"
+
+// ParseAllowedRouters parses bmp.allowed-routers entries: an IP address
+// (a single host) or a prefix, IPv4 or IPv6. IPv4-mapped IPv6 entries are
+// taken as IPv4, as BMP source addresses are; host bits in a prefix are
+// ignored.
+func ParseAllowedRouters(entries []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(entries))
+	for i, e := range entries {
+		var p netip.Prefix
+		if a, err := netip.ParseAddr(e); err == nil {
+			if a.Zone() != "" {
+				return nil, fmt.Errorf("bmp.allowed-routers[%d]: %q: zones are not supported", i, e)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		} else if p, err = netip.ParsePrefix(e); err != nil {
+			return nil, fmt.Errorf("bmp.allowed-routers[%d]: %q is not an IP address or prefix", i, e)
+		}
+		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
+				return nil, fmt.Errorf("bmp.allowed-routers[%d]: %q: an IPv4-mapped prefix must be /96 or longer", i, e)
+			}
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 type KafkaIngest struct {
@@ -315,6 +356,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("persistence.snapshot_dir", "~/.raven/snapshots")
 	viper.SetDefault("persistence.stale_eviction_timeout", 5*time.Minute)
 	viper.SetDefault("bmp.listen", ":11019")
+	viper.SetDefault("api.listen", DefaultAPIListen)
 	viper.SetDefault("rtr.rtr-version", "auto")
 	viper.SetDefault("rtr.version-reprobe-interval", time.Hour)
 	viper.SetDefault("validation.rov", true)
@@ -351,6 +393,10 @@ func validate(cfg *Config) error {
 		// ok
 	default:
 		return fmt.Errorf("invalid rtr-version %q: must be auto, 1, or 2", cfg.RTR.RTRVersion)
+	}
+
+	if _, err := ParseAllowedRouters(cfg.BMP.AllowedRouters); err != nil {
+		return err
 	}
 
 	// ASPA procedure must be valid

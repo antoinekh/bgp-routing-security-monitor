@@ -5,6 +5,21 @@ bmp:
   #   key: /etc/raven/bmp.key
   #   ca: /etc/raven/bmp-ca.crt        # Optional: enables mutual TLS (client cert required)
   #   tls-min-version: "1.2"           # Optional: minimum TLS version — "1.2" (default) or "1.3"
+  # Accept BMP only from these routers: IP addresses and/or prefixes, IPv4 or
+  # IPv6 (IPv4-mapped IPv6 sources match IPv4 entries). Connections from any
+  # other source are closed before anything is read, logged at WARN and
+  # counted in raven_bmp_rejected_connections_total. Empty or absent accepts
+  # any source, and RAVEN warns at startup if the listener is not on loopback.
+  # allowed-routers:
+  #   - 192.0.2.10
+  #   - 198.51.100.0/28
+  #   - 2001:db8:100::1
+
+# HTTP API used by the raven CLI (status, routes, watch, ...). Binds to
+# loopback by default; set it to an external address (and protect it) to run
+# the CLI from another host.
+# api:
+#   listen: "127.0.0.1:11020"
 
 rtr:
   rtr-version: auto

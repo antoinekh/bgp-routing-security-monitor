@@ -35,7 +35,7 @@ var serveCmd = &cobra.Command{
 		// Pre-flight: bind each configured listen address briefly to fail
 		// fast with one clear message instead of three mid-startup bind
 		// errors from BMP, API, and Prometheus goroutines.
-		ports := []string{cfg.BMP.Listen, server.DefaultAPIListen}
+		ports := []string{cfg.BMP.Listen, server.APIListen(cfg)}
 		if cfg.Outputs.Prometheus != nil {
 			ports = append(ports, cfg.Outputs.Prometheus.Listen)
 		}

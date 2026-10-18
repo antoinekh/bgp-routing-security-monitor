@@ -109,6 +109,14 @@ var (
 		Help: "Total routes revalidated after RTR updates, and how many of them changed, by mode.",
 	}, []string{"mode", "result"})
 
+	// BMP connections closed at accept, before reading anything. Label:
+	// reason (not_allowed: source outside bmp.allowed-routers;
+	// bad_remote_addr: the source address could not be read).
+	BMPRejectedConnectionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_bmp_rejected_connections_total",
+		Help: "Total BMP connections rejected at accept, by reason.",
+	}, []string{"reason"})
+
 	// Total pre-policy routes in the route table.
 	RouteTableSize = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "raven_route_table_size",
