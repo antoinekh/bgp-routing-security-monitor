@@ -1,7 +1,7 @@
 package rov
 
 import (
-	"fmt"
+	"strconv"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/store"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
@@ -50,7 +50,7 @@ func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 			return types.ROVResult{
 				State:       types.ROVValid,
 				MatchedVRPs: covering,
-				Reason:      fmt.Sprintf("matches VRP {%s, AS%d, /%d}", vrp.Prefix, vrp.ASN, vrp.MaxLength),
+				Reason:      validReason(vrp),
 			}
 		}
 	}
@@ -58,6 +58,30 @@ func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 	return types.ROVResult{
 		State:       types.ROVInvalid,
 		MatchedVRPs: covering,
-		Reason:      fmt.Sprintf("origin AS%d not authorized by any covering VRP", originASN),
+		Reason:      invalidReason(originASN),
 	}
+}
+
+// validReason and invalidReason build the Reason strings with a single
+// allocation; fmt.Sprintf boxed each argument as well. The text is the same:
+// "matches VRP {%s, AS%d, /%d}" and "origin AS%d not authorized by any
+// covering VRP".
+func validReason(v types.VRP) string {
+	var buf [96]byte
+	b := append(buf[:0], "matches VRP {"...)
+	b = v.Prefix.AppendTo(b)
+	b = append(b, ", AS"...)
+	b = strconv.AppendUint(b, uint64(v.ASN), 10)
+	b = append(b, ", /"...)
+	b = strconv.AppendUint(b, uint64(v.MaxLength), 10)
+	b = append(b, '}')
+	return string(b)
+}
+
+func invalidReason(originASN uint32) string {
+	var buf [64]byte
+	b := append(buf[:0], "origin AS"...)
+	b = strconv.AppendUint(b, uint64(originASN), 10)
+	b = append(b, " not authorized by any covering VRP"...)
+	return string(b)
 }

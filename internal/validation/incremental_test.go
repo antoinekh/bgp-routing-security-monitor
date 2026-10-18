@@ -93,6 +93,7 @@ func TestIncremental_VRPWithdrawn(t *testing.T) {
 		t.Fatal("setup: route not Valid")
 	}
 	f.vrps.RemoveVRP(v)
+	f.vrps.RebuildIndex() // End of Data
 	f.run(&store.Delta{VRPWithdrawn: []types.VRP{v}})
 	if got := f.get(k).ROV.State; got != types.ROVNotFound {
 		t.Errorf("ROV after withdrawal = %s, want NotFound", got)
