@@ -29,17 +29,18 @@ func (s *Server) RouteCountsByPosture() map[string]map[string]int64 {
 	return result
 }
 
-// PeerRouteCounts returns per-peer route counts derived from the BMP listener's
-// peer state map.
+// PeerRouteCounts returns, for each BMP peer, the number of its routes the
+// route table holds now.
 func (s *Server) PeerRouteCounts() []ravenotel.PeerRouteCount {
 	peers := s.bmpListen.GetPeers()
+	counts := s.table.PeerRouteCounts()
 	result := make([]ravenotel.PeerRouteCount, 0, len(peers))
 	for _, p := range peers {
 		result = append(result, ravenotel.PeerRouteCount{
 			PeerAddr: p.Addr.String(),
 			PeerASN:  p.ASN,
 			Posture:  "unverified", // per-peer posture not tracked; use "unverified"
-			Count:    int64(p.RouteCount),
+			Count:    int64(counts[p.Addr.Unmap()]),
 		})
 	}
 	return result

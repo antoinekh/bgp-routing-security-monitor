@@ -118,16 +118,15 @@ type BMPStatsReport struct {
 
 // Peer is the runtime state RAVEN maintains per BMP peer session.
 type Peer struct {
-	Addr       netip.Addr
-	ASN        uint32
-	LocalASN   uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
-	RouterID   netip.Addr
-	SysName    string
-	SysDescr   string
-	State      string // "up" or "down"
-	RouteCount uint64
-	UpSince    time.Time
-	LastMsg    time.Time
+	Addr     netip.Addr
+	ASN      uint32
+	LocalASN uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
+	RouterID netip.Addr
+	SysName  string
+	SysDescr string
+	State    string // "up" or "down"
+	UpSince  time.Time
+	LastMsg  time.Time
 
 	session uint64 // ID of the BMP session whose Peer Up created this entry
 }

@@ -27,7 +27,7 @@ func TestNotifyRoute(t *testing.T) {
 
 	ch := make(chan RouteResponse, 1)
 	s.watchMu.Lock()
-	s.watchSubs[ch] = struct{}{}
+	s.watchSubs[ch] = &routeFilter{}
 	s.watchMu.Unlock()
 	s.NotifyRoute(r)
 	select {
