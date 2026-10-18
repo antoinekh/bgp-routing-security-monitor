@@ -81,6 +81,10 @@ type Server struct {
 	// It holds one request at most: a request made while one is already
 	// queued adds nothing.
 	revalidateCh chan struct{}
+	// pendingDelta merges the RTR deltas not yet taken by a pass; nil when
+	// there are none. Guarded by deltaMu: RTR goroutines add to it.
+	deltaMu      sync.Mutex
+	pendingDelta *store.Delta
 	// Owned by ingestLoop: the revalidation pass in progress, and whether
 	// another was requested after it started and must follow it.
 	revalidation    *validation.Revalidation
@@ -574,7 +578,7 @@ func (s *Server) ingestLoop(ctx context.Context) {
 // VRP or ASPA data requests a revalidation pass, so a refresh poll that finds
 // the cache's serial unchanged costs no pass over the table.
 func (s *Server) wireRTRClient(client *rtr.Client, addr string) {
-	client.SetOnUpdate(s.RequestRevalidation)
+	client.SetOnUpdate(s.RequestRevalidationDelta)
 	client.SetOnSync(func() {
 		// Last-sync time for StateReader/OTel.
 		s.rtrMu.Lock()
@@ -594,6 +598,25 @@ func (s *Server) wireRTRClient(client *rtr.Client, addr string) {
 // session or bringing a withdrawn one back, and it changed routes in place
 // while API and metrics readers were reading them.
 func (s *Server) RequestRevalidation() {
+	s.RequestRevalidationDelta(store.FullDelta())
+}
+
+// RequestRevalidationDelta asks ingestLoop to revalidate the routes an RTR
+// delta can affect (all of them, for a Full delta). Deltas requested before a
+// pass takes them are merged. Safe from any goroutine, and never blocks.
+func (s *Server) RequestRevalidationDelta(d *store.Delta) {
+	if d == nil {
+		d = store.FullDelta()
+	}
+	if d.Empty() {
+		return
+	}
+	s.deltaMu.Lock()
+	if s.pendingDelta == nil {
+		s.pendingDelta = &store.Delta{}
+	}
+	s.pendingDelta.Merge(d)
+	s.deltaMu.Unlock()
 	select {
 	case s.revalidateCh <- struct{}{}:
 	default: // one is already queued; it will see this update's data too
@@ -615,17 +638,27 @@ func (s *Server) startStaleEviction() {
 	s.queueRemoval(&pendingRemoval{rm: s.table.DetachUnowned(), stale: true})
 }
 
-// startRevalidation starts a revalidation pass, or, if one is already in
-// progress, schedules one more after it: routes the current pass has already
-// checked were checked against the old data. Any number of requests during a
-// pass make one follow-up pass.
+// startRevalidation starts a revalidation pass for the deltas requested so
+// far, or, if one is already in progress, schedules one more after it: routes
+// the current pass has already checked were checked against the old data. Any
+// number of requests during a pass make one follow-up pass, for their merged
+// deltas. With no delta pending (its request's pass already took it) there is
+// nothing to do.
 func (s *Server) startRevalidation() {
 	if s.revalidation != nil {
 		s.revalidateAgain = true
 		return
 	}
-	s.revalidation = s.engine.NewRevalidation()
+	s.deltaMu.Lock()
+	d := s.pendingDelta
+	s.pendingDelta = nil
+	s.deltaMu.Unlock()
+	if d == nil {
+		s.revalidating.Store(false)
+		return
+	}
 	s.revalidateStart = time.Now()
+	s.revalidation = s.engine.NewDeltaRevalidation(d)
 	s.revalidating.Store(true)
 }
 
@@ -654,8 +687,20 @@ func (s *Server) stepRevalidation() {
 	if !rv.Step(revalidateChunk) {
 		return
 	}
-	s.log.Info("re-validation complete", "total", rv.Checked, "changed", rv.Changed,
-		"skipped_superseded", rv.Skipped, "took", time.Since(s.revalidateStart))
+	took := time.Since(s.revalidateStart)
+	mode := "incremental"
+	if rv.Full {
+		mode = "full"
+	}
+	attrs := []any{"mode", mode, "candidates", rv.Candidates, "checked", rv.Checked,
+		"changed", rv.Changed, "skipped_superseded", rv.Skipped, "took", took}
+	if rv.ASPAScanned > 0 {
+		attrs = append(attrs, "aspa_scanned", rv.ASPAScanned, "aspa_scan_took", rv.ASPAScanTime)
+	}
+	s.log.Info("re-validation complete", attrs...)
+	metrics.RevalidationDuration.WithLabelValues(mode).Observe(took.Seconds())
+	metrics.RevalidationRoutesTotal.WithLabelValues(mode, "checked").Add(float64(rv.Checked))
+	metrics.RevalidationRoutesTotal.WithLabelValues(mode, "changed").Add(float64(rv.Changed))
 	s.revalidation = nil
 	s.revalidationPasses.Add(1)
 	if s.revalidateAgain {

@@ -55,10 +55,16 @@ func TestRTRUpdatesDuringRevalidationCoalesce(t *testing.T) {
 	t.Run("state machine", func(t *testing.T) {
 		s := newTestServer(t)
 		fillValidated(s, netip.MustParseAddr("192.0.2.1"), sessA, 2000)
-		s.startRevalidation()
+		// An RTR update as ingestLoop sees it: a request, then its signal.
+		update := func() {
+			s.RequestRevalidation()
+			<-s.revalidateCh
+			s.startRevalidation()
+		}
+		update()
 		s.stepBackground()
-		s.startRevalidation() // two RTR updates during the pass
-		s.startRevalidation()
+		update() // two RTR updates during the pass
+		update()
 		for s.revalidating.Load() {
 			s.stepBackground()
 		}

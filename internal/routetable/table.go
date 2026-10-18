@@ -564,6 +564,59 @@ func (sc *Scan) Next(n int) []*types.Route {
 	return out
 }
 
+// KeysWithin calls fn for the key of every route whose prefix is equal to or
+// more specific than prefix, using the prefix index rather than a table scan.
+// fn runs under the index's read lock and must not call back into the table.
+func (t *Table) KeysWithin(prefix netip.Prefix, fn func(types.RouteKey)) {
+	t.prefixMu.RLock()
+	defer t.prefixMu.RUnlock()
+	for _, keys := range t.prefixIdx.Subnets(prefix.Masked()) {
+		for _, k := range keys {
+			fn(k)
+		}
+	}
+}
+
+// MatchScan walks the table one shard at a time and returns the routes a
+// predicate selects, without copying any route or collecting the routes it
+// rejects. Like Scan, it does not see routes added to a shard after reading
+// it.
+//
+// A MatchScan is not safe for concurrent use.
+type MatchScan struct {
+	t     *Table
+	match func(*types.Route) bool
+	next  int
+	buf   []*types.Route
+}
+
+// NewMatchScan starts a MatchScan. match runs under a shard's read lock and
+// must not call back into the table.
+func (t *Table) NewMatchScan(match func(*types.Route) bool) *MatchScan {
+	return &MatchScan{t: t, match: match}
+}
+
+// Next reads the next shard and returns the routes in it that match, how many
+// routes it examined, and whether the scan is finished. The slice is only
+// valid until the next call.
+func (ms *MatchScan) Next() (matched []*types.Route, examined int, done bool) {
+	if ms.next >= len(ms.t.shards) {
+		return nil, 0, true
+	}
+	s := &ms.t.shards[ms.next]
+	ms.next++
+	ms.buf = ms.buf[:0]
+	s.mu.RLock()
+	for _, r := range s.routes {
+		if ms.match(r) {
+			ms.buf = append(ms.buf, r)
+		}
+	}
+	examined = len(s.routes)
+	s.mu.RUnlock()
+	return ms.buf, examined, ms.next >= len(ms.t.shards)
+}
+
 // ─── Query Methods ───
 
 // Get returns the route stored under the given key, or nil if not found.

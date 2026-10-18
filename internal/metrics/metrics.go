@@ -93,6 +93,22 @@ var (
 		Help: "Total ASPA AS_PATH verifications, by procedure, procedure source and result.",
 	}, []string{"procedure", "source", "state"})
 
+	// Wall time of revalidation passes after RTR updates, from start to
+	// finish (the pass is interleaved with ingest). Label: mode
+	// (incremental, full).
+	RevalidationDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "raven_revalidation_duration_seconds",
+		Help:    "Duration of route revalidation passes after RTR updates, by mode.",
+		Buckets: []float64{.001, .01, .1, .5, 1, 2.5, 5, 10, 30, 60, 120},
+	}, []string{"mode"})
+
+	// Routes handled by revalidation passes. Labels: mode (incremental,
+	// full), result (checked, changed).
+	RevalidationRoutesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_revalidation_routes_total",
+		Help: "Total routes revalidated after RTR updates, and how many of them changed, by mode.",
+	}, []string{"mode", "result"})
+
 	// Total pre-policy routes in the route table.
 	RouteTableSize = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "raven_route_table_size",

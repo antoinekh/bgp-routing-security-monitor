@@ -30,8 +30,8 @@ func NewASPAStore() *ASPAStore {
 }
 
 // AddProvider adds a provider ASN to a customer's provider set.
-// Creates the record if it doesn't exist.
-func (s *ASPAStore) AddProvider(customerASN, providerASN uint32) {
+// Creates the record if it doesn't exist. Reports whether the store changed.
+func (s *ASPAStore) AddProvider(customerASN, providerASN uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.records[customerASN]
@@ -42,22 +42,31 @@ func (s *ASPAStore) AddProvider(customerASN, providerASN uint32) {
 		}
 		s.records[customerASN] = r
 	}
+	if _, had := r.Providers[providerASN]; had {
+		return false
+	}
 	r.Providers[providerASN] = struct{}{}
+	return true
 }
 
 // RemoveProvider removes a provider ASN from a customer's provider set.
-// Removes the record entirely if the provider set becomes empty.
-func (s *ASPAStore) RemoveProvider(customerASN, providerASN uint32) {
+// Removes the record entirely if the provider set becomes empty. Reports
+// whether the store changed.
+func (s *ASPAStore) RemoveProvider(customerASN, providerASN uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.records[customerASN]
 	if !ok {
-		return
+		return false
+	}
+	if _, had := r.Providers[providerASN]; !had {
+		return false
 	}
 	delete(r.Providers, providerASN)
 	if len(r.Providers) == 0 {
 		delete(s.records, customerASN)
 	}
+	return true
 }
 
 // GetRecord returns a copy of the ASPA record for a customer ASN.
