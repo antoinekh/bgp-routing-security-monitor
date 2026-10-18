@@ -166,3 +166,28 @@ var (
 		Buckets: []float64{.001, .005, .025, .1, .25, .5, 1, 2.5, 5, 10},
 	})
 )
+
+// Label values with a known, fixed set. Their series are created at 0 when
+// the package loads, so a scrape shows 0 rather than nothing before the first
+// increment and an alert can tell "none yet" from "not exported".
+const (
+	RejectReasonNotAllowed    = "not_allowed"
+	RejectReasonBadRemoteAddr = "bad_remote_addr"
+
+	RevalidationModeIncremental = "incremental"
+	RevalidationModeFull        = "full"
+	RevalidationResultChecked   = "checked"
+	RevalidationResultChanged   = "changed"
+)
+
+func init() {
+	for _, reason := range []string{RejectReasonNotAllowed, RejectReasonBadRemoteAddr} {
+		BMPRejectedConnectionsTotal.WithLabelValues(reason)
+	}
+	for _, mode := range []string{RevalidationModeIncremental, RevalidationModeFull} {
+		RevalidationDuration.WithLabelValues(mode)
+		for _, result := range []string{RevalidationResultChecked, RevalidationResultChanged} {
+			RevalidationRoutesTotal.WithLabelValues(mode, result)
+		}
+	}
+}

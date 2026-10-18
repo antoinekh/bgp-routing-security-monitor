@@ -179,10 +179,13 @@ type AnomalyEvent struct {
 	Cache     string
 	Category  string // "structural" | "statistical"
 	Trigger   string // metric name, or "correlated", or event type
-	Severity  string // "high" | "medium" | "low"
+	Severity  string // one of AnomalySeverities
 	ZScores   map[string]float64
 	Raw       map[string]float64
 }
+
+// AnomalySeverities are the severities the detector reports.
+var AnomalySeverities = []string{"high", "medium"}
 
 // Detector maintains per-cache, per-metric rolling windows and evaluates each
 // sync against them. It is safe for concurrent use.
@@ -219,18 +222,13 @@ func (d *Detector) ObserveStructural(cache, eventType string, ts time.Time) *Ano
 const ErrorCodeNoDataAvailable uint16 = 2
 
 // ObserveError classifies an Error Report from the cache. No Data Available
-// is a cache that is starting up, not a fault: it is reported as a
-// low-severity "cache_not_ready" event. Any other error is a high-severity
-// structural anomaly.
+// is a cache that is starting up, not a fault: it is not an anomaly, and
+// ObserveError returns nil (the RTR client records it as an
+// EventCacheNotReady event). Any other error is a high-severity structural
+// anomaly. No window is touched either way.
 func (d *Detector) ObserveError(cache string, code *uint16, ts time.Time) *AnomalyEvent {
 	if code != nil && *code == ErrorCodeNoDataAvailable {
-		return &AnomalyEvent{
-			Timestamp: ts,
-			Cache:     cache,
-			Category:  "cache_state",
-			Trigger:   "cache_not_ready",
-			Severity:  "low",
-		}
+		return nil
 	}
 	return d.ObserveStructural(cache, "error_report", ts)
 }
