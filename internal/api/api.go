@@ -28,8 +28,13 @@ type RouteResponse struct {
 	ROV       string   `json:"rov"`
 	ROVReason string   `json:"rov_reason,omitempty"`
 	ASPA      string   `json:"aspa"`
-	Posture   string   `json:"posture"`
-	Timestamp string   `json:"timestamp"`
+	// ASPAProcedure is upstream or downstream; ASPAProcedureSource says
+	// whether it came from an aspa-peers entry or the default.
+	ASPAProcedure       string `json:"aspa_procedure"`
+	ASPAProcedureSource string `json:"aspa_procedure_source"`
+	ASPAReason          string `json:"aspa_reason,omitempty"`
+	Posture             string `json:"posture"`
+	Timestamp           string `json:"timestamp"`
 }
 
 // PeerResponse is a BMP peer in API output.
@@ -291,7 +296,11 @@ func routeToResponse(r *types.Route) RouteResponse {
 		ROV:       r.ROV.State.String(),
 		ROVReason: r.ROV.Reason,
 		ASPA:      r.ASPA.State.String(),
-		Posture:   string(r.SecurityPosture),
+
+		ASPAProcedure:       r.ASPA.Procedure.String(),
+		ASPAProcedureSource: r.ASPA.ProcedureSource.String(),
+		ASPAReason:          r.ASPA.Reason,
+		Posture:             string(r.SecurityPosture),
 	}
 }
 

@@ -21,7 +21,20 @@ rtr:
 validation:
   rov: true
   aspa: true
-  aspa-default-procedure: upstream
+  aspa-default-procedure: upstream  # upstream | downstream | auto (auto = upstream until BGP Role is read)
+  # Per-peer ASPA procedure from the neighbor's role (what the BMP peer is to
+  # the monitored router). provider -> downstream verification; customer,
+  # peer, rs, rs-client -> upstream. Each entry sets exactly one of address
+  # (BMP peer address) or asn; an address entry wins over an asn entry.
+  # Entries other than rs also enforce the neighbor-AS check (first AS in the
+  # AS_PATH must be the peer's ASN). Unlisted peers use aspa-default-procedure.
+  # aspa-peers:
+  #   - address: 192.0.2.1
+  #     neighbor-role: provider
+  #   - asn: 64500
+  #     neighbor-role: customer
+  #   - address: 2001:db8::6777
+  #     neighbor-role: rs
 
 outputs:
   prometheus:

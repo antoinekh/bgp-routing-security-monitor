@@ -6,9 +6,13 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 	"github.com/nokia/bgp-routing-security-monitor/internal/routetable"
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/store"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
+	"github.com/nokia/bgp-routing-security-monitor/internal/validation/aspa"
 )
 
 // revalidateAll runs one revalidation pass to completion, in small chunks.
@@ -33,7 +37,7 @@ func TestRevalidationPostureFlipsLeaveNoStaleIndexKeys(t *testing.T) {
 	vrps := store.NewVRPStore()
 	vrps.ReplaceAll(matching, 1, 1)
 	table := routetable.New()
-	e := NewEngine(vrps, store.NewASPAStore(), table, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e := NewEngine(vrps, store.NewASPAStore(), nil, table, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	route := &types.Route{
 		PeerAddr: netip.MustParseAddr("198.51.100.1"),
@@ -110,7 +114,7 @@ func midPassFixture(t *testing.T, n int) (*Engine, *routetable.Table, *store.VRP
 	vrps := store.NewVRPStore()
 	vrps.ReplaceAll([]types.VRP{{Prefix: netip.MustParsePrefix("10.0.0.0/8"), ASN: 65000, MaxLength: 24}}, 1, 1)
 	table := routetable.New()
-	e := NewEngine(vrps, store.NewASPAStore(), table, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e := NewEngine(vrps, store.NewASPAStore(), nil, table, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	routes := make([]*types.Route, n)
 	for i := range routes {
 		r := &types.Route{
@@ -187,5 +191,90 @@ func TestRevalidationKeepsMidPassReannouncements(t *testing.T) {
 	}
 	if got := table.WithdrawSession(2); got != n {
 		t.Errorf("session 2's end removed %d routes, want %d", got, n)
+	}
+}
+
+// aspaValidations reads raven_aspa_validations_total for one label set.
+func aspaValidations(t *testing.T, procedure, source, state string) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "raven_aspa_validations_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["procedure"] == procedure && labels["source"] == source && labels["state"] == state {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("no raven_aspa_validations_total{procedure=%q,source=%q,state=%q}", procedure, source, state)
+	return 0
+}
+
+// Revalidation picks the ASPA procedure exactly as ingest does. The route
+// [P X O] comes from a provider-mapped peer, so it is verified downstream
+// (draft-24 §5.5). After the ASPA change (O lists X, X lists only AS64999) it
+// is Valid downstream but would be Invalid upstream (§5.4: max_up_ramp 2 < 3),
+// so a pass that fell back to upstream shows up as Invalid.
+func TestRevalidationUsesSelectedASPAProcedure(t *testing.T) {
+	const p, x, o = 174, 3356, 13335
+	aspas := store.NewASPAStore()
+	sel := aspa.NewSelector("upstream", []config.ASPAPeer{{Address: "198.51.100.1", NeighborRole: "provider"}})
+	table := routetable.New()
+	e := NewEngine(store.NewVRPStore(), aspas, sel, table, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	route := &types.Route{
+		PeerAddr: netip.MustParseAddr("198.51.100.1"),
+		PeerASN:  p,
+		Prefix:   netip.MustParsePrefix("192.0.2.0/24"),
+		ASPath:   []uint32{p, x, o},
+		RIBType:  types.AdjRIBInPre,
+	}
+	before := aspaValidations(t, "downstream", "config-address", "Unknown")
+	e.ValidateRoute(route)
+	table.Insert(route)
+	// §5.5 with no ASPA: min_up 1 + min_down 1 < 3 → Unknown.
+	if got := route.ASPA; got.State != types.ASPAUnknown || got.Procedure != types.ASPADownstream ||
+		got.ProcedureSource != types.ASPASourceConfigAddress {
+		t.Fatalf("initial ASPA = %s/%s/%s, want Unknown/downstream/config-address", got.State, got.Procedure, got.ProcedureSource)
+	}
+	if got := aspaValidations(t, "downstream", "config-address", "Unknown") - before; got != 1 {
+		t.Errorf("raven_aspa_validations_total{downstream,config-address,Unknown} rose by %v, want 1", got)
+	}
+
+	aspas.AddProvider(o, x)
+	aspas.AddProvider(x, 64999)
+	if rv := revalidateAll(e); rv.Changed != 1 {
+		t.Fatalf("pass changed %d routes, want 1", rv.Changed)
+	}
+	got := table.Get(types.RouteKey{PeerAddr: route.PeerAddr, Prefix: route.Prefix, RIBType: route.RIBType}).ASPA
+	if got.State != types.ASPAValid || got.Procedure != types.ASPADownstream || got.ProcedureSource != types.ASPASourceConfigAddress {
+		t.Fatalf("revalidated ASPA = %s/%s/%s, want Valid/downstream/config-address", got.State, got.Procedure, got.ProcedureSource)
+	}
+}
+
+// The demo leaks stay Invalid through the engine with the shipped default
+// (upstream, no aspa-peers): [65000 1199] with AS1199 → {AS1103}, and
+// [65000 64496] with AS64496 → {AS3333}.
+func TestEngineDemoLeaksStillInvalid(t *testing.T) {
+	aspas := store.NewASPAStore()
+	aspas.AddProvider(1199, 1103)
+	aspas.AddProvider(64496, 3333)
+	sel := aspa.NewSelector("upstream", nil)
+	e := NewEngine(store.NewVRPStore(), aspas, sel, routetable.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for _, path := range [][]uint32{{65000, 1199}, {65000, 64496}} {
+		r := &types.Route{PeerAddr: netip.MustParseAddr("10.0.0.1"), PeerASN: 65000, ASPath: path}
+		e.ValidateRoute(r)
+		if r.ASPA.State != types.ASPAInvalid || r.ASPA.FailingHop == nil || r.ASPA.FailingHop.CustomerASN != path[1] {
+			t.Errorf("path %v: ASPA = %s failing %+v, want Invalid at AS%d", path, r.ASPA.State, r.ASPA.FailingHop, path[1])
+		}
 	}
 }

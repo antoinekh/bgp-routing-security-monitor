@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/tls"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"time"
 
@@ -234,6 +235,29 @@ type ValidationConfig struct {
 	ASPA                 bool   `mapstructure:"aspa"`
 	ASPADefaultProcedure string `mapstructure:"aspa-default-procedure"` // "upstream", "downstream", "auto"
 	ASPAASSetBehavior    string `mapstructure:"aspa-as-set-behavior"`   // "unverifiable", "best-effort"
+	// ASPAPeers sets the ASPA procedure per BMP peer from the neighbor's role.
+	ASPAPeers []ASPAPeer `mapstructure:"aspa-peers"`
+}
+
+// ASPAPeer maps one BMP peer, by address or by ASN, to its role.
+type ASPAPeer struct {
+	Address string `mapstructure:"address"` // BMP peer address
+	ASN     uint32 `mapstructure:"asn"`     // peer ASN
+	// NeighborRole is the neighbor's relationship to the monitored router:
+	// "provider", "customer", "peer", "rs" or "rs-client".
+	NeighborRole string `mapstructure:"neighbor-role"`
+}
+
+// ParsedAddress returns the entry's address, unmapped so that it compares
+// equal to the IPv4 peer addresses BMP produces.
+func (p ASPAPeer) ParsedAddress() (netip.Addr, error) {
+	a, err := netip.ParseAddr(p.Address)
+	return a.Unmap(), err
+}
+
+// validNeighborRoles are the accepted aspa-peers neighbor-role values.
+var validNeighborRoles = map[string]bool{
+	"provider": true, "customer": true, "peer": true, "rs": true, "rs-client": true,
 }
 
 type OutputsConfig struct {
@@ -337,6 +361,10 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("invalid aspa-default-procedure %q", cfg.Validation.ASPADefaultProcedure)
 	}
 
+	if err := validateASPAPeers(cfg.Validation.ASPAPeers); err != nil {
+		return err
+	}
+
 	// ASPA AS_SET behavior must be valid
 	switch cfg.Validation.ASPAASSetBehavior {
 	case "unverifiable", "best-effort", "":
@@ -366,5 +394,37 @@ func validate(cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+// validateASPAPeers checks each aspa-peers entry names exactly one of
+// address/asn and a valid role, and that no address or ASN repeats.
+func validateASPAPeers(peers []ASPAPeer) error {
+	addrs := make(map[netip.Addr]bool, len(peers))
+	asns := make(map[uint32]bool, len(peers))
+	for i, p := range peers {
+		hasAddr, hasASN := p.Address != "", p.ASN != 0
+		if hasAddr == hasASN {
+			return fmt.Errorf("validation.aspa-peers[%d]: set exactly one of address or asn", i)
+		}
+		if !validNeighborRoles[p.NeighborRole] {
+			return fmt.Errorf("validation.aspa-peers[%d]: invalid neighbor-role %q: must be provider, customer, peer, rs or rs-client", i, p.NeighborRole)
+		}
+		if hasASN {
+			if asns[p.ASN] {
+				return fmt.Errorf("validation.aspa-peers[%d]: duplicate asn %d", i, p.ASN)
+			}
+			asns[p.ASN] = true
+			continue
+		}
+		a, err := p.ParsedAddress()
+		if err != nil {
+			return fmt.Errorf("validation.aspa-peers[%d]: invalid address %q: %w", i, p.Address, err)
+		}
+		if addrs[a] {
+			return fmt.Errorf("validation.aspa-peers[%d]: duplicate address %s", i, a)
+		}
+		addrs[a] = true
+	}
 	return nil
 }

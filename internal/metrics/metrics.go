@@ -85,6 +85,14 @@ var (
 		Help: "Number of routes by security posture and address family.",
 	}, []string{"posture", "afi"})
 
+	// ASPA verifications run, on ingest and on revalidation. Labels:
+	// procedure (upstream, downstream), source (default, config-address,
+	// config-asn), state (Valid, Invalid, Unknown, Unverifiable).
+	ASPAValidationsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_aspa_validations_total",
+		Help: "Total ASPA AS_PATH verifications, by procedure, procedure source and result.",
+	}, []string{"procedure", "source", "state"})
+
 	// Total pre-policy routes in the route table.
 	RouteTableSize = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "raven_route_table_size",
