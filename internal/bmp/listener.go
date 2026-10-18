@@ -32,6 +32,10 @@ type Listener struct {
 	routers  map[netip.Addr]routerInfo
 	listener net.Listener
 
+	// allowed lists the source prefixes BMP connections are accepted from
+	// (IPv4 sources in plain form); empty accepts any.
+	allowed []netip.Prefix
+
 	lastSession atomic.Uint64 // last session ID handed out; IDs start at 1
 	sessMu      sync.Mutex
 	sessions    map[netip.Addr]*bmpSession // the current session per router address
@@ -187,8 +191,19 @@ func BuildTLSConfig(cfg *config.TLSConfig) (*tls.Config, error) {
 	return out, nil
 }
 
-// Start begins listening for BMP connections. Blocks until ctx is cancelled.
-func (l *Listener) Start(ctx context.Context) error {
+// SetAllowedRouters restricts BMP connections to sources in prefixes (see
+// config.ParseAllowedRouters); nil or empty accepts any source. Call before
+// Listen.
+func (l *Listener) SetAllowedRouters(prefixes []netip.Prefix) {
+	l.allowed = prefixes
+}
+
+// Listen binds the BMP listener and returns the address it is bound to.
+// Start calls it if it has not been called.
+func (l *Listener) Listen() (net.Addr, error) {
+	if l.listener != nil {
+		return l.listener.Addr(), nil
+	}
 	var err error
 	transport := "tcp"
 	if l.tlsCfg != nil {
@@ -198,9 +213,70 @@ func (l *Listener) Start(ctx context.Context) error {
 		l.listener, err = net.Listen("tcp", l.addr)
 	}
 	if err != nil {
-		return fmt.Errorf("BMP listen on %s: %w", l.addr, err)
+		return nil, fmt.Errorf("BMP listen on %s: %w", l.addr, err)
 	}
-	l.log.Info("BMP listener started", "addr", l.addr, "transport", transport)
+	bound := l.listener.Addr()
+	l.log.Info("BMP listener started", "addr", bound.String(), "transport", transport,
+		"allowed_routers", len(l.allowed))
+	if len(l.allowed) == 0 {
+		if tcp, ok := bound.(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+			l.log.Warn("BMP listener accepts connections from any source on a non-loopback address; "+
+				"set bmp.allowed-routers to the routers' addresses", "addr", bound.String())
+		}
+	}
+	return bound, nil
+}
+
+// permits reports whether a BMP connection from addr may proceed. An
+// IPv4-mapped IPv6 source is matched as IPv4.
+func (l *Listener) permits(addr netip.Addr) bool {
+	if len(l.allowed) == 0 {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, p := range l.allowed {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteIP returns conn's source address. From a dual-stack socket an IPv4
+// source comes as IPv4-mapped IPv6; permits matches it as IPv4.
+func remoteIP(conn net.Conn) (netip.Addr, bool) {
+	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		ap := tcp.AddrPort()
+		return ap.Addr(), ap.Addr().IsValid()
+	}
+	ap, err := netip.ParseAddrPort(conn.RemoteAddr().String())
+	return ap.Addr(), err == nil
+}
+
+// admit decides, before anything is read from conn, whether it may become a
+// BMP session. A rejected connection is logged, counted and closed.
+func (l *Listener) admit(conn net.Conn) bool {
+	if len(l.allowed) == 0 {
+		return true
+	}
+	reason := "not_allowed"
+	if src, ok := remoteIP(conn); !ok {
+		reason = "bad_remote_addr"
+	} else if l.permits(src) {
+		return true
+	}
+	metrics.BMPRejectedConnectionsTotal.WithLabelValues(reason).Inc()
+	l.log.Warn("BMP connection rejected: source not in bmp.allowed-routers",
+		"remote", conn.RemoteAddr().String(), "reason", reason)
+	conn.Close()
+	return false
+}
+
+// Start begins listening for BMP connections. Blocks until ctx is cancelled.
+func (l *Listener) Start(ctx context.Context) error {
+	if _, err := l.Listen(); err != nil {
+		return err
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -214,6 +290,10 @@ func (l *Listener) Start(ctx context.Context) error {
 				return nil // shutting down
 			}
 			l.log.Error("BMP accept error", "error", err)
+			continue
+		}
+		// Before reading a byte (for TLS, before the handshake).
+		if !l.admit(conn) {
 			continue
 		}
 

@@ -143,10 +143,18 @@ func (s *Server) NotifyRoute(route *types.Route) {
 
 func (s *Server) Mux() *http.ServeMux { return s.mux }
 
-// Start runs the API server. Blocks until ctx is cancelled.
+// Start binds addr and runs the API server. Blocks until ctx is cancelled.
 func (s *Server) Start(ctx context.Context, addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, ln)
+}
+
+// Serve runs the API server on ln. Blocks until ctx is cancelled.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{
-		Addr:    addr,
 		Handler: s.mux,
 		BaseContext: func(l net.Listener) context.Context {
 			return ctx
@@ -158,8 +166,8 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		srv.Close()
 	}()
 
-	s.log.Info("API server started", "addr", addr)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	s.log.Info("API server started", "addr", ln.Addr().String())
+	if err := srv.Serve(ln); err != http.ErrServerClosed {
 		return err
 	}
 	return nil

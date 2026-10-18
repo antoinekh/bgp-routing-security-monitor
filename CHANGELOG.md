@@ -4,7 +4,24 @@ All notable changes to RAVEN are recorded here.
 
 ## Unreleased
 
+### Changed
+- **Breaking:** the HTTP API the CLI talks to now binds to `127.0.0.1:11020`
+  by default instead of every interface (`:11020`). Anyone running the CLI
+  (`raven status`, `raven routes`, `raven watch`, ...) against a daemon on
+  another host must now set `api.listen` (for example `"0.0.0.0:11020"`)
+  on that daemon, and should restrict access to it. The Prometheus metrics
+  listener is unchanged.
+
 ### Added
+- `bmp.allowed-routers`: IP addresses and prefixes BMP connections are
+  accepted from. Other sources are closed at accept, before any byte is
+  read, logged at WARN and counted in
+  `raven_bmp_rejected_connections_total{reason}`. Empty or absent still
+  accepts any source, with a startup WARN when the BMP listener is not on
+  loopback. Invalid entries fail config validation.
+- `api.listen` sets the API's bind address.
+- One startup INFO line, `listeners bound`, lists every listener (BMP, API,
+  metrics, pprof if enabled) with the address it actually bound.
 - RTR anomaly detection: adaptive median/MAD-based detector for RTR sync
   telemetry (interval, duration, VRP/ASPA churn) with per-cache rolling
   baselines, hard-trip and correlated-trip classification.
