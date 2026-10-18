@@ -102,7 +102,7 @@ type Client struct {
 	fullSyncPending bool  // true between Reset Query send and EndOfData receive
 	configVersion   uint8 // configured starting version; reset to this on each session
 	protoVersion    uint8 // RTR protocol version (0, 1, or 2)
-	onUpdate        func()
+	onUpdate        func(*store.Delta)
 	onSync          func()
 	readyOnce       sync.Once
 	ready           chan struct{}
@@ -145,6 +145,10 @@ type Client struct {
 	vrpWithdrawn  int
 	aspaAnnounced int
 	aspaWithdrawn int
+
+	// delta records how the current sync changes the stores; reset on
+	// each Cache Response and handed to onUpdate at End of Data.
+	delta *store.DeltaRecorder
 }
 
 // NewClient creates an RTR client that syncs VRPs into the given store.
@@ -223,10 +227,20 @@ func (c *Client) Ready() <-chan struct{} {
 	return c.ready
 }
 
+// recorder returns the current sync's delta recorder. Data arriving without
+// a Cache Response first starts a Full one: nothing says what it patched.
+func (c *Client) recorder() *store.DeltaRecorder {
+	if c.delta == nil {
+		c.delta = store.NewDeltaRecorder(true)
+	}
+	return c.delta
+}
+
 // SetOnUpdate sets a callback invoked after a sync that changed the VRP or
 // ASPA data: a full sync, a new serial, or any records applied. A poll that
-// finds the cache's serial unchanged does not call it.
-func (c *Client) SetOnUpdate(fn func()) {
+// finds the cache's serial unchanged does not call it. fn receives what the
+// sync changed; a Full delta means the stores were rebuilt.
+func (c *Client) SetOnUpdate(fn func(*store.Delta)) {
 	c.onUpdate = fn
 }
 
@@ -567,6 +581,9 @@ func (c *Client) runSession(ctx context.Context) error {
 			// the EndOfData telemetry reflects only this sync's deltas.
 			c.vrpAnnounced, c.vrpWithdrawn = 0, 0
 			c.aspaAnnounced, c.aspaWithdrawn = 0, 0
+			// A full sync rebuilds the stores (and sessionEstablished may
+			// have cleared ASPA): only a full revalidation follows it.
+			c.delta = store.NewDeltaRecorder(c.fullSyncPending)
 			// If we're servicing a Reset Query, clear the stores so the
 			// incoming full snapshot replaces rather than appends. Without
 			// this, every reconnect doubles the VRP store size.
@@ -588,6 +605,7 @@ func (c *Client) runSession(ctx context.Context) error {
 				c.vrpStore.AddVRP(vrp)
 				c.vrpAnnounced++
 			}
+			c.recorder().VRP(vrp, withdraw)
 
 		case PDUIPv6Prefix:
 			vrp, withdraw, err := c.parseIPv6Prefix(payload)
@@ -602,6 +620,7 @@ func (c *Client) runSession(ctx context.Context) error {
 				c.vrpStore.AddVRP(vrp)
 				c.vrpAnnounced++
 			}
+			c.recorder().VRP(vrp, withdraw)
 
 		case PDUASPA:
 			customerASN, providerASNs, withdraw, err := c.parseASPAPDU(sessionID, payload)
@@ -609,16 +628,20 @@ func (c *Client) runSession(ctx context.Context) error {
 				c.log.Error("bad ASPA PDU", "error", err)
 				continue
 			}
+			changed := false
 			if withdraw {
 				for _, p := range providerASNs {
-					c.aspaStore.RemoveProvider(customerASN, p)
+					changed = c.aspaStore.RemoveProvider(customerASN, p) || changed
 				}
 				c.aspaWithdrawn++
 			} else {
 				for _, p := range providerASNs {
-					c.aspaStore.AddProvider(customerASN, p)
+					changed = c.aspaStore.AddProvider(customerASN, p) || changed
 				}
 				c.aspaAnnounced++
+			}
+			if changed {
+				c.recorder().ASPA(customerASN)
 			}
 
 		case PDUEndOfData:
@@ -714,6 +737,11 @@ func (c *Client) endOfData(sessionID uint16, eod endOfData) {
 	serialChanged := !c.haveSerial || eod.serial != c.serial
 	applied := c.vrpAnnounced + c.vrpWithdrawn + c.aspaAnnounced + c.aspaWithdrawn
 	dataChanged := c.fullSyncPending || serialChanged || applied > 0
+	delta := c.recorder()
+	if c.fullSyncPending || (c.haveSerial && sessionID != c.sessionID) {
+		delta.MarkFull()
+	}
+	c.delta = nil
 	c.sessionID, c.serial, c.haveSerial = sessionID, eod.serial, true
 	c.refresh, c.retry, c.expire = eod.refresh, eod.retry, eod.expire
 
@@ -779,7 +807,7 @@ func (c *Client) endOfData(sessionID uint16, eod endOfData) {
 	// Update before sync: whoever sees the sync recorded can rely on the
 	// update (in raven serve, the revalidation request) having been made.
 	if dataChanged && c.onUpdate != nil {
-		c.onUpdate()
+		c.onUpdate(delta.Delta())
 	}
 	if c.onSync != nil {
 		c.onSync()

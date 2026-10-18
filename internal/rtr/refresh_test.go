@@ -59,7 +59,7 @@ func newTestClient(t *testing.T, cache *rtrtest.Cache, version uint8) *testClien
 	c.unit = time.Millisecond
 	c.retryMin, c.retryMax = 10*time.Millisecond, 50*time.Millisecond
 	tc := &testClient{Client: c, logs: logs, syncs: make(chan struct{}, 64)}
-	c.SetOnUpdate(func() { tc.updates.Add(1) })
+	c.SetOnUpdate(func(*store.Delta) { tc.updates.Add(1) })
 	c.SetOnSync(func() { tc.syncs <- struct{}{} })
 	return tc
 }

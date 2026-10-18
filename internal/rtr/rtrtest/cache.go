@@ -23,6 +23,7 @@ const (
 	pduCacheResponse = 3
 	pduIPv4Prefix    = 4
 	pduEndOfData     = 7
+	pduCacheReset    = 8
 	pduErrorReport   = 10
 	pduASPA          = 11
 )
@@ -210,6 +211,12 @@ func ASPA(announce bool, customer uint32, providers ...uint32) []byte {
 		flags = 1
 	}
 	return pdu(2, pduASPA, flags<<8, u32(append([]uint32{customer}, providers...)...))
+}
+
+// CacheReset tells the client the cache cannot answer its Serial Query
+// incrementally; the client must send a Reset Query.
+func CacheReset(version uint8) []byte {
+	return pdu(version, pduCacheReset, 0)
 }
 
 // SerialNotify tells the client the cache has a new serial.
