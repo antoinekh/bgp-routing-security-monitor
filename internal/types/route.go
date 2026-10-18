@@ -16,7 +16,8 @@ type Route struct {
 	PeerASN   uint32
 	// LocalASN is the monitoring router's own AS on the BMP session this
 	// route was learned over (from the Peer Up message's Sent OPEN). Zero
-	// if unknown. Used by ASPA validation for the path[0]-vs-local-AS hop.
+	// if unknown. Not used by ASPA verification: the draft never checks the
+	// neighbor-to-verifier edge.
 	LocalASN uint32
 
 	RouterID         netip.Addr

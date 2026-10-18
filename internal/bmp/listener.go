@@ -535,8 +535,8 @@ func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]
 	updateBody := bgpData[19:bgpLength]
 
 	// Look up the monitoring router's own AS on this session, learned from
-	// the Peer Up message's Sent OPEN (see ParsePeerUp). Needed for ASPA's
-	// final path[0]-vs-local-AS check.
+	// the Peer Up message's Sent OPEN (see ParsePeerUp), and record it on
+	// each route.
 	key := PeerKey{RouterAddr: routerAddr, PeerAddr: rm.PerPeer.PeerAddr}
 	l.peerMu.RLock()
 	var localASN uint32
