@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
-	"strconv"
 	"sync"
 	"time"
 
@@ -33,8 +31,17 @@ type RouteResponse struct {
 	ASPAProcedure       string `json:"aspa_procedure"`
 	ASPAProcedureSource string `json:"aspa_procedure_source"`
 	ASPAReason          string `json:"aspa_reason,omitempty"`
-	Posture             string `json:"posture"`
-	Timestamp           string `json:"timestamp"`
+	// ASPAFailingHop is the hop that made ASPA Invalid, if one did.
+	ASPAFailingHop *FailingHopResponse `json:"aspa_failing_hop,omitempty"`
+	Posture        string              `json:"posture"`
+	Timestamp      string              `json:"timestamp"`
+}
+
+// FailingHopResponse is the customer→provider hop that failed ASPA: the
+// customer's ASPA record does not list the provider.
+type FailingHopResponse struct {
+	CustomerASN uint32 `json:"customer_asn"`
+	ProviderASN uint32 `json:"provider_asn"`
 }
 
 // PeerResponse is a BMP peer in API output.
@@ -88,7 +95,7 @@ type Server struct {
 
 	// Watch subscribers
 	watchMu   sync.RWMutex
-	watchSubs map[chan RouteResponse]struct{}
+	watchSubs map[chan RouteResponse]*routeFilter // each watcher's filter
 }
 
 // NewServer creates an API server.
@@ -100,7 +107,7 @@ func NewServer(table *routetable.Table, bmpListen *bmp.Listener, vrpStore *store
 		log:       log.With("subsystem", "api"),
 		version:   version,
 		startTime: time.Now(),
-		watchSubs: make(map[chan RouteResponse]struct{}),
+		watchSubs: make(map[chan RouteResponse]*routeFilter),
 		mux:       http.NewServeMux(),
 	}
 	s.mux.HandleFunc("/api/v1/routes", s.handleRoutes)
@@ -117,8 +124,15 @@ func (s *Server) NotifyRoute(route *types.Route) {
 	if len(s.watchSubs) == 0 {
 		return // nobody is watching: don't build the response
 	}
-	rr := routeToResponse(route)
-	for ch := range s.watchSubs {
+	var rr RouteResponse
+	built := false
+	for ch, f := range s.watchSubs {
+		if !f.match(route) {
+			continue
+		}
+		if !built {
+			rr, built = routeToResponse(route), true
+		}
 		select {
 		case ch <- rr:
 		default:
@@ -152,36 +166,12 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 }
 
 func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-
-	var routes []*types.Route
-
-	if prefix := q.Get("prefix"); prefix != "" {
-		p, err := netip.ParsePrefix(prefix)
-		if err != nil {
-			http.Error(w, "invalid prefix: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		routes = s.table.GetByPrefix(p)
-	} else if asnStr := q.Get("origin-asn"); asnStr != "" {
-		asn, err := strconv.ParseUint(asnStr, 10, 32)
-		if err != nil {
-			http.Error(w, "invalid ASN: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		routes = s.table.GetByOriginASN(uint32(asn))
-	} else if peer := q.Get("peer"); peer != "" {
-		addr, err := netip.ParseAddr(peer)
-		if err != nil {
-			http.Error(w, "invalid peer address: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		routes = s.table.GetByPeer(addr)
-	} else if posture := q.Get("posture"); posture != "" {
-		routes = s.table.GetByPosture(types.SecurityPosture(posture))
-	} else {
-		routes = s.table.AllPrePolicy()
+	f, err := parseRouteFilter(r.URL.Query())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
+	routes := f.routes(s.table)
 
 	resp := make([]RouteResponse, 0, len(routes))
 	for _, route := range routes {
@@ -192,7 +182,14 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.peerResponses())
+}
+
+// peerResponses lists the BMP peers, each with the number of its routes the
+// route table holds now.
+func (s *Server) peerResponses() []PeerResponse {
 	peers := s.bmpListen.GetPeers()
+	counts := s.table.PeerRouteCounts()
 	resp := make([]PeerResponse, 0, len(peers))
 	for _, p := range peers {
 		resp = append(resp, PeerResponse{
@@ -200,12 +197,12 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 			ASN:        p.ASN,
 			RouterID:   p.RouterID.String(),
 			State:      p.State,
-			RouteCount: p.RouteCount,
+			RouteCount: counts[p.Addr.Unmap()],
 			UpSince:    p.UpSince.Format(time.RFC3339),
 			LastMsg:    p.LastMsg.Format(time.RFC3339),
 		})
 	}
-	writeJSON(w, resp)
+	return resp
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -229,18 +226,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	peers := s.bmpListen.GetPeers()
-	for _, p := range peers {
-		resp.BMP = append(resp.BMP, PeerResponse{
-			Addr:       p.Addr.String(),
-			ASN:        p.ASN,
-			RouterID:   p.RouterID.String(),
-			State:      p.State,
-			RouteCount: p.RouteCount,
-			UpSince:    p.UpSince.Format(time.RFC3339),
-			LastMsg:    p.LastMsg.Format(time.RFC3339),
-		})
-	}
+	resp.BMP = s.peerResponses()
 
 	writeJSON(w, resp)
 }
@@ -253,7 +239,11 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	postureFilter := r.URL.Query().Get("posture")
+	f, err := parseRouteFilter(r.URL.Query())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -261,7 +251,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 	ch := make(chan RouteResponse, 100)
 	s.watchMu.Lock()
-	s.watchSubs[ch] = struct{}{}
+	s.watchSubs[ch] = &f
 	s.watchMu.Unlock()
 
 	defer func() {
@@ -269,14 +259,14 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		delete(s.watchSubs, ch)
 		s.watchMu.Unlock()
 	}()
+	// Send the headers now: until the first event the client would
+	// otherwise not know the watch had started.
+	flusher.Flush()
 
 	ctx := r.Context()
 	for {
 		select {
 		case rr := <-ch:
-			if postureFilter != "" && rr.Posture != postureFilter {
-				continue
-			}
 			data, _ := json.Marshal(rr)
 			w.Write([]byte("data: "))
 			w.Write(data)
@@ -289,7 +279,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func routeToResponse(r *types.Route) RouteResponse {
-	return RouteResponse{
+	rr := RouteResponse{
 		Prefix:    r.Prefix.String(),
 		PeerAddr:  r.PeerAddr.String(),
 		PeerASN:   r.PeerASN,
@@ -305,6 +295,10 @@ func routeToResponse(r *types.Route) RouteResponse {
 		ASPAReason:          r.ASPA.Reason,
 		Posture:             string(r.SecurityPosture),
 	}
+	if h := r.ASPA.FailingHop; h != nil {
+		rr.ASPAFailingHop = &FailingHopResponse{CustomerASN: h.CustomerASN, ProviderASN: h.ProviderASN}
+	}
+	return rr
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

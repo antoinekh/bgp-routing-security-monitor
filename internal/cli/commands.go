@@ -227,6 +227,10 @@ var routesCmd = &cobra.Command{
 
 			ASPAProcedure       string `json:"aspa_procedure"`
 			ASPAProcedureSource string `json:"aspa_procedure_source"`
+			ASPAFailingHop      *struct {
+				CustomerASN uint32 `json:"customer_asn"`
+				ProviderASN uint32 `json:"provider_asn"`
+			} `json:"aspa_failing_hop"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&routes); err != nil {
 			return err
@@ -241,7 +245,7 @@ var routesCmd = &cobra.Command{
 		pw := prefixColWidth(prefixes)
 		fmt.Fprintf(tw, "%-*s\tPEER\tORIGIN\tROV\tASPA\tPOSTURE", pw, "PREFIX")
 		if wide {
-			fmt.Fprint(tw, "\tASPA PROCEDURE\tPROCEDURE SOURCE")
+			fmt.Fprint(tw, "\tASPA PROCEDURE\tPROCEDURE SOURCE\tFAILING HOP")
 		}
 		fmt.Fprintln(tw)
 		for _, r := range routes {
@@ -253,7 +257,11 @@ var routesCmd = &cobra.Command{
 			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s",
 				pw, r.Prefix, r.PeerAddr, origin, r.ROV, r.ASPA, r.Posture)
 			if wide {
-				fmt.Fprintf(tw, "\t%s\t%s", r.ASPAProcedure, r.ASPAProcedureSource)
+				hop := "-"
+				if h := r.ASPAFailingHop; h != nil {
+					hop = fmt.Sprintf("%d->%d", h.CustomerASN, h.ProviderASN)
+				}
+				fmt.Fprintf(tw, "\t%s\t%s\t%s", r.ASPAProcedure, r.ASPAProcedureSource, hop)
 			}
 			fmt.Fprintln(tw)
 			_ = asPathStr
@@ -341,6 +349,16 @@ var watchCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		addr, _ := cmd.Flags().GetString("address")
 		params := url.Values{}
+		// Each filter used to be read here but posture was the only one sent.
+		if v, _ := cmd.Flags().GetString("prefix"); v != "" {
+			params.Set("prefix", v)
+		}
+		if v, _ := cmd.Flags().GetUint32("origin-asn"); v != 0 {
+			params.Set("origin-asn", fmt.Sprintf("%d", v))
+		}
+		if v, _ := cmd.Flags().GetString("peer"); v != "" {
+			params.Set("peer", v)
+		}
 		if v, _ := cmd.Flags().GetString("posture"); v != "" {
 			params.Set("posture", v)
 		}

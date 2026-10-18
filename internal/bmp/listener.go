@@ -439,8 +439,6 @@ func (l *Listener) processMessage(
 		if p, ok := l.peers[key]; ok {
 			p.State = "down"
 			p.LastMsg = time.Now()
-			// The withdraw-all below removes every route this peer held.
-			p.RouteCount = 0
 		}
 		l.peerMu.Unlock()
 		metrics.BMPPeerState.WithLabelValues(sysName, pd.PerPeer.PeerAddr.String()).Set(0)
@@ -483,12 +481,13 @@ func (l *Listener) processMessage(
 			}
 		}
 
-		// Update peer last-message time
+		// Update peer last-message time. Its route count is the route
+		// table's (routetable.Table.PeerRouteCounts), not counted here: an
+		// UPDATE re-announcing a route adds nothing, and withdrawals remove.
 		key := PeerKey{RouterAddr: routerAddr, PeerAddr: rm.PerPeer.PeerAddr}
 		l.peerMu.Lock()
 		if p, ok := l.peers[key]; ok {
 			p.LastMsg = time.Now()
-			p.RouteCount += uint64(len(routes))
 		}
 		l.peerMu.Unlock()
 

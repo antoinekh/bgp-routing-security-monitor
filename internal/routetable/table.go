@@ -62,6 +62,11 @@ type shard struct {
 	// A route is indexed under the OwnerSession and PeerAddr it had when
 	// inserted; neither may change while it is in the table.
 	owned map[ownerKey]routeSet
+
+	// perPeer counts the shard's routes by peer address (unmapped, so an
+	// IPv4 peer counts the same in either form). It changes exactly when
+	// routes does: a key added, or a key removed.
+	perPeer map[netip.Addr]int
 }
 
 type ownerKey struct {
@@ -156,6 +161,7 @@ func New() *Table {
 	for i := range t.shards {
 		t.shards[i].routes = make(map[types.RouteKey]*types.Route)
 		t.shards[i].owned = make(map[ownerKey]routeSet)
+		t.shards[i].perPeer = make(map[netip.Addr]int)
 	}
 	return t
 }
@@ -173,6 +179,9 @@ func (t *Table) Insert(route *types.Route) {
 	s.mu.Lock()
 	old := s.routes[key]
 	s.routes[key] = route
+	if old == nil {
+		s.perPeer[key.PeerAddr.Unmap()]++ // a new key; a re-announcement is not
+	}
 	// Re-inserting the stored pointer itself changes nothing in the owner
 	// index.
 	if old != route {
@@ -294,6 +303,10 @@ func (t *Table) withdrawOne(key types.RouteKey, pred func(*types.Route) bool) bo
 	if exists {
 		delete(s.routes, key)
 		s.disown(route)
+		peer := key.PeerAddr.Unmap()
+		if s.perPeer[peer]--; s.perPeer[peer] <= 0 {
+			delete(s.perPeer, peer)
+		}
 	}
 	s.mu.Unlock()
 
@@ -648,13 +661,16 @@ func (t *Table) GetByPosture(posture types.SecurityPosture) []*types.Route {
 	return t.resolveKeys(keys)
 }
 
+// GetByPeer returns the pre-policy routes from a peer. An IPv4 peer matches
+// in either its plain or its IPv4-mapped IPv6 form.
 func (t *Table) GetByPeer(peerAddr netip.Addr) []*types.Route {
+	peerAddr = peerAddr.Unmap()
 	var routes []*types.Route
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
 		for key, route := range s.routes {
-			if key.PeerAddr == peerAddr && route.RIBType == types.AdjRIBInPre {
+			if key.PeerAddr.Unmap() == peerAddr && route.RIBType == types.AdjRIBInPre {
 				routes = append(routes, route)
 			}
 		}
@@ -704,6 +720,22 @@ func (t *Table) Count() uint64 {
 		s.mu.RUnlock()
 	}
 	return total
+}
+
+// PeerRouteCounts returns how many routes the table holds for each peer
+// address, IPv4 peers under their plain IPv4 form. Peers with none are
+// absent. It reads each shard's counts, not its routes.
+func (t *Table) PeerRouteCounts() map[netip.Addr]uint64 {
+	out := make(map[netip.Addr]uint64)
+	for i := range t.shards {
+		s := &t.shards[i]
+		s.mu.RLock()
+		for p, n := range s.perPeer {
+			out[p] += uint64(n)
+		}
+		s.mu.RUnlock()
+	}
+	return out
 }
 
 // Snapshot returns all routes currently in the table.

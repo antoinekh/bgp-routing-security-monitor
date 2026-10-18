@@ -33,7 +33,7 @@ func TestPeerDownIsNotDroppedWhenIngestIsFull(t *testing.T) {
 	ingest <- types.IngestEvent{Route: &types.Route{}} // channel is now full
 
 	l := NewListener("127.0.0.1:0", nil, ingest, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	l.peers[PeerKey{RouterAddr: router, PeerAddr: peer}] = &Peer{Addr: peer, State: "up", RouteCount: 42}
+	l.peers[PeerKey{RouterAddr: router, PeerAddr: peer}] = &Peer{Addr: peer, State: "up"}
 
 	done := make(chan struct{})
 	go func() {
@@ -65,9 +65,6 @@ func TestPeerDownIsNotDroppedWhenIngestIsFull(t *testing.T) {
 	}
 	if peers[0].State != "down" {
 		t.Errorf("peer state = %q, want down", peers[0].State)
-	}
-	if peers[0].RouteCount != 0 {
-		t.Errorf("peer RouteCount = %d after peer down, want 0", peers[0].RouteCount)
 	}
 }
 
