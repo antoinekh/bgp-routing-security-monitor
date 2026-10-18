@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -17,15 +19,21 @@ import (
 
 // RouteResponse is a single route in API output.
 type RouteResponse struct {
-	Prefix    string   `json:"prefix"`
-	PeerAddr  string   `json:"peer"`
-	PeerASN   uint32   `json:"peer_asn"`
-	OriginASN uint32   `json:"origin_asn"`
-	ASPath    []uint32 `json:"as_path"`
-	NextHop   string   `json:"next_hop"`
-	ROV       string   `json:"rov"`
-	ROVReason string   `json:"rov_reason,omitempty"`
-	ASPA      string   `json:"aspa"`
+	Prefix string `json:"prefix"`
+	// Router is the monitored router (its BMP session's source address);
+	// RouterName its Initiation sysName, when known.
+	Router            string   `json:"router"`
+	RouterName        string   `json:"router_name,omitempty"`
+	PeerDistinguisher string   `json:"peer_distinguisher,omitempty"` // the peer's VRF RD; omitted for global peers
+	PeerAddr          string   `json:"peer"`
+	PeerASN           uint32   `json:"peer_asn"`
+	PathID            uint32   `json:"path_id,omitempty"` // ADD-PATH path identifier
+	OriginASN         uint32   `json:"origin_asn"`
+	ASPath            []uint32 `json:"as_path"`
+	NextHop           string   `json:"next_hop"`
+	ROV               string   `json:"rov"`
+	ROVReason         string   `json:"rov_reason,omitempty"`
+	ASPA              string   `json:"aspa"`
 	// ASPAProcedure is upstream or downstream; ASPAProcedureSource says
 	// whether it came from an aspa-peers entry or the default.
 	ASPAProcedure       string `json:"aspa_procedure"`
@@ -44,15 +52,19 @@ type FailingHopResponse struct {
 	ProviderASN uint32 `json:"provider_asn"`
 }
 
-// PeerResponse is a BMP peer in API output.
+// PeerResponse is a BMP peer in API output: one peer on one router, in one
+// instance.
 type PeerResponse struct {
-	Addr       string `json:"addr"`
-	ASN        uint32 `json:"asn"`
-	RouterID   string `json:"router_id"`
-	State      string `json:"state"`
-	RouteCount uint64 `json:"route_count"`
-	UpSince    string `json:"up_since"`
-	LastMsg    string `json:"last_msg"`
+	Router            string `json:"router"`
+	RouterName        string `json:"router_name,omitempty"`
+	PeerDistinguisher string `json:"peer_distinguisher,omitempty"`
+	Addr              string `json:"addr"`
+	ASN               uint32 `json:"asn"`
+	RouterID          string `json:"router_id"`
+	State             string `json:"state"`
+	RouteCount        uint64 `json:"route_count"`
+	UpSince           string `json:"up_since"`
+	LastMsg           string `json:"last_msg"`
 }
 
 // StatusResponse is the system health API output.
@@ -87,6 +99,8 @@ type WatchEvent struct {
 type Server struct {
 	table     *routetable.Table
 	bmpListen *bmp.Listener
+	// routers names the monitored routers: the BMP listener in production.
+	routers   routerDirectory
 	vrpStore  *store.VRPStore
 	log       *slog.Logger
 	version   string
@@ -110,6 +124,9 @@ func NewServer(table *routetable.Table, bmpListen *bmp.Listener, vrpStore *store
 		watchSubs: make(map[chan RouteResponse]*routeFilter),
 		mux:       http.NewServeMux(),
 	}
+	if bmpListen != nil {
+		s.routers = bmpListen
+	}
 	s.mux.HandleFunc("/api/v1/routes", s.handleRoutes)
 	s.mux.HandleFunc("/api/v1/peers", s.handlePeers)
 	s.mux.HandleFunc("/api/v1/status", s.handleStatus)
@@ -131,7 +148,7 @@ func (s *Server) NotifyRoute(route *types.Route) {
 			continue
 		}
 		if !built {
-			rr, built = routeToResponse(route), true
+			rr, built = routeToResponse(route, s.routerName(route.Router)), true
 		}
 		select {
 		case ch <- rr:
@@ -174,16 +191,22 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
-	f, err := parseRouteFilter(r.URL.Query())
+	f, err := parseRouteFilter(r.URL.Query(), s.routersNamed)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	routes := f.routes(s.table)
 
+	names := map[netip.Addr]string{} // looked up once per router
 	resp := make([]RouteResponse, 0, len(routes))
 	for _, route := range routes {
-		resp = append(resp, routeToResponse(route))
+		name, ok := names[route.Router]
+		if !ok {
+			name = s.routerName(route.Router)
+			names[route.Router] = name
+		}
+		resp = append(resp, routeToResponse(route, name))
 	}
 
 	writeJSON(w, resp)
@@ -194,23 +217,67 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 }
 
 // peerResponses lists the BMP peers, each with the number of its routes the
-// route table holds now.
+// route table holds now: counted per router, per instance, per address.
 func (s *Server) peerResponses() []PeerResponse {
 	peers := s.bmpListen.GetPeers()
 	counts := s.table.PeerRouteCounts()
 	resp := make([]PeerResponse, 0, len(peers))
 	for _, p := range peers {
 		resp = append(resp, PeerResponse{
-			Addr:       p.Addr.String(),
-			ASN:        p.ASN,
-			RouterID:   p.RouterID.String(),
-			State:      p.State,
-			RouteCount: counts[p.Addr.Unmap()],
-			UpSince:    p.UpSince.Format(time.RFC3339),
-			LastMsg:    p.LastMsg.Format(time.RFC3339),
+			Router:            p.Router.String(),
+			RouterName:        s.routerName(p.Router),
+			PeerDistinguisher: FormatRD(p.Distinguisher),
+			Addr:              p.Addr.String(),
+			ASN:               p.ASN,
+			RouterID:          p.RouterID.String(),
+			State:             p.State,
+			RouteCount:        counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)],
+			UpSince:           p.UpSince.Format(time.RFC3339),
+			LastMsg:           p.LastMsg.Format(time.RFC3339),
 		})
 	}
 	return resp
+}
+
+// routerDirectory maps monitored routers to their BMP Initiation sysNames.
+type routerDirectory interface {
+	RouterName(router netip.Addr) string
+	RoutersNamed(name string) []netip.Addr
+}
+
+// routerName returns a router's BMP Initiation sysName, or "" if unknown.
+func (s *Server) routerName(router netip.Addr) string {
+	if s.routers == nil {
+		return ""
+	}
+	return s.routers.RouterName(router)
+}
+
+// routersNamed returns the routers whose sysName is name.
+func (s *Server) routersNamed(name string) []netip.Addr {
+	if s.routers == nil {
+		return nil
+	}
+	return s.routers.RoutersNamed(name)
+}
+
+// FormatRD renders a Peer Distinguisher as a route distinguisher (RFC 4364
+// §4.2): type 0 "ASN:n", type 1 "IPv4:n", type 2 "ASN4:n"; any other value
+// in hex. Zero (a global-instance peer) renders as "".
+func FormatRD(rd uint64) string {
+	if rd == 0 {
+		return ""
+	}
+	switch rd >> 48 {
+	case 0:
+		return fmt.Sprintf("%d:%d", (rd>>32)&0xffff, rd&0xffffffff)
+	case 1:
+		ip := netip.AddrFrom4([4]byte{byte(rd >> 40), byte(rd >> 32), byte(rd >> 24), byte(rd >> 16)})
+		return fmt.Sprintf("%s:%d", ip, rd&0xffff)
+	case 2:
+		return fmt.Sprintf("%d:%d", (rd>>16)&0xffffffff, rd&0xffff)
+	}
+	return fmt.Sprintf("0x%016x", rd)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +314,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := parseRouteFilter(r.URL.Query())
+	f, err := parseRouteFilter(r.URL.Query(), s.routersNamed)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -286,17 +353,23 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func routeToResponse(r *types.Route) RouteResponse {
+// routeToResponse is r in API output; routerName is its router's sysName,
+// "" if unknown.
+func routeToResponse(r *types.Route, routerName string) RouteResponse {
 	rr := RouteResponse{
-		Prefix:    r.Prefix.String(),
-		PeerAddr:  r.PeerAddr.String(),
-		PeerASN:   r.PeerASN,
-		OriginASN: r.OriginASN(),
-		ASPath:    r.ASPath,
-		NextHop:   r.NextHop.String(),
-		ROV:       r.ROV.State.String(),
-		ROVReason: r.ROV.Reason,
-		ASPA:      r.ASPA.State.String(),
+		Prefix:            r.Prefix.String(),
+		Router:            r.Router.String(),
+		RouterName:        routerName,
+		PeerDistinguisher: FormatRD(r.PeerDistinguisher),
+		PeerAddr:          r.PeerAddr.String(),
+		PeerASN:           r.PeerASN,
+		PathID:            r.PathID,
+		OriginASN:         r.OriginASN(),
+		ASPath:            r.ASPath,
+		NextHop:           r.NextHop.String(),
+		ROV:               r.ROV.State.String(),
+		ROVReason:         r.ROV.Reason,
+		ASPA:              r.ASPA.State.String(),
 
 		ASPAProcedure:       r.ASPA.Procedure.String(),
 		ASPAProcedureSource: r.ASPA.ProcedureSource.String(),

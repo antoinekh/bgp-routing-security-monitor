@@ -70,7 +70,7 @@ func TestRevalidationPostureFlipsLeaveNoStaleIndexKeys(t *testing.T) {
 		}
 	}
 
-	key := types.RouteKey{PeerAddr: route.PeerAddr, Prefix: route.Prefix, RIBType: route.RIBType}
+	key := types.RouteKey{Peer: types.PeerRef{Addr: route.PeerAddr}, Prefix: route.Prefix, RIBType: route.RIBType}
 	flip := func(step string, want types.SecurityPosture) {
 		t.Helper()
 		before := table.Get(key)
@@ -97,7 +97,7 @@ func TestRevalidationPostureFlipsLeaveNoStaleIndexKeys(t *testing.T) {
 		t.Errorf("a pass with no store change replaced %d routes, want 0", rv.Changed)
 	}
 
-	table.Withdraw(route.PeerAddr, route.Prefix)
+	table.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: route.PeerAddr}, Prefix: route.Prefix})
 	for posture, n := range table.CountByPosture() {
 		if n != 0 {
 			t.Errorf("after withdrawal: posture index %q still counts %d route(s), want 0", posture, n)
@@ -143,7 +143,7 @@ func TestRevalidationKeepsMidPassWithdrawalsWithdrawn(t *testing.T) {
 	const n = 3000
 	_, table, _, routes, rv := midPassFixture(t, n)
 	for _, r := range routes {
-		table.Withdraw(r.PeerAddr, r.Prefix)
+		table.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: r.PeerAddr}, Prefix: r.Prefix})
 	}
 	for !rv.Step(64) {
 	}
@@ -175,7 +175,7 @@ func TestRevalidationKeepsMidPassReannouncements(t *testing.T) {
 	for !rv.Step(64) {
 	}
 	for i, old := range routes {
-		cur := table.Get(types.RouteKey{PeerAddr: old.PeerAddr, Prefix: old.Prefix, RIBType: old.RIBType})
+		cur := table.Get(types.RouteKey{Peer: types.PeerRef{Addr: old.PeerAddr}, Prefix: old.Prefix, RIBType: old.RIBType})
 		if cur == nil || cur == old || cur.OwnerSession != 2 || cur.NextHop != newHop {
 			t.Fatalf("route %d = %+v after the pass, want session 2's announcement", i, cur)
 		}
@@ -255,7 +255,7 @@ func TestRevalidationUsesSelectedASPAProcedure(t *testing.T) {
 	if rv := revalidateAll(e); rv.Changed != 1 {
 		t.Fatalf("pass changed %d routes, want 1", rv.Changed)
 	}
-	got := table.Get(types.RouteKey{PeerAddr: route.PeerAddr, Prefix: route.Prefix, RIBType: route.RIBType}).ASPA
+	got := table.Get(types.RouteKey{Peer: types.PeerRef{Addr: route.PeerAddr}, Prefix: route.Prefix, RIBType: route.RIBType}).ASPA
 	if got.State != types.ASPAValid || got.Procedure != types.ASPADownstream || got.ProcedureSource != types.ASPASourceConfigAddress {
 		t.Fatalf("revalidated ASPA = %s/%s/%s, want Valid/downstream/config-address", got.State, got.Procedure, got.ProcedureSource)
 	}

@@ -46,9 +46,11 @@ type Listener struct {
 }
 
 // routerInfo is what Initiation told us about a router, and which session
-// told us.
+// told us. sysName is the metrics label (the address when Initiation gave
+// no name); name is the sysName as sent, empty if none.
 type routerInfo struct {
 	sysName string
+	name    string
 	session uint64
 }
 
@@ -146,8 +148,8 @@ func (l *Listener) emitFrom(ctx context.Context, sess *bmpSession, ev types.Inge
 // therefore look like a single router reconnecting, and each new session
 // from any of them supersedes, and closes, the others'.
 func (l *Listener) register(conn net.Conn) (sess, old *bmpSession) {
-	routerAddr, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
-	sess = &bmpSession{id: l.lastSession.Add(1), router: routerAddr.Addr(), conn: conn}
+	routerAddr, _ := remoteIP(conn)
+	sess = &bmpSession{id: l.lastSession.Add(1), router: routerAddr.Unmap(), conn: conn}
 	l.sessMu.Lock()
 	old = l.sessions[sess.router]
 	l.sessions[sess.router] = sess
@@ -317,6 +319,28 @@ func (l *Listener) GetPeers() []Peer {
 	return result
 }
 
+// RouterName returns the sysName a router sent in its BMP Initiation, or ""
+// if it sent none or has no session now.
+func (l *Listener) RouterName(router netip.Addr) string {
+	l.routerMu.RLock()
+	defer l.routerMu.RUnlock()
+	return l.routers[router.Unmap()].name
+}
+
+// RoutersNamed returns the routers with a session now whose Initiation
+// sysName is name.
+func (l *Listener) RoutersNamed(name string) []netip.Addr {
+	l.routerMu.RLock()
+	defer l.routerMu.RUnlock()
+	var out []netip.Addr
+	for addr, r := range l.routers {
+		if r.name != "" && r.name == name {
+			out = append(out, addr)
+		}
+	}
+	return out
+}
+
 // GetRouterStates returns the current BMP session state for every router
 // that has sent an Initiation message. Only up sessions appear (1=up);
 // sessions that disconnected are removed from the map by handleSession.
@@ -462,7 +486,7 @@ func (l *Listener) processMessage(
 			sysName = routerAddr.String()
 		}
 		l.routerMu.Lock()
-		l.routers[routerAddr] = routerInfo{sysName: sysName, session: sess.id}
+		l.routers[routerAddr] = routerInfo{sysName: sysName, name: init.SysName, session: sess.id}
 		l.routerMu.Unlock()
 		metrics.BMPSessionState.WithLabelValues(sysName).Set(1)
 		log.Info("BMP initiation", "sysName", sysName, "sysDescr", init.SysDescr)
@@ -473,7 +497,7 @@ func (l *Listener) processMessage(
 			log.Error("failed to parse peer up", "error", err)
 			return
 		}
-		key := PeerKey{RouterAddr: routerAddr, PeerAddr: pu.PerPeer.PeerAddr}
+		key := peerKey(routerAddr, pu.PerPeer)
 		l.routerMu.RLock()
 		sysName := l.routers[routerAddr].sysName
 		l.routerMu.RUnlock()
@@ -482,15 +506,19 @@ func (l *Listener) processMessage(
 		}
 		l.peerMu.Lock()
 		l.peers[key] = &Peer{
-			Addr:     pu.PerPeer.PeerAddr,
-			ASN:      pu.PerPeer.PeerASN,
-			LocalASN: pu.LocalASN,
-			RouterID: pu.PerPeer.PeerBGPID,
-			SysName:  sysName,
-			State:    "up",
-			UpSince:  time.Now(),
-			LastMsg:  time.Now(),
-			session:  sess.id,
+			Router:        routerAddr,
+			Distinguisher: key.Distinguisher,
+			PeerType:      pu.PerPeer.PeerType,
+			Addr:          pu.PerPeer.PeerAddr,
+			ASN:           pu.PerPeer.PeerASN,
+			LocalASN:      pu.LocalASN,
+			RouterID:      pu.PerPeer.PeerBGPID,
+			SysName:       sysName,
+			State:         "up",
+			UpSince:       time.Now(),
+			LastMsg:       time.Now(),
+			session:       sess.id,
+			addPath:       pu.AddPath,
 		}
 		l.peerMu.Unlock()
 		metrics.BMPPeerState.WithLabelValues(sysName, pu.PerPeer.PeerAddr.String()).Set(1)
@@ -500,6 +528,8 @@ func (l *Listener) processMessage(
 			"asn", pu.PerPeer.PeerASN,
 			"local_asn", pu.LocalASN,
 			"router_id", pu.PerPeer.PeerBGPID,
+			"peer_distinguisher", key.Distinguisher,
+			"add_path_in", pu.AddPath.In, "add_path_out", pu.AddPath.Out,
 		)
 
 	case MsgTypePeerDown:
@@ -508,7 +538,7 @@ func (l *Listener) processMessage(
 			log.Error("failed to parse peer down", "error", err)
 			return
 		}
-		key := PeerKey{RouterAddr: routerAddr, PeerAddr: pd.PerPeer.PeerAddr}
+		key := peerKey(routerAddr, pd.PerPeer)
 		l.routerMu.RLock()
 		sysName := l.routers[routerAddr].sysName
 		l.routerMu.RUnlock()
@@ -527,8 +557,10 @@ func (l *Listener) processMessage(
 		// Implicitly withdraw everything the peer advertised, as a real BGP
 		// session going down would.
 		l.emitFrom(ctx, sess, types.IngestEvent{Withdrawal: &types.Withdrawal{
-			PeerAddr:    pd.PerPeer.PeerAddr,
-			WithdrawAll: true,
+			Router:            routerAddr,
+			PeerDistinguisher: key.Distinguisher,
+			PeerAddr:          pd.PerPeer.PeerAddr,
+			WithdrawAll:       true,
 		}})
 
 	case MsgTypeRouteMonitoring:
@@ -564,7 +596,7 @@ func (l *Listener) processMessage(
 		// Update peer last-message time. Its route count is the route
 		// table's (routetable.Table.PeerRouteCounts), not counted here: an
 		// UPDATE re-announcing a route adds nothing, and withdrawals remove.
-		key := PeerKey{RouterAddr: routerAddr, PeerAddr: rm.PerPeer.PeerAddr}
+		key := peerKey(routerAddr, rm.PerPeer)
 		l.peerMu.Lock()
 		if p, ok := l.peers[key]; ok {
 			p.LastMsg = time.Now()
@@ -588,8 +620,13 @@ func (l *Listener) processMessage(
 	}
 }
 
-// parseRoutes converts a BMP Route Monitoring message into internal Route objects
-// using GoBGP's BGP UPDATE parser.
+// peerKey is the peer a per-peer header describes on router.
+func peerKey(router netip.Addr, pph BMPPerPeerHeader) PeerKey {
+	return PeerKey{RouterAddr: router, Distinguisher: pph.Distinguisher(), PeerAddr: pph.PeerAddr}
+}
+
+// parseRoutes converts a BMP Route Monitoring message into internal Route
+// objects with RAVEN's own BGP UPDATE decoder (parseBGPUpdate).
 func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]types.Route, []types.Withdrawal, error) {
 	bgpData := rm.BGPUpdateData
 
@@ -613,18 +650,21 @@ func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]
 	// Parse the BGP UPDATE body (after the 19-byte header)
 	updateBody := bgpData[19:bgpLength]
 
-	// Look up the monitoring router's own AS on this session, learned from
-	// the Peer Up message's Sent OPEN (see ParsePeerUp), and record it on
-	// each route.
-	key := PeerKey{RouterAddr: routerAddr, PeerAddr: rm.PerPeer.PeerAddr}
+	// Look up, from the peer's Peer Up, the monitoring router's own AS on
+	// this session (recorded on each route) and where ADD-PATH is in effect
+	// (the decoder must know: path identifiers change the NLRI layout). A
+	// peer with no Peer Up seen is taken as without ADD-PATH.
+	key := peerKey(routerAddr, rm.PerPeer)
 	l.peerMu.RLock()
 	var localASN uint32
+	var addPath AddPathState
 	if p, ok := l.peers[key]; ok {
-		localASN = p.LocalASN
+		localASN, addPath = p.LocalASN, p.addPath
 	}
 	l.peerMu.RUnlock()
 
-	routes, withdrawals, err := parseBGPUpdate(updateBody, rm.PerPeer, localASN)
+	routes, withdrawals, err := parseBGPUpdate(updateBody, rm.PerPeer, routerAddr, localASN,
+		addPath.For(rm.PerPeer.IsAdjRIBOut()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse BGP UPDATE: %w", err)
 	}
@@ -635,7 +675,9 @@ func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]
 //
 // Handles both IPv4 NLRI (carried directly in the UPDATE body) and IPv6 NLRI
 // (carried inside MP_REACH_NLRI / MP_UNREACH_NLRI path attributes per RFC 4760).
-func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, localASN uint32) ([]types.Route, []types.Withdrawal, error) {
+// addPath lists the address families whose NLRI carry ADD-PATH path
+// identifiers (RFC 7911 §3).
+func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localASN uint32, addPath AFIMask) ([]types.Route, []types.Withdrawal, error) {
 	if len(data) < 4 {
 		return nil, nil, nil
 	}
@@ -648,13 +690,9 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, localASN uint32) ([]types
 	withdrawnLen := binary.BigEndian.Uint16(data[0:2])
 	var withdrawals []types.Withdrawal
 	if withdrawnLen > 0 {
-		v4Withdrawals := parseNLRI(data[2:2+int(withdrawnLen)], 4)
-		for _, p := range v4Withdrawals {
-			withdrawals = append(withdrawals, types.Withdrawal{
-				PeerAddr: pph.PeerAddr,
-				Prefix:   p,
-				RIBType:  ribType,
-			})
+		v4Withdrawals := parseNLRI(data[2:2+int(withdrawnLen)], 4, addPath&AFIIPv4Unicast != 0)
+		for _, n := range v4Withdrawals {
+			withdrawals = append(withdrawals, makeWithdrawal(n, pph, router, ribType))
 		}
 	}
 
@@ -678,60 +716,91 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, localASN uint32) ([]types
 
 	// Parse IPv4 NLRI (remaining bytes after path attributes)
 	var routes []types.Route
-	v4Prefixes := parseNLRI(data[offset:], 4)
-	for _, prefix := range v4Prefixes {
-		routes = append(routes, makeRoute(prefix, attrs.nextHop, pph, attrs, ribType, localASN))
+	v4Prefixes := parseNLRI(data[offset:], 4, addPath&AFIIPv4Unicast != 0)
+	for _, n := range v4Prefixes {
+		routes = append(routes, makeRoute(n, attrs.nextHop, pph, router, attrs, ribType, localASN))
 	}
 
 	// Parse IPv6 NLRI carried inside MP_REACH_NLRI (AFI=2, SAFI=1)
 	if len(attrs.mpReach) > 0 {
-		nh, prefixes := parseMPReachNLRI(attrs.mpReach)
-		for _, p := range prefixes {
-			routes = append(routes, makeRoute(p, nh, pph, attrs, ribType, localASN))
+		nh, prefixes := parseMPReachNLRI(attrs.mpReach, addPath&AFIIPv6Unicast != 0)
+		for _, n := range prefixes {
+			routes = append(routes, makeRoute(n, nh, pph, router, attrs, ribType, localASN))
 		}
 	}
 
 	// Parse IPv6 withdrawals carried inside MP_UNREACH_NLRI (AFI=2, SAFI=1)
 	if len(attrs.mpUnreach) > 0 {
-		prefixes := parseMPUnreachNLRI(attrs.mpUnreach)
-		for _, p := range prefixes {
-			withdrawals = append(withdrawals, types.Withdrawal{
-				PeerAddr: pph.PeerAddr,
-				Prefix:   p,
-				RIBType:  ribType,
-			})
+		prefixes := parseMPUnreachNLRI(attrs.mpUnreach, addPath&AFIIPv6Unicast != 0)
+		for _, n := range prefixes {
+			withdrawals = append(withdrawals, makeWithdrawal(n, pph, router, ribType))
 		}
 	}
 
 	return routes, withdrawals, nil
 }
 
-// makeRoute constructs a types.Route from a prefix, next hop, and extracted path attributes.
-func makeRoute(prefix netip.Prefix, nextHop netip.Addr, pph BMPPerPeerHeader, attrs pathAttrs, ribType types.RIBType, localASN uint32) types.Route {
+// makeRoute constructs a types.Route from an NLRI entry, next hop, and
+// extracted path attributes.
+func makeRoute(n nlri, nextHop netip.Addr, pph BMPPerPeerHeader, router netip.Addr, attrs pathAttrs, ribType types.RIBType, localASN uint32) types.Route {
 	return types.Route{
-		Timestamp:        pph.Timestamp,
-		PeerAddr:         pph.PeerAddr,
-		PeerASN:          pph.PeerASN,
-		LocalASN:         localASN,
-		RouterID:         pph.PeerBGPID,
-		Prefix:           prefix,
-		ASPath:           attrs.asPath,
-		ASPathRaw:        attrs.asPathRaw,
-		Origin:           types.OriginType(attrs.origin),
-		NextHop:          nextHop,
-		Communities:      attrs.communities,
-		LargeCommunities: attrs.largeCommunities,
-		RIBType:          ribType,
+		Timestamp:         pph.Timestamp,
+		Router:            router,
+		PeerDistinguisher: pph.Distinguisher(),
+		PeerType:          pph.PeerType,
+		PeerAddr:          pph.PeerAddr,
+		PeerASN:           pph.PeerASN,
+		PathID:            n.pathID,
+		LocalASN:          localASN,
+		RouterID:          pph.PeerBGPID,
+		Prefix:            n.prefix,
+		ASPath:            attrs.asPath,
+		ASPathRaw:         attrs.asPathRaw,
+		Origin:            types.OriginType(attrs.origin),
+		NextHop:           nextHop,
+		Communities:       attrs.communities,
+		LargeCommunities:  attrs.largeCommunities,
+		RIBType:           ribType,
 	}
+}
+
+// makeWithdrawal constructs a types.Withdrawal for an NLRI entry.
+func makeWithdrawal(n nlri, pph BMPPerPeerHeader, router netip.Addr, ribType types.RIBType) types.Withdrawal {
+	return types.Withdrawal{
+		Router:            router,
+		PeerDistinguisher: pph.Distinguisher(),
+		PeerAddr:          pph.PeerAddr,
+		Prefix:            n.prefix,
+		PathID:            n.pathID,
+		RIBType:           ribType,
+	}
+}
+
+// nlri is one NLRI entry: a prefix and, with ADD-PATH, its path identifier.
+type nlri struct {
+	prefix netip.Prefix
+	pathID uint32
 }
 
 // parseNLRI iterates length-prefixed NLRI entries. addrLen is 4 for IPv4 NLRI
 // or 16 for IPv6 NLRI; it bounds how many bytes are read into the address slot.
-func parseNLRI(data []byte, addrLen int) []netip.Prefix {
-	var out []netip.Prefix
+// With addPath each entry starts with a 4-byte path identifier (RFC 7911 §3).
+func parseNLRI(data []byte, addrLen int, addPath bool) []nlri {
+	var out []nlri
 	off := 0
 	maxBits := addrLen * 8
 	for off < len(data) {
+		var pathID uint32
+		if addPath {
+			if off+4 > len(data) {
+				break
+			}
+			pathID = binary.BigEndian.Uint32(data[off : off+4])
+			off += 4
+			if off >= len(data) {
+				break
+			}
+		}
 		pLen := int(data[off])
 		off++
 		if pLen > maxBits {
@@ -748,7 +817,7 @@ func parseNLRI(data []byte, addrLen int) []netip.Prefix {
 		if !ok {
 			continue
 		}
-		out = append(out, netip.PrefixFrom(addr.Unmap(), pLen))
+		out = append(out, nlri{prefix: netip.PrefixFrom(addr.Unmap(), pLen), pathID: pathID})
 	}
 	return out
 }
@@ -761,7 +830,7 @@ func parseNLRI(data []byte, addrLen int) []netip.Prefix {
 // Only AFI=2 (IPv6) SAFI=1 (unicast) is handled; other combinations are ignored.
 // For IPv6 the next hop is 16 bytes (global) or 32 bytes (global + link-local);
 // the link-local is dropped — RAVEN only records the global address.
-func parseMPReachNLRI(data []byte) (netip.Addr, []netip.Prefix) {
+func parseMPReachNLRI(data []byte, addPath bool) (netip.Addr, []nlri) {
 	if len(data) < 5 {
 		return netip.Addr{}, nil
 	}
@@ -786,7 +855,7 @@ func parseMPReachNLRI(data []byte) (netip.Addr, []netip.Prefix) {
 	if nlriStart > len(data) {
 		return nextHop, nil
 	}
-	return nextHop, parseNLRI(data[nlriStart:], 16)
+	return nextHop, parseNLRI(data[nlriStart:], 16, addPath)
 }
 
 // parseMPUnreachNLRI parses an MP_UNREACH_NLRI attribute payload (RFC 4760 §4).
@@ -795,7 +864,7 @@ func parseMPReachNLRI(data []byte) (netip.Addr, []netip.Prefix) {
 //	AFI(2) | SAFI(1) | Withdrawn NLRI(variable)
 //
 // Only AFI=2 (IPv6) SAFI=1 (unicast) is handled.
-func parseMPUnreachNLRI(data []byte) []netip.Prefix {
+func parseMPUnreachNLRI(data []byte, addPath bool) []nlri {
 	if len(data) < 3 {
 		return nil
 	}
@@ -804,7 +873,7 @@ func parseMPUnreachNLRI(data []byte) []netip.Prefix {
 	if afi != 2 || safi != 1 {
 		return nil
 	}
-	return parseNLRI(data[3:], 16)
+	return parseNLRI(data[3:], 16, addPath)
 }
 
 // pathAttrs collects the path-attribute fields RAVEN cares about, plus the raw

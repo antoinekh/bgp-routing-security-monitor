@@ -95,6 +95,34 @@ type BMPPeerUp struct {
 	// 4-octet AS Number capability, RFC 6793, when present). Zero if the
 	// embedded OPEN message could not be parsed.
 	LocalASN uint32
+	// AddPath is where ADD-PATH path identifiers are in use on this
+	// session, from the Sent and Received OPEN messages.
+	AddPath AddPathState
+}
+
+// AFIMask is a set of address families.
+type AFIMask uint8
+
+const (
+	AFIIPv4Unicast AFIMask = 1 << iota
+	AFIIPv6Unicast
+)
+
+// AddPathState says, per address family, whether a peer's BGP updates carry
+// ADD-PATH path identifiers (RFC 7911): In for the updates the monitored
+// router receives from the peer (Adj-RIB-In), Out for those it sends it
+// (Adj-RIB-Out). Decoding NLRI with the wrong setting misreads every prefix.
+type AddPathState struct {
+	In, Out AFIMask
+}
+
+// For returns the address families with path identifiers in updates of the
+// given direction.
+func (a AddPathState) For(adjRIBOut bool) AFIMask {
+	if adjRIBOut {
+		return a.Out
+	}
+	return a.In
 }
 
 // BMPPeerDown represents a BMP Peer Down message (Type 2).
@@ -104,10 +132,10 @@ type BMPPeerDown struct {
 }
 
 // BMPRouteMonitoring represents a BMP Route Monitoring message (Type 0).
-// The BGP UPDATE is parsed separately using GoBGP.
+// The BGP UPDATE is decoded separately (parseBGPUpdate).
 type BMPRouteMonitoring struct {
 	PerPeer       BMPPerPeerHeader
-	BGPUpdateData []byte // raw BGP UPDATE PDU for GoBGP to parse
+	BGPUpdateData []byte // raw BGP UPDATE PDU
 }
 
 // BMPStatsReport represents a BMP Statistics Report (Type 1).
@@ -118,21 +146,29 @@ type BMPStatsReport struct {
 
 // Peer is the runtime state RAVEN maintains per BMP peer session.
 type Peer struct {
-	Addr     netip.Addr
-	ASN      uint32
-	LocalASN uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
-	RouterID netip.Addr
-	SysName  string
-	SysDescr string
-	State    string // "up" or "down"
-	UpSince  time.Time
-	LastMsg  time.Time
+	// Router is the monitored router the peer is on: its BMP session's
+	// source address. Distinguisher and PeerType are from the per-peer
+	// header.
+	Router        netip.Addr
+	Distinguisher uint64
+	PeerType      uint8
+	Addr          netip.Addr
+	ASN           uint32
+	LocalASN      uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
+	RouterID      netip.Addr
+	SysName       string
+	SysDescr      string
+	State         string // "up" or "down"
+	UpSince       time.Time
+	LastMsg       time.Time
 
-	session uint64 // ID of the BMP session whose Peer Up created this entry
+	session uint64       // ID of the BMP session whose Peer Up created this entry
+	addPath AddPathState // from Peer Up
 }
 
 // PeerKey uniquely identifies a BMP peer.
 type PeerKey struct {
-	RouterAddr netip.Addr // the BMP session source (router)
-	PeerAddr   netip.Addr // the BGP peer on that router
+	RouterAddr    netip.Addr // the BMP session source (router)
+	Distinguisher uint64     // the peer's instance on that router (0 = global)
+	PeerAddr      netip.Addr // the BGP peer on that router
 }

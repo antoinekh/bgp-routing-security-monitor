@@ -1,7 +1,9 @@
 package server
 
 import (
+	"github.com/nokia/bgp-routing-security-monitor/internal/api"
 	ravenotel "github.com/nokia/bgp-routing-security-monitor/internal/otel"
+	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
 // Verify at compile time that *Server implements ravenotel.StateReader.
@@ -37,10 +39,12 @@ func (s *Server) PeerRouteCounts() []ravenotel.PeerRouteCount {
 	result := make([]ravenotel.PeerRouteCount, 0, len(peers))
 	for _, p := range peers {
 		result = append(result, ravenotel.PeerRouteCount{
-			PeerAddr: p.Addr.String(),
-			PeerASN:  p.ASN,
-			Posture:  "unverified", // per-peer posture not tracked; use "unverified"
-			Count:    int64(counts[p.Addr.Unmap()]),
+			Router:            p.Router.String(),
+			PeerDistinguisher: api.FormatRD(p.Distinguisher),
+			PeerAddr:          p.Addr.String(),
+			PeerASN:           p.ASN,
+			Posture:           "unverified", // per-peer posture not tracked; use "unverified"
+			Count:             int64(counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)]),
 		})
 	}
 	return result

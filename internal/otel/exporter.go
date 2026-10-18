@@ -249,10 +249,13 @@ func (e *Exporter) collect(_ context.Context, o otelmetric.Observer) error {
 		}
 	}
 
-	// raven.peer.routes — labels: peer_addr, peer_asn, posture
+	// raven.peer.routes — labels: router, peer_distinguisher, peer_addr,
+	// peer_asn, posture
 	for _, p := range r.PeerRouteCounts() {
 		o.ObserveInt64(e.peerRoutes, p.Count,
 			otelmetric.WithAttributes(
+				attribute.String("router", p.Router),
+				attribute.String("peer_distinguisher", p.PeerDistinguisher),
 				attribute.String("peer_addr", p.PeerAddr),
 				attribute.Int64("peer_asn", int64(p.PeerASN)),
 				attribute.String("posture", p.Posture),

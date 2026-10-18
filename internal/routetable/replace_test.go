@@ -24,7 +24,7 @@ func TestReplacePostureChangeIsIndexedOnce(t *testing.T) {
 	r := ownedRoute(netip.MustParseAddr("192.0.2.1"), 1, 3)
 	r.SecurityPosture = types.PostureSecured
 	tbl.Insert(r)
-	key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
+	key := types.RouteKey{Peer: types.PeerRef{Addr: r.PeerAddr}, Prefix: r.Prefix, RIBType: r.RIBType}
 
 	cur := r
 	flips := []types.SecurityPosture{
@@ -54,7 +54,7 @@ func TestReplacePostureChangeIsIndexedOnce(t *testing.T) {
 		}
 	}
 
-	tbl.Withdraw(key.PeerAddr, key.Prefix)
+	tbl.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: key.Peer.Addr}, Prefix: key.Prefix})
 	if got := postureListings(tbl, key); len(got) != 0 {
 		t.Errorf("after withdrawal: key still listed under postures %v", got)
 	}
@@ -75,7 +75,7 @@ func TestReplaceSkipsRoutesNoLongerCurrent(t *testing.T) {
 
 	withdrawn := ownedRoute(p, 1, 1)
 	tbl.Insert(withdrawn)
-	tbl.Withdraw(p, withdrawn.Prefix)
+	tbl.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: p}, Prefix: withdrawn.Prefix})
 	if tbl.Replace(withdrawn, revalidatedCopy(withdrawn, types.PostureOriginInvalid)) {
 		t.Error("Replace brought a withdrawn route back")
 	}
@@ -87,7 +87,7 @@ func TestReplaceSkipsRoutesNoLongerCurrent(t *testing.T) {
 	if tbl.Replace(old, revalidatedCopy(old, types.PostureOriginInvalid)) {
 		t.Error("Replace swapped a stale route over a newer announcement")
 	}
-	if got := tbl.Get(types.RouteKey{PeerAddr: p, Prefix: newer.Prefix}); got != newer {
+	if got := tbl.Get(types.RouteKey{Peer: types.PeerRef{Addr: p}, Prefix: newer.Prefix}); got != newer {
 		t.Errorf("table holds %+v, want the newer announcement", got)
 	}
 
@@ -153,7 +153,7 @@ func TestEvictStaleKeepsRouteConfirmedAfterScan(t *testing.T) {
 	if got := tbl.evictStale(keys); got != 1 {
 		t.Errorf("evicted %d routes, want 1 (the unconfirmed one)", got)
 	}
-	if got := tbl.Get(types.RouteKey{PeerAddr: p, Prefix: confirmed.Prefix}); got != confirmed {
+	if got := tbl.Get(types.RouteKey{Peer: types.PeerRef{Addr: p}, Prefix: confirmed.Prefix}); got != confirmed {
 		t.Errorf("confirmed route = %+v after eviction, want it kept", got)
 	}
 	if got, want := ownerIndexSize(t, tbl), int(tbl.Count()); got != want || want != 1 {

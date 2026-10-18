@@ -49,7 +49,7 @@ func sessionEnd(s *Server, session uint64) {
 // lookup returns the route testRoute(peer, i) in the table, or nil.
 func lookup(s *Server, peer netip.Addr, i int) *types.Route {
 	r := testRoute(peer, i, "")
-	return s.table.Get(types.RouteKey{PeerAddr: peer, Prefix: r.Prefix, RIBType: r.RIBType})
+	return s.table.Get(types.RouteKey{Peer: types.PeerRef{Addr: peer}, Prefix: r.Prefix, RIBType: r.RIBType})
 }
 
 func seq(from, to int) []int {

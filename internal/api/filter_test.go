@@ -163,12 +163,12 @@ func TestWatchFilters(t *testing.T) {
 // The failing ASPA hop is in the route JSON, and absent when there is none.
 func TestRouteJSONFailingHop(t *testing.T) {
 	r := &types.Route{Prefix: netip.MustParsePrefix("145.102.136.0/22"), ASPath: []uint32{65000, 1199}}
-	b, _ := json.Marshal(routeToResponse(r))
+	b, _ := json.Marshal(routeToResponse(r, ""))
 	if strings.Contains(string(b), "aspa_failing_hop") {
 		t.Errorf("JSON %s has aspa_failing_hop with no failing hop", b)
 	}
 	r.ASPA.FailingHop = &types.ASPAHop{CustomerASN: 1199, ProviderASN: 65000, Authorization: types.HopNotAuthorized}
-	b, _ = json.Marshal(routeToResponse(r))
+	b, _ = json.Marshal(routeToResponse(r, ""))
 	if !strings.Contains(string(b), `"aspa_failing_hop":{"customer_asn":1199,"provider_asn":65000}`) {
 		t.Errorf("JSON %s lacks the failing hop", b)
 	}

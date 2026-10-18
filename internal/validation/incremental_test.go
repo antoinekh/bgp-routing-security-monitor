@@ -38,7 +38,7 @@ func (f *incFixture) add(peer, prefix string, path ...uint32) types.RouteKey {
 	}
 	f.e.ValidateRoute(r)
 	f.table.Insert(r)
-	return types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
+	return types.RouteKey{Peer: types.PeerRef{Addr: r.PeerAddr}, Prefix: r.Prefix, RIBType: r.RIBType}
 }
 
 func (f *incFixture) get(k types.RouteKey) *types.Route { return f.table.Get(k) }
@@ -238,7 +238,7 @@ func TestIncremental_EquivalentToFull(t *testing.T) {
 		ingest := func() {
 			r := randRoute()
 			if rng.IntN(4) == 0 {
-				f.table.Withdraw(r.PeerAddr, r.Prefix)
+				f.table.Withdraw(types.RouteKey{Peer: types.PeerRef{Addr: r.PeerAddr}, Prefix: r.Prefix})
 				return
 			}
 			f.e.ValidateRoute(r)

@@ -51,6 +51,9 @@ func TestPeerDownIsNotDroppedWhenIngestIsFull(t *testing.T) {
 		if ev.Withdrawal == nil || !ev.Withdrawal.WithdrawAll || ev.Withdrawal.PeerAddr != peer {
 			t.Fatalf("got %+v, want a withdraw-all for %s", ev, peer)
 		}
+		if ev.Withdrawal.Router != router {
+			t.Errorf("withdraw-all for router %s, want %s: it must not reach other routers' routes", ev.Withdrawal.Router, router)
+		}
 		if ev.Session != 3 {
 			t.Errorf("withdraw-all session = %d, want 3 (scoped to the session that saw the peer down)", ev.Session)
 		}

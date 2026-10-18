@@ -39,6 +39,7 @@ func (w *Writer) WriteRoutes(routes []*types.Route) error {
 	start := time.Now()
 
 	snap := &snapshotv1.RouteSnapshot{
+		FormatVersion:    snapshotv1.RouteFormatVersion,
 		SnapshotTimeUnix: start.UnixNano(),
 		RavenVersion:     w.version,
 		Routes:           make([]snapshotv1.RouteRecord, 0, len(routes)),
@@ -143,19 +144,23 @@ func (w *Writer) doWriteAtomic(name string, v any) error {
 
 func routeToRecord(r *types.Route) snapshotv1.RouteRecord {
 	return snapshotv1.RouteRecord{
-		Prefix:        prefixString(r.Prefix),
-		PeerAddr:      addrString(r.PeerAddr),
-		PeerASN:       r.PeerASN,
-		RouterID:      addrString(r.RouterID),
-		ASPath:        r.ASPath,
-		OriginASN:     r.OriginASN(),
-		NextHop:       addrString(r.NextHop),
-		TimestampUnix: r.Timestamp.UnixNano(),
-		RIBType:       ribTypeString(r.RIBType),
-		ROVState:      r.ROV.State.String(),
-		ASPAState:     r.ASPA.State.String(),
-		Posture:       string(r.SecurityPosture),
-		Stale:         r.Stale,
+		Prefix:            prefixString(r.Prefix),
+		Router:            addrString(r.Router),
+		PeerDistinguisher: r.PeerDistinguisher,
+		PeerType:          r.PeerType,
+		PathID:            r.PathID,
+		PeerAddr:          addrString(r.PeerAddr),
+		PeerASN:           r.PeerASN,
+		RouterID:          addrString(r.RouterID),
+		ASPath:            r.ASPath,
+		OriginASN:         r.OriginASN(),
+		NextHop:           addrString(r.NextHop),
+		TimestampUnix:     r.Timestamp.UnixNano(),
+		RIBType:           ribTypeString(r.RIBType),
+		ROVState:          r.ROV.State.String(),
+		ASPAState:         r.ASPA.State.String(),
+		Posture:           string(r.SecurityPosture),
+		Stale:             r.Stale,
 	}
 }
 

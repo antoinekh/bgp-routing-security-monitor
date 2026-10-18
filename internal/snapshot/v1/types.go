@@ -5,8 +5,15 @@
 // snapshot.pb.go — the field names and package path are identical.
 package snapshotv1
 
+// RouteFormatVersion is the routes.snap format this RAVEN writes and reads.
+// Format 2 keys a route by router, peer distinguisher, peer, prefix, path ID
+// and RIB type; format 1 (no format_version field) had peer, prefix and RIB
+// type only and is not migrated.
+const RouteFormatVersion = 2
+
 // RouteSnapshot is the JSON envelope written to routes.snap.
 type RouteSnapshot struct {
+	FormatVersion    int           `json:"format_version"`
 	SnapshotTimeUnix int64         `json:"snapshot_time_unix"`
 	RavenVersion     string        `json:"raven_version"`
 	Routes           []RouteRecord `json:"routes"`
@@ -14,19 +21,23 @@ type RouteSnapshot struct {
 
 // RouteRecord is a single route entry in a RouteSnapshot.
 type RouteRecord struct {
-	Prefix        string   `json:"prefix"`
-	PeerAddr      string   `json:"peer_addr"`
-	PeerASN       uint32   `json:"peer_asn"`
-	RouterID      string   `json:"router_id,omitempty"`
-	ASPath        []uint32 `json:"as_path,omitempty"`
-	OriginASN     uint32   `json:"origin_asn"`
-	NextHop       string   `json:"next_hop,omitempty"`
-	TimestampUnix int64    `json:"timestamp_unix"`
-	RIBType       string   `json:"rib_type"`
-	ROVState      string   `json:"rov_state"`
-	ASPAState     string   `json:"aspa_state"`
-	Posture       string   `json:"posture"`
-	Stale         bool     `json:"stale"`
+	Prefix            string   `json:"prefix"`
+	Router            string   `json:"router"`
+	PeerDistinguisher uint64   `json:"peer_distinguisher,omitempty"`
+	PeerType          uint8    `json:"peer_type,omitempty"`
+	PathID            uint32   `json:"path_id,omitempty"`
+	PeerAddr          string   `json:"peer_addr"`
+	PeerASN           uint32   `json:"peer_asn"`
+	RouterID          string   `json:"router_id,omitempty"`
+	ASPath            []uint32 `json:"as_path,omitempty"`
+	OriginASN         uint32   `json:"origin_asn"`
+	NextHop           string   `json:"next_hop,omitempty"`
+	TimestampUnix     int64    `json:"timestamp_unix"`
+	RIBType           string   `json:"rib_type"`
+	ROVState          string   `json:"rov_state"`
+	ASPAState         string   `json:"aspa_state"`
+	Posture           string   `json:"posture"`
+	Stale             bool     `json:"stale"`
 }
 
 // RPKISnapshot is the JSON envelope written to rpki.snap.

@@ -18,7 +18,8 @@ const defaultShards = 256
 //
 // Architecture: hybrid BART prefix index + sharded flat map (see ARCHITECTURE.md §2.3).
 type Table struct {
-	// Primary store: sharded flat map keyed by (PeerAddr, Prefix)
+	// Primary store: sharded flat map keyed by RouteKey (router, peer
+	// distinguisher, peer address, prefix, path ID, RIB type)
 	shards []shard
 
 	// Prefix index: BART trie mapping prefix -> route keys. A prefix's list
@@ -59,19 +60,22 @@ type shard struct {
 
 	// owned indexes the shard's routes by owning BMP session and peer, so a
 	// withdraw-all finds the routes it removes without scanning the table.
-	// A route is indexed under the OwnerSession and PeerAddr it had when
+	// A route is indexed under the OwnerSession and peer it had when
 	// inserted; neither may change while it is in the table.
 	owned map[ownerKey]routeSet
 
-	// perPeer counts the shard's routes by peer address (unmapped, so an
-	// IPv4 peer counts the same in either form). It changes exactly when
-	// routes does: a key added, or a key removed.
-	perPeer map[netip.Addr]int
+	// perPeer counts the shard's routes by peer (router, distinguisher and
+	// address). It changes exactly when routes does: a key added, or a key
+	// removed.
+	perPeer map[types.PeerRef]int
 }
 
+// ownerKey is an owner index entry: a BMP session and one peer it reports.
+// The peer includes the router, so unowned routes (session 0) of the same
+// peer address on two routers are two entries.
 type ownerKey struct {
 	session uint64
-	peer    netip.Addr
+	peer    types.PeerRef
 }
 
 // routeSet is keyed by pointer rather than RouteKey: 8 bytes per route
@@ -81,7 +85,7 @@ type routeSet map[*types.Route]struct{}
 
 // own indexes r under its owner. The caller holds s.mu.
 func (s *shard) own(r *types.Route) {
-	k := ownerKey{session: r.OwnerSession, peer: r.PeerAddr}
+	k := ownerKey{session: r.OwnerSession, peer: r.Peer()}
 	set := s.owned[k]
 	if set == nil {
 		set = make(routeSet)
@@ -93,7 +97,7 @@ func (s *shard) own(r *types.Route) {
 // disown drops r from the owner index. It is a no-op for a route a Removal
 // has already detached. The caller holds s.mu.
 func (s *shard) disown(r *types.Route) {
-	k := ownerKey{session: r.OwnerSession, peer: r.PeerAddr}
+	k := ownerKey{session: r.OwnerSession, peer: r.Peer()}
 	if set, ok := s.owned[k]; ok {
 		delete(set, r)
 		if len(set) == 0 {
@@ -161,18 +165,14 @@ func New() *Table {
 	for i := range t.shards {
 		t.shards[i].routes = make(map[types.RouteKey]*types.Route)
 		t.shards[i].owned = make(map[ownerKey]routeSet)
-		t.shards[i].perPeer = make(map[netip.Addr]int)
+		t.shards[i].perPeer = make(map[types.PeerRef]int)
 	}
 	return t
 }
 
 // Insert adds or updates a route in the table.
 func (t *Table) Insert(route *types.Route) {
-	key := types.RouteKey{
-		PeerAddr: route.PeerAddr,
-		Prefix:   route.Prefix,
-		RIBType:  route.RIBType,
-	}
+	key := route.Key()
 
 	// Write to primary store
 	s := t.getShard(key)
@@ -180,7 +180,7 @@ func (t *Table) Insert(route *types.Route) {
 	old := s.routes[key]
 	s.routes[key] = route
 	if old == nil {
-		s.perPeer[key.PeerAddr.Unmap()]++ // a new key; a re-announcement is not
+		s.perPeer[key.Peer]++ // a new key; a re-announcement is not
 	}
 	// Re-inserting the stored pointer itself changes nothing in the owner
 	// index.
@@ -265,29 +265,22 @@ func addKey[K comparable](idx map[K]keySet, k K, key types.RouteKey) {
 	set[key] = struct{}{}
 }
 
-var allRIBTypes = []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost, types.LocRIB}
-
-// Withdraw removes a route from the table, whichever session owns it.
-func (t *Table) Withdraw(peerAddr netip.Addr, prefix netip.Prefix) {
-	// Withdraw across all RIB types
-	for _, rib := range allRIBTypes {
-		t.withdrawOne(types.RouteKey{PeerAddr: peerAddr, Prefix: prefix, RIBType: rib}, nil)
-	}
+// Withdraw removes the route under key, whichever session owns it, and
+// reports whether there was one.
+func (t *Table) Withdraw(key types.RouteKey) bool {
+	return t.withdrawOne(key, nil)
 }
 
-// WithdrawFromSession removes a route withdrawn by BMP session session,
-// unless a newer session has since re-announced it: a late withdrawal from a
-// superseded session must not remove the newer session's route. It returns
-// the number of routes removed (one per RIB type at most).
-func (t *Table) WithdrawFromSession(peerAddr netip.Addr, prefix netip.Prefix, session uint64) int {
-	count := 0
-	for _, rib := range allRIBTypes {
-		if t.withdrawOne(types.RouteKey{PeerAddr: peerAddr, Prefix: prefix, RIBType: rib},
-			func(r *types.Route) bool { return r.OwnerSession <= session }) {
-			count++
-		}
-	}
-	return count
+// WithdrawFromSession removes the route under key, withdrawn by BMP session
+// session, unless a newer session has since re-announced it: a late
+// withdrawal from a superseded session must not remove the newer session's
+// route. It reports whether it removed one.
+//
+// Only key's RIB type is touched. It used to withdraw the prefix from every
+// RIB type, so a post-policy withdrawal (inbound policy now rejects the
+// route) also removed the pre-policy route the peer still announced.
+func (t *Table) WithdrawFromSession(key types.RouteKey, session uint64) bool {
+	return t.withdrawOne(key, func(r *types.Route) bool { return r.OwnerSession <= session })
 }
 
 // withdrawOne removes the route under key. If pred is non-nil the route is
@@ -303,9 +296,8 @@ func (t *Table) withdrawOne(key types.RouteKey, pred func(*types.Route) bool) bo
 	if exists {
 		delete(s.routes, key)
 		s.disown(route)
-		peer := key.PeerAddr.Unmap()
-		if s.perPeer[peer]--; s.perPeer[peer] <= 0 {
-			delete(s.perPeer, peer)
+		if s.perPeer[key.Peer]--; s.perPeer[key.Peer] <= 0 {
+			delete(s.perPeer, key.Peer)
 		}
 	}
 	s.mu.Unlock()
@@ -343,8 +335,8 @@ func (t *Table) withdrawOne(key types.RouteKey, pred func(*types.Route) bool) bo
 
 // WithdrawAllFromPeer removes, at once, what a peer-down from BMP session
 // session removes; see DetachPeer.
-func (t *Table) WithdrawAllFromPeer(peerAddr netip.Addr, session uint64) int {
-	return t.DetachPeer(peerAddr, session).Apply()
+func (t *Table) WithdrawAllFromPeer(peer types.PeerRef, session uint64) int {
+	return t.DetachPeer(peer, session).Apply()
 }
 
 // WithdrawSession removes, at once, what the end of BMP session session
@@ -353,17 +345,22 @@ func (t *Table) WithdrawSession(session uint64) int {
 	return t.DetachSession(session).Apply()
 }
 
-// DetachPeer starts the withdraw-all for a peer-down of peerAddr seen by BMP
+// DetachPeer starts the withdraw-all for a peer-down of peer seen by BMP
 // session session. It removes the peer's routes that session owns, and its
 // routes no session owns (restored from a snapshot and not yet confirmed):
 // the peer is down, so those are gone too. Routes of the peer that another
 // session owns, such as a newer session from the same router, are kept.
 //
 // It costs O(shards); the routes themselves are removed by the Removal.
-func (t *Table) DetachPeer(peerAddr netip.Addr, session uint64) *Removal {
-	keys := []ownerKey{{session: session, peer: peerAddr}}
+//
+// The peer includes its router, so the unowned routes it takes are that
+// router's alone: a peer-down on one router never removes another router's
+// routes from the same peer address.
+func (t *Table) DetachPeer(peer types.PeerRef, session uint64) *Removal {
+	peer = types.NewPeerRef(peer.Router, peer.Distinguisher, peer.Addr)
+	keys := []ownerKey{{session: session, peer: peer}}
 	if session != 0 {
-		keys = append(keys, ownerKey{peer: peerAddr})
+		keys = append(keys, ownerKey{peer: peer})
 	}
 	rm := &Removal{t: t}
 	for i := range t.shards {
@@ -492,8 +489,7 @@ func (rm *Removal) Apply() int {
 
 // removeIfCurrent removes r if the table still holds this very route.
 func (t *Table) removeIfCurrent(r *types.Route) bool {
-	key := types.RouteKey{PeerAddr: r.PeerAddr, Prefix: r.Prefix, RIBType: r.RIBType}
-	return t.withdrawOne(key, func(cur *types.Route) bool { return cur == r })
+	return t.withdrawOne(r.Key(), func(cur *types.Route) bool { return cur == r })
 }
 
 // Replace swaps updated in for old, a route the table holds, and reports
@@ -506,9 +502,8 @@ func (t *Table) removeIfCurrent(r *types.Route) bool {
 // carried over unchanged. Routes in the table are never modified in place,
 // so readers holding old keep seeing a consistent route.
 func (t *Table) Replace(old, updated *types.Route) bool {
-	key := types.RouteKey{PeerAddr: old.PeerAddr, Prefix: old.Prefix, RIBType: old.RIBType}
-	if old == updated ||
-		updated.PeerAddr != old.PeerAddr || updated.Prefix != old.Prefix || updated.RIBType != old.RIBType ||
+	key := old.Key()
+	if old == updated || updated.Key() != key ||
 		updated.OwnerSession != old.OwnerSession || updated.OriginASN() != old.OriginASN() {
 		panic("routetable: Replace may only change a route's validation annotations")
 	}
@@ -519,7 +514,7 @@ func (t *Table) Replace(old, updated *types.Route) bool {
 	if s.routes[key] != old {
 		return false
 	}
-	set := s.owned[ownerKey{session: old.OwnerSession, peer: old.PeerAddr}]
+	set := s.owned[ownerKey{session: old.OwnerSession, peer: key.Peer}]
 	if _, indexed := set[old]; !indexed {
 		return false
 	}
@@ -661,8 +656,9 @@ func (t *Table) GetByPosture(posture types.SecurityPosture) []*types.Route {
 	return t.resolveKeys(keys)
 }
 
-// GetByPeer returns the pre-policy routes from a peer. An IPv4 peer matches
-// in either its plain or its IPv4-mapped IPv6 form.
+// GetByPeer returns the pre-policy routes from a peer address, on every
+// router and in every instance. An IPv4 peer matches in either its plain or
+// its IPv4-mapped IPv6 form.
 func (t *Table) GetByPeer(peerAddr netip.Addr) []*types.Route {
 	peerAddr = peerAddr.Unmap()
 	var routes []*types.Route
@@ -670,7 +666,7 @@ func (t *Table) GetByPeer(peerAddr netip.Addr) []*types.Route {
 		s := &t.shards[i]
 		s.mu.RLock()
 		for key, route := range s.routes {
-			if key.PeerAddr.Unmap() == peerAddr && route.RIBType == types.AdjRIBInPre {
+			if key.Peer.Addr == peerAddr && route.RIBType == types.AdjRIBInPre {
 				routes = append(routes, route)
 			}
 		}
@@ -722,11 +718,11 @@ func (t *Table) Count() uint64 {
 	return total
 }
 
-// PeerRouteCounts returns how many routes the table holds for each peer
-// address, IPv4 peers under their plain IPv4 form. Peers with none are
-// absent. It reads each shard's counts, not its routes.
-func (t *Table) PeerRouteCounts() map[netip.Addr]uint64 {
-	out := make(map[netip.Addr]uint64)
+// PeerRouteCounts returns how many routes the table holds for each peer:
+// per router, per instance, per address. Peers with none are absent. It
+// reads each shard's counts, not its routes.
+func (t *Table) PeerRouteCounts() map[types.PeerRef]uint64 {
+	out := make(map[types.PeerRef]uint64)
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
@@ -811,7 +807,7 @@ func (t *Table) CountByPosture() map[types.SecurityPosture]uint64 {
 
 func (t *Table) getShard(key types.RouteKey) *shard {
 	h := fnv.New32a()
-	b := key.PeerAddr.As16()
+	b := key.Peer.Addr.As16()
 	h.Write(b[:])
 	pb, _ := key.Prefix.MarshalBinary()
 	h.Write(pb)
