@@ -112,9 +112,12 @@ func NewServer(table *routetable.Table, bmpListen *bmp.Listener, vrpStore *store
 
 // NotifyRoute sends a route to all watch subscribers.
 func (s *Server) NotifyRoute(route *types.Route) {
-	rr := routeToResponse(route)
 	s.watchMu.RLock()
 	defer s.watchMu.RUnlock()
+	if len(s.watchSubs) == 0 {
+		return // nobody is watching: don't build the response
+	}
+	rr := routeToResponse(route)
 	for ch := range s.watchSubs {
 		select {
 		case ch <- rr:

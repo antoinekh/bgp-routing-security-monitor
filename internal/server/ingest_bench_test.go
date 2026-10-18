@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
+	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/store/storetest"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
@@ -233,5 +234,31 @@ func BenchmarkIngestDuringRevalidation(b *testing.B) {
 			}
 			b.ReportMetric(0, "ns/op") // includes setup; see the metrics above
 		})
+	}
+}
+
+// BenchmarkIngestRoute is the per-route BMP ingest path (ingestRoute:
+// validate, insert, notify) against a warm store of 750k synthetic VRPs. The
+// table fills to 1M routes, then announcements replace earlier ones.
+//
+//	go test -run '^$' -bench IngestRoute -benchmem ./internal/server/
+func BenchmarkIngestRoute(b *testing.B) {
+	sy := storetest.NewSynth(750_000, 1_000_000, 1)
+	s, err := New(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		b.Fatal(err)
+	}
+	s.cfg.Validation.ROV = true
+	s.vrpStore.ReplaceAll(sy.VRPs, 1, 1)
+	peer := netip.MustParseAddr("192.0.2.1")
+	routes := make([]types.Route, len(sy.Routes))
+	for i, p := range sy.Routes {
+		routes[i] = types.Route{PeerAddr: peer, PeerASN: 64501, Prefix: p,
+			ASPath: []uint32{64501, sy.Origins[i]}, RIBType: types.AdjRIBInPre}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.ingestRoute(routes[i%len(routes)], sessA, uint64(i))
 	}
 }

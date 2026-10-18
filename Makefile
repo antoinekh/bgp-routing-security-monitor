@@ -9,10 +9,14 @@ LDFLAGS := -s -w \
   -X $(MODULE)/internal/cli.commit=$(COMMIT) \
   -X $(MODULE)/internal/cli.date=$(DATE)
 
-.PHONY: build run test lint check proto clean
+.PHONY: build build-linux run test lint check proto clean
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/raven
+
+# Static linux/amd64 binary for deployment hosts, from any build machine.
+build-linux:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux-amd64 ./cmd/raven
 
 run: build
 	./$(BINARY) serve --config raven.yaml
@@ -30,5 +34,5 @@ proto:
 	buf generate
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(BINARY)-linux-amd64
 	rm -rf dist/
