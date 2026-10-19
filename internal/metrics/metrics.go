@@ -18,11 +18,22 @@ var (
 		Help: "Total BMP messages processed.",
 	}, []string{"router", "msg_type"})
 
-	// BGP peer state via BMP: 1=established 0=down. Labels: router, peer.
+	// BGP peer state via BMP: 1=established 0=down. Labels: router
+	// (sysName, or its address), router_addr (BMP session source), peer,
+	// peer_distinguisher (the VRF's RD; "" for a global-instance peer). The
+	// same peer address on two routers, or in two VRFs, is two series.
 	BMPPeerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_bmp_peer_state",
 		Help: "BGP peer state as seen via BMP (1=established, 0=down).",
-	}, []string{"router", "peer"})
+	}, []string{"router", "router_addr", "peer", "peer_distinguisher"})
+
+	// NLRI RAVEN does not decode: MP_REACH_NLRI / MP_UNREACH_NLRI for an
+	// address family other than IPv4 or IPv6 unicast. Counted, not
+	// silently dropped. Labels: afi, safi (decimal).
+	BMPUnsupportedNLRITotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_bmp_unsupported_nlri_total",
+		Help: "Total MP_REACH/MP_UNREACH NLRI attributes not decoded, by AFI and SAFI.",
+	}, []string{"afi", "safi"})
 
 	// RTR session state: 1=connected 0=down. Label: cache.
 	RTRSessionState = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -116,6 +127,15 @@ var (
 		Name: "raven_bmp_rejected_connections_total",
 		Help: "Total BMP connections rejected at accept, by reason.",
 	}, []string{"reason"})
+
+	// Adj-RIB-Out pre-policy routes (RFC 8671: what the routers send their
+	// peers) by security posture and AFI. Kept out of raven_routes_total,
+	// which counts what the routers receive, so that sums over it never
+	// mix the two directions. Labels: posture, afi.
+	AdjRIBOutRoutesTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "raven_adj_rib_out_routes_total",
+		Help: "Number of Adj-RIB-Out pre-policy routes by security posture and address family.",
+	}, []string{"posture", "afi"})
 
 	// Total pre-policy routes in the route table.
 	RouteTableSize = promauto.NewGauge(prometheus.GaugeOpts{

@@ -33,7 +33,7 @@ func TestVRFPeersKeptApart(t *testing.T) {
 			tbl.Get(global.Key()) == global, tbl.Get(vrf.Key()) == vrf)
 	}
 	counts := tbl.PeerRouteCounts()
-	if counts[global.Peer()] != 1 || counts[vrf.Peer()] != 1 {
+	if counts[global.Peer()][types.AdjRIBInPre] != 1 || counts[vrf.Peer()][types.AdjRIBInPre] != 1 {
 		t.Errorf("counts %v, want 1 per instance", counts)
 	}
 	if n := len(tbl.GetByPrefix(keyPrefix)); n != 2 {
@@ -49,15 +49,15 @@ func TestAddPathPathsKeptApart(t *testing.T) {
 	p2 := keyedRoute(keyRouterA, 0, 2, types.AdjRIBInPre)
 	tbl.Insert(p1)
 	tbl.Insert(p2)
-	if tbl.Count() != 2 || tbl.PeerRouteCounts()[p1.Peer()] != 2 {
-		t.Fatalf("table holds %d routes, peer count %d; want both paths", tbl.Count(), tbl.PeerRouteCounts()[p1.Peer()])
+	if tbl.Count() != 2 || tbl.PeerRouteCounts()[p1.Peer()][types.AdjRIBInPre] != 2 {
+		t.Fatalf("table holds %d routes, peer count %d; want both paths", tbl.Count(), tbl.PeerRouteCounts()[p1.Peer()][types.AdjRIBInPre])
 	}
 	if !tbl.WithdrawFromSession(p1.Key(), 1) {
 		t.Fatal("withdrawing path 1 removed nothing")
 	}
-	if tbl.Get(p2.Key()) != p2 || tbl.Get(p1.Key()) != nil || tbl.PeerRouteCounts()[p1.Peer()] != 1 {
+	if tbl.Get(p2.Key()) != p2 || tbl.Get(p1.Key()) != nil || tbl.PeerRouteCounts()[p1.Peer()][types.AdjRIBInPre] != 1 {
 		t.Errorf("after withdrawing path 1: path 2 kept %v, path 1 gone %v, count %d",
-			tbl.Get(p2.Key()) == p2, tbl.Get(p1.Key()) == nil, tbl.PeerRouteCounts()[p1.Peer()])
+			tbl.Get(p2.Key()) == p2, tbl.Get(p1.Key()) == nil, tbl.PeerRouteCounts()[p1.Peer()][types.AdjRIBInPre])
 	}
 }
 

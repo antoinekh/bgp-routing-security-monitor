@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -22,18 +21,21 @@ type RouteResponse struct {
 	Prefix string `json:"prefix"`
 	// Router is the monitored router (its BMP session's source address);
 	// RouterName its Initiation sysName, when known.
-	Router            string   `json:"router"`
-	RouterName        string   `json:"router_name,omitempty"`
-	PeerDistinguisher string   `json:"peer_distinguisher,omitempty"` // the peer's VRF RD; omitted for global peers
-	PeerAddr          string   `json:"peer"`
-	PeerASN           uint32   `json:"peer_asn"`
-	PathID            uint32   `json:"path_id,omitempty"` // ADD-PATH path identifier
-	OriginASN         uint32   `json:"origin_asn"`
-	ASPath            []uint32 `json:"as_path"`
-	NextHop           string   `json:"next_hop"`
-	ROV               string   `json:"rov"`
-	ROVReason         string   `json:"rov_reason,omitempty"`
-	ASPA              string   `json:"aspa"`
+	Router            string `json:"router"`
+	RouterName        string `json:"router_name,omitempty"`
+	PeerDistinguisher string `json:"peer_distinguisher,omitempty"` // the peer's VRF RD; omitted for global peers
+	PeerAddr          string `json:"peer"`
+	PeerASN           uint32 `json:"peer_asn"`
+	PathID            uint32 `json:"path_id,omitempty"` // ADD-PATH path identifier
+	// RIB is the route's RIB: adj-rib-in-pre, adj-rib-in-post, loc-rib,
+	// adj-rib-out-pre or adj-rib-out-post.
+	RIB       string   `json:"rib"`
+	OriginASN uint32   `json:"origin_asn"`
+	ASPath    []uint32 `json:"as_path"`
+	NextHop   string   `json:"next_hop"`
+	ROV       string   `json:"rov"`
+	ROVReason string   `json:"rov_reason,omitempty"`
+	ASPA      string   `json:"aspa"`
 	// ASPAProcedure is upstream or downstream; ASPAProcedureSource says
 	// whether it came from an aspa-peers entry or the default.
 	ASPAProcedure       string `json:"aspa_procedure"`
@@ -62,9 +64,13 @@ type PeerResponse struct {
 	ASN               uint32 `json:"asn"`
 	RouterID          string `json:"router_id"`
 	State             string `json:"state"`
-	RouteCount        uint64 `json:"route_count"`
-	UpSince           string `json:"up_since"`
-	LastMsg           string `json:"last_msg"`
+	// RouteCount is the peer's Adj-RIB-In pre-policy routes, comparable to
+	// what the router reports as received; RoutesByRIB breaks every RIB
+	// down, inbound and outbound apart.
+	RouteCount  uint64            `json:"route_count"`
+	RoutesByRIB map[string]uint64 `json:"routes_by_rib,omitempty"`
+	UpSince     string            `json:"up_since"`
+	LastMsg     string            `json:"last_msg"`
 }
 
 // StatusResponse is the system health API output.
@@ -85,8 +91,12 @@ type RTRStatusResponse struct {
 
 // RouteTableStatusResponse is route table summary.
 type RouteTableStatusResponse struct {
+	// TotalRoutes and ByPosture count Adj-RIB-In pre-policy routes, what
+	// the routers received, as raven_routes_total does. ByRIB counts every
+	// RIB that has routes, inbound and outbound apart.
 	TotalRoutes uint64            `json:"total_routes"`
 	ByPosture   map[string]uint64 `json:"by_posture"`
+	ByRIB       map[string]uint64 `json:"by_rib"`
 }
 
 // WatchEvent is a streaming event for raven watch.
@@ -231,7 +241,8 @@ func (s *Server) peerResponses() []PeerResponse {
 			ASN:               p.ASN,
 			RouterID:          p.RouterID.String(),
 			State:             p.State,
-			RouteCount:        counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)],
+			RouteCount:        counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)][types.AdjRIBInPre],
+			RoutesByRIB:       ribCounts(counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)]),
 			UpSince:           p.UpSince.Format(time.RFC3339),
 			LastMsg:           p.LastMsg.Format(time.RFC3339),
 		})
@@ -261,24 +272,20 @@ func (s *Server) routersNamed(name string) []netip.Addr {
 	return s.routers.RoutersNamed(name)
 }
 
-// FormatRD renders a Peer Distinguisher as a route distinguisher (RFC 4364
-// §4.2): type 0 "ASN:n", type 1 "IPv4:n", type 2 "ASN4:n"; any other value
-// in hex. Zero (a global-instance peer) renders as "".
-func FormatRD(rd uint64) string {
-	if rd == 0 {
-		return ""
+// ribCounts names the non-zero RIB counts.
+func ribCounts(c types.RIBCounts) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, r := range types.AllRIBTypes {
+		if c[r] != 0 {
+			out[r.String()] = c[r]
+		}
 	}
-	switch rd >> 48 {
-	case 0:
-		return fmt.Sprintf("%d:%d", (rd>>32)&0xffff, rd&0xffffffff)
-	case 1:
-		ip := netip.AddrFrom4([4]byte{byte(rd >> 40), byte(rd >> 32), byte(rd >> 24), byte(rd >> 16)})
-		return fmt.Sprintf("%s:%d", ip, rd&0xffff)
-	case 2:
-		return fmt.Sprintf("%d:%d", (rd>>16)&0xffffffff, rd&0xffff)
-	}
-	return fmt.Sprintf("0x%016x", rd)
+	return out
 }
+
+// FormatRD renders a Peer Distinguisher as a route distinguisher; see
+// types.FormatRD.
+func FormatRD(rd uint64) string { return types.FormatRD(rd) }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	postureCounts := s.table.CountByPosture()
@@ -296,10 +303,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			SessionID: s.vrpStore.SessionID(),
 		},
 		RouteTable: RouteTableStatusResponse{
-			TotalRoutes: s.table.Count(),
-			ByPosture:   byPosture,
+			ByPosture: byPosture,
+			ByRIB:     ribCounts(s.table.CountByRIB()),
 		},
 	}
+	resp.RouteTable.TotalRoutes = resp.RouteTable.ByRIB[types.AdjRIBInPre.String()]
 
 	resp.BMP = s.peerResponses()
 
@@ -364,6 +372,7 @@ func routeToResponse(r *types.Route, routerName string) RouteResponse {
 		PeerAddr:          r.PeerAddr.String(),
 		PeerASN:           r.PeerASN,
 		PathID:            r.PathID,
+		RIB:               r.RIBType.String(),
 		OriginASN:         r.OriginASN(),
 		ASPath:            r.ASPath,
 		NextHop:           r.NextHop.String(),

@@ -11,8 +11,40 @@ All notable changes to RAVEN are recorded here.
   another host must now set `api.listen` (for example `"0.0.0.0:11020"`)
   on that daemon, and should restrict access to it. The Prometheus metrics
   listener is unchanged.
+- **Breaking for dashboards:** `raven_bmp_peer_state` gains `router_addr` and
+  `peer_distinguisher` labels, so the same peer address on two routers or
+  in two VRFs no longer shares one series.
+- Status totals (`raven status`, `/api/v1/status` `total_routes` and
+  `by_posture`) and per-peer `route_count` now count Adj-RIB-In pre-policy
+  routes only, as `raven_routes_total` always did; they used to add up every
+  RIB, counting a route twice when a router sent pre- and post-policy. The
+  other RIBs are reported apart (`by_rib`, `routes_by_rib`).
+- Route and withdrawal events carry the monitored router in `router_id`
+  (they had the peer's BGP identifier, or the peer's address).
+- The daemon reports the build's version (`raven status`), from the same
+  build info as `raven version`; it always said "dev". Build info moved from
+  `internal/cli` to `internal/buildinfo` (Makefile LDFLAGS updated).
+
+### Fixed
+- BMP/BGP decoding of untrusted input: a malformed UPDATE (Withdrawn Routes
+  Length past the message) panicked and took down the daemon; a BMP header
+  could make RAVEN allocate up to 4 GB (messages are now capped at 1 MiB and
+  the session closed); a Statistics Report count sized a map.
+- AS_PATH from peers on 2-octet sessions (BMP A flag) is read with 2-octet
+  ASNs and merged with AS4_PATH (RFC 6793); it was read as 4-octet.
+- Adj-RIB-Out (RFC 8671) routes are stored as such, no longer overwriting
+  the peer's Adj-RIB-In routes. They get ROV; ASPA verification, defined for
+  received routes, is not run (ASPA Unverifiable, with the reason). They
+  raise no events. Counted in `raven_adj_rib_out_routes_total`.
+- IPv4 unicast in MP_REACH/MP_UNREACH (including RFC 8950 IPv6 next hops) is
+  decoded; it was dropped.
+- RFC 9072 extended OPEN optional parameters are read in Peer Up.
 
 ### Added
+- `raven_bmp_unsupported_nlri_total{afi,safi}` counts NLRI RAVEN does not
+  decode, instead of dropping it silently.
+- `make fuzz`: native Go fuzzing of the BMP message, Peer Up/OPEN and UPDATE
+  decoders (not part of `make check`).
 - `bmp.allowed-routers`: IP addresses and prefixes BMP connections are
   accepted from. Other sources are closed at accept, before any byte is
   read, logged at WARN and counted in

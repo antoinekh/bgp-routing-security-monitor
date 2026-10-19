@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -445,8 +446,10 @@ func (l *Listener) handleSession(ctx context.Context, sess, old *bmpSession) {
 			return
 		}
 		bodyLen := int(hdr.Length) - CommonHeaderLen
-		if bodyLen < 0 {
-			sessionLog.Error("invalid BMP message length", "length", hdr.Length)
+		if bodyLen < 0 || hdr.Length > MaxMessageLen {
+			// The body is allocated at the length the header gives, so an
+			// unchecked length let one header allocate up to 4 GB.
+			sessionLog.Error("invalid BMP message length", "length", hdr.Length, "max", MaxMessageLen)
 			return
 		}
 		body := make([]byte, bodyLen)
@@ -521,7 +524,8 @@ func (l *Listener) processMessage(
 			addPath:       pu.AddPath,
 		}
 		l.peerMu.Unlock()
-		metrics.BMPPeerState.WithLabelValues(sysName, pu.PerPeer.PeerAddr.String()).Set(1)
+		metrics.BMPPeerState.WithLabelValues(sysName, routerAddr.String(), pu.PerPeer.PeerAddr.String(),
+			types.FormatRD(key.Distinguisher)).Set(1)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_up").Inc()
 		log.Info("BMP peer up",
 			"peer", pu.PerPeer.PeerAddr,
@@ -551,7 +555,8 @@ func (l *Listener) processMessage(
 			p.LastMsg = time.Now()
 		}
 		l.peerMu.Unlock()
-		metrics.BMPPeerState.WithLabelValues(sysName, pd.PerPeer.PeerAddr.String()).Set(0)
+		metrics.BMPPeerState.WithLabelValues(sysName, routerAddr.String(), pd.PerPeer.PeerAddr.String(),
+			types.FormatRD(key.Distinguisher)).Set(0)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_down").Inc()
 		log.Info("BMP peer down", "peer", pd.PerPeer.PeerAddr, "reason", pd.Reason)
 		// Implicitly withdraw everything the peer advertised, as a real BGP
@@ -681,25 +686,24 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localA
 	if len(data) < 4 {
 		return nil, nil, nil
 	}
-	ribType := types.AdjRIBInPre
-	if pph.IsPostPolicy() {
-		ribType = types.AdjRIBInPost
-	}
+	ribType := ribTypeOf(pph)
 
-	// Parse IPv4 withdrawn prefixes (top of UPDATE body)
-	withdrawnLen := binary.BigEndian.Uint16(data[0:2])
+	// Withdrawn Routes Length, then the IPv4 withdrawn prefixes. A length
+	// running past the message used to be sliced as given, which panicked
+	// the session's goroutine and with it the whole process.
+	withdrawnLen := int(binary.BigEndian.Uint16(data[0:2]))
+	if 2+withdrawnLen+2 > len(data) {
+		return nil, nil, fmt.Errorf("withdrawn routes length %d overflows a %d-byte UPDATE", withdrawnLen, len(data))
+	}
 	var withdrawals []types.Withdrawal
 	if withdrawnLen > 0 {
-		v4Withdrawals := parseNLRI(data[2:2+int(withdrawnLen)], 4, addPath&AFIIPv4Unicast != 0)
+		v4Withdrawals := parseNLRI(data[2:2+withdrawnLen], 4, addPath&AFIIPv4Unicast != 0)
 		for _, n := range v4Withdrawals {
 			withdrawals = append(withdrawals, makeWithdrawal(n, pph, router, ribType))
 		}
 	}
 
-	offset := 2 + int(withdrawnLen)
-	if offset+2 > len(data) {
-		return nil, withdrawals, nil
-	}
+	offset := 2 + withdrawnLen
 
 	// Total Path Attribute Length (2 bytes)
 	pathAttrLen := binary.BigEndian.Uint16(data[offset : offset+2])
@@ -711,7 +715,7 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localA
 	}
 
 	// Parse path attributes (extracts AS_PATH etc and the raw MP_REACH/MP_UNREACH bytes)
-	attrs := parsePathAttributes(data[offset:pathAttrEnd])
+	attrs := parsePathAttributes(data[offset:pathAttrEnd], pph.Flags&PeerFlagAS2 != 0)
 	offset = pathAttrEnd
 
 	// Parse IPv4 NLRI (remaining bytes after path attributes)
@@ -721,23 +725,46 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localA
 		routes = append(routes, makeRoute(n, attrs.nextHop, pph, router, attrs, ribType, localASN))
 	}
 
-	// Parse IPv6 NLRI carried inside MP_REACH_NLRI (AFI=2, SAFI=1)
+	// NLRI carried in MP_REACH_NLRI / MP_UNREACH_NLRI (RFC 4760): IPv4 and
+	// IPv6 unicast. Any other address family is counted, not decoded.
 	if len(attrs.mpReach) > 0 {
-		nh, prefixes := parseMPReachNLRI(attrs.mpReach, addPath&AFIIPv6Unicast != 0)
-		for _, n := range prefixes {
-			routes = append(routes, makeRoute(n, nh, pph, router, attrs, ribType, localASN))
+		mp := parseMPReachNLRI(attrs.mpReach, addPath)
+		if !mp.supported {
+			countUnsupportedNLRI(mp.afi, mp.safi)
+		}
+		for _, n := range mp.nlri {
+			routes = append(routes, makeRoute(n, mp.nextHop, pph, router, attrs, ribType, localASN))
 		}
 	}
-
-	// Parse IPv6 withdrawals carried inside MP_UNREACH_NLRI (AFI=2, SAFI=1)
 	if len(attrs.mpUnreach) > 0 {
-		prefixes := parseMPUnreachNLRI(attrs.mpUnreach, addPath&AFIIPv6Unicast != 0)
-		for _, n := range prefixes {
+		mp := parseMPUnreachNLRI(attrs.mpUnreach, addPath)
+		if !mp.supported {
+			countUnsupportedNLRI(mp.afi, mp.safi)
+		}
+		for _, n := range mp.nlri {
 			withdrawals = append(withdrawals, makeWithdrawal(n, pph, router, ribType))
 		}
 	}
 
 	return routes, withdrawals, nil
+}
+
+// ribTypeOf is the RIB a Route Monitoring message reports (RFC 7854 L flag,
+// RFC 8671 O flag): Adj-RIB-In or Adj-RIB-Out, pre- or post-policy.
+func ribTypeOf(pph BMPPerPeerHeader) types.RIBType {
+	switch {
+	case pph.IsAdjRIBOut() && pph.IsPostPolicy():
+		return types.AdjRIBOutPost
+	case pph.IsAdjRIBOut():
+		return types.AdjRIBOutPre
+	case pph.IsPostPolicy():
+		return types.AdjRIBInPost
+	}
+	return types.AdjRIBInPre
+}
+
+func countUnsupportedNLRI(afi uint16, safi uint8) {
+	metrics.BMPUnsupportedNLRITotal.WithLabelValues(strconv.Itoa(int(afi)), strconv.Itoa(int(safi))).Inc()
 }
 
 // makeRoute constructs a types.Route from an NLRI entry, next hop, and
@@ -822,40 +849,59 @@ func parseNLRI(data []byte, addrLen int, addPath bool) []nlri {
 	return out
 }
 
+// mpNLRI is a decoded MP_REACH_NLRI or MP_UNREACH_NLRI attribute.
+type mpNLRI struct {
+	afi       uint16
+	safi      uint8
+	supported bool       // an address family RAVEN decodes (IPv4 or IPv6 unicast)
+	nextHop   netip.Addr // MP_REACH only
+	nlri      []nlri
+}
+
+// mpFamily returns the NLRI address length and ADD-PATH bit for a supported
+// (afi, safi): IPv4 or IPv6 unicast.
+func mpFamily(afi uint16, safi uint8) (addrLen int, bit AFIMask, ok bool) {
+	switch {
+	case afi == 1 && safi == 1:
+		return 4, AFIIPv4Unicast, true
+	case afi == 2 && safi == 1:
+		return 16, AFIIPv6Unicast, true
+	}
+	return 0, 0, false
+}
+
 // parseMPReachNLRI parses an MP_REACH_NLRI attribute payload (RFC 4760 §3).
 // Layout:
 //
 //	AFI(2) | SAFI(1) | NH Len(1) | NH(variable) | Reserved(1) | NLRI(variable)
 //
-// Only AFI=2 (IPv6) SAFI=1 (unicast) is handled; other combinations are ignored.
-// For IPv6 the next hop is 16 bytes (global) or 32 bytes (global + link-local);
-// the link-local is dropped — RAVEN only records the global address.
-func parseMPReachNLRI(data []byte, addPath bool) (netip.Addr, []nlri) {
+// IPv4 and IPv6 unicast are decoded, each with its own ADD-PATH setting. The
+// next hop is IPv4 (4 bytes, IPv4 NLRI only) or IPv6 (16 bytes global, or 32
+// with a link-local RAVEN drops); an IPv6 next hop for IPv4 NLRI is RFC 8950.
+// Other address families come back unsupported. A malformed attribute (too
+// short, next hop running past it) yields no NLRI.
+func parseMPReachNLRI(data []byte, addPath AFIMask) mpNLRI {
 	if len(data) < 5 {
-		return netip.Addr{}, nil
+		return mpNLRI{supported: true}
 	}
-	afi := binary.BigEndian.Uint16(data[0:2])
-	safi := data[2]
-	if afi != 2 || safi != 1 {
-		return netip.Addr{}, nil
+	mp := mpNLRI{afi: binary.BigEndian.Uint16(data[0:2]), safi: data[2]}
+	addrLen, bit, ok := mpFamily(mp.afi, mp.safi)
+	if !ok {
+		return mp
 	}
+	mp.supported = true
 	nhLen := int(data[3])
 	if 4+nhLen+1 > len(data) {
-		return netip.Addr{}, nil
+		return mp
 	}
-	var nextHop netip.Addr
-	if nhLen >= 16 {
-		// Take the first 16 bytes as the global next hop. Per RFC 2545, a
-		// 32-byte field carries the link-local in bytes 16..31; we drop it.
-		if addr, ok := netip.AddrFromSlice(data[4 : 4+16]); ok {
-			nextHop = addr
-		}
+	switch {
+	case nhLen == 4 && mp.afi == 1:
+		mp.nextHop = netip.AddrFrom4([4]byte(data[4:8]))
+	case nhLen == 16 || nhLen == 32:
+		mp.nextHop = netip.AddrFrom16([16]byte(data[4:20]))
 	}
-	nlriStart := 4 + nhLen + 1 // skip reserved byte
-	if nlriStart > len(data) {
-		return nextHop, nil
-	}
-	return nextHop, parseNLRI(data[nlriStart:], 16, addPath)
+	mp.nlri = parseNLRI(data[4+nhLen+1:], addrLen, addPath&bit != 0) // skip the reserved byte
+	return mp
 }
 
 // parseMPUnreachNLRI parses an MP_UNREACH_NLRI attribute payload (RFC 4760 §4).
@@ -863,17 +909,20 @@ func parseMPReachNLRI(data []byte, addPath bool) (netip.Addr, []nlri) {
 //
 //	AFI(2) | SAFI(1) | Withdrawn NLRI(variable)
 //
-// Only AFI=2 (IPv6) SAFI=1 (unicast) is handled.
-func parseMPUnreachNLRI(data []byte, addPath bool) []nlri {
+// IPv4 and IPv6 unicast are decoded; other address families come back
+// unsupported.
+func parseMPUnreachNLRI(data []byte, addPath AFIMask) mpNLRI {
 	if len(data) < 3 {
-		return nil
+		return mpNLRI{supported: true}
 	}
-	afi := binary.BigEndian.Uint16(data[0:2])
-	safi := data[2]
-	if afi != 2 || safi != 1 {
-		return nil
+	mp := mpNLRI{afi: binary.BigEndian.Uint16(data[0:2]), safi: data[2]}
+	addrLen, bit, ok := mpFamily(mp.afi, mp.safi)
+	if !ok {
+		return mp
 	}
-	return parseNLRI(data[3:], 16, addPath)
+	mp.supported = true
+	mp.nlri = parseNLRI(data[3:], addrLen, addPath&bit != 0)
+	return mp
 }
 
 // pathAttrs collects the path-attribute fields RAVEN cares about, plus the raw
@@ -882,18 +931,40 @@ type pathAttrs struct {
 	asPath           []uint32
 	asPathRaw        []types.ASSegment
 	origin           uint8
-	nextHop          netip.Addr // IPv4 NEXT_HOP only; IPv6 next hop lives in MP_REACH
+	nextHop          netip.Addr // IPv4 NEXT_HOP only; MP next hops live in MP_REACH
 	communities      []types.Community
 	largeCommunities []types.LargeCommunity
 	mpReach          []byte // MP_REACH_NLRI body (attr type 14)
 	mpUnreach        []byte // MP_UNREACH_NLRI body (attr type 15)
 }
 
+// BGP path attribute type codes RAVEN reads.
+const (
+	attrOrigin           = 1
+	attrASPath           = 2
+	attrNextHop          = 3
+	attrCommunities      = 8
+	attrMPReach          = 14
+	attrMPUnreach        = 15
+	attrAS4Path          = 17 // RFC 6793
+	attrLargeCommunities = 32
+)
+
+// asTrans is AS_TRANS (RFC 6793): the 2-octet stand-in for a 4-octet AS.
+const asTrans = 23456
+
 // parsePathAttributes walks the path attributes and extracts the fields
 // RAVEN cares about: AS_PATH, ORIGIN, NEXT_HOP, COMMUNITIES, MP_REACH_NLRI,
-// MP_UNREACH_NLRI.
-func parsePathAttributes(data []byte) pathAttrs {
+// MP_UNREACH_NLRI, LARGE_COMMUNITIES and AS4_PATH.
+//
+// as2 is the per-peer header's A flag (RFC 7854 §4.2): the peer session uses
+// 2-octet AS numbers, so AS_PATH holds 2-octet ASNs (4-octet ones as
+// AS_TRANS) and AS4_PATH, if present, carries the 4-octet path to merge
+// (RFC 6793 §4.2.3). Without it AS_PATH holds 4-octet ASNs and AS4_PATH is
+// ignored, as a 4-octet speaker must.
+func parsePathAttributes(data []byte, as2 bool) pathAttrs {
 	var out pathAttrs
+	var as4Path []types.ASSegment
 	offset := 0
 	for offset < len(data) {
 		if offset+2 > len(data) {
@@ -928,22 +999,29 @@ func parsePathAttributes(data []byte) pathAttrs {
 		offset += attrLen
 
 		switch attrType {
-		case 1: // ORIGIN
+		case attrOrigin:
 			if len(attrData) >= 1 {
 				out.origin = attrData[0]
 			}
 
-		case 2: // AS_PATH
-			out.asPath, out.asPathRaw = parseASPath(attrData)
+		case attrASPath:
+			asnLen := 4
+			if as2 {
+				asnLen = 2
+			}
+			out.asPathRaw = parseASPath(attrData, asnLen)
 
-		case 3: // NEXT_HOP (IPv4)
-			if len(attrData) == 4 {
-				if addr, ok := netip.AddrFromSlice(attrData); ok {
-					out.nextHop = addr
-				}
+		case attrAS4Path:
+			if as2 {
+				as4Path = parseASPath(attrData, 4)
 			}
 
-		case 8: // COMMUNITIES
+		case attrNextHop:
+			if len(attrData) == 4 {
+				out.nextHop = netip.AddrFrom4([4]byte(attrData))
+			}
+
+		case attrCommunities:
 			for i := 0; i+4 <= len(attrData); i += 4 {
 				out.communities = append(out.communities, types.Community{
 					High: binary.BigEndian.Uint16(attrData[i : i+2]),
@@ -951,13 +1029,13 @@ func parsePathAttributes(data []byte) pathAttrs {
 				})
 			}
 
-		case 14: // MP_REACH_NLRI (RFC 4760)
+		case attrMPReach:
 			out.mpReach = attrData
 
-		case 15: // MP_UNREACH_NLRI (RFC 4760)
+		case attrMPUnreach:
 			out.mpUnreach = attrData
 
-		case 32: // LARGE_COMMUNITIES
+		case attrLargeCommunities:
 			for i := 0; i+12 <= len(attrData); i += 12 {
 				out.largeCommunities = append(out.largeCommunities, types.LargeCommunity{
 					GlobalAdmin: binary.BigEndian.Uint32(attrData[i : i+4]),
@@ -968,41 +1046,101 @@ func parsePathAttributes(data []byte) pathAttrs {
 		}
 	}
 
+	if as4Path != nil {
+		out.asPathRaw = mergeAS4Path(out.asPathRaw, as4Path)
+	}
+	out.asPath = flattenASPath(out.asPathRaw)
 	return out
 }
 
-// parseASPath parses the AS_PATH attribute data into flat and raw forms.
-func parseASPath(data []byte) (flat []uint32, raw []types.ASSegment) {
+// parseASPath parses AS_PATH (or AS4_PATH) attribute data with asnLen-byte
+// AS numbers (2 or 4) into its segments. A segment running past the
+// attribute ends the parse; the segments before it are kept.
+func parseASPath(data []byte, asnLen int) []types.ASSegment {
+	var raw []types.ASSegment
 	offset := 0
-	for offset < len(data) {
-		if offset+2 > len(data) {
-			break
-		}
-
+	for offset+2 <= len(data) {
 		segType := types.ASSegmentType(data[offset])
 		segLen := int(data[offset+1])
 		offset += 2
-
-		if offset+segLen*4 > len(data) {
+		if offset+segLen*asnLen > len(data) {
 			break
 		}
-
-		seg := types.ASSegment{
-			Type: segType,
-			ASNs: make([]uint32, segLen),
-		}
-
+		seg := types.ASSegment{Type: segType, ASNs: make([]uint32, segLen)}
 		for i := 0; i < segLen; i++ {
-			seg.ASNs[i] = binary.BigEndian.Uint32(data[offset : offset+4])
-			offset += 4
+			if asnLen == 2 {
+				seg.ASNs[i] = uint32(binary.BigEndian.Uint16(data[offset : offset+2]))
+			} else {
+				seg.ASNs[i] = binary.BigEndian.Uint32(data[offset : offset+4])
+			}
+			offset += asnLen
 		}
-
 		raw = append(raw, seg)
-
-		// Flatten: AS_SEQUENCE segments contribute to the flat path
-		// AS_SET segments are expanded (all ASNs included)
-		flat = append(flat, seg.ASNs...)
 	}
+	return raw
+}
 
-	return
+// flattenASPath lists the path's AS numbers in order. AS_SET members are
+// included (expanded); so are confederation segments.
+func flattenASPath(segs []types.ASSegment) []uint32 {
+	var flat []uint32
+	for _, s := range segs {
+		flat = append(flat, s.ASNs...)
+	}
+	return flat
+}
+
+// asPathCount is the number of AS numbers in a path as RFC 6793 §4.2.3
+// counts them (RFC 4271 §9.1.2.2): each AS_SEQUENCE member counts one, an
+// AS_SET counts one, confederation segments count none.
+func asPathCount(segs []types.ASSegment) int {
+	n := 0
+	for _, s := range segs {
+		switch s.Type {
+		case types.ASSegmentSequence:
+			n += len(s.ASNs)
+		case types.ASSegmentSet:
+			n++
+		}
+	}
+	return n
+}
+
+// mergeAS4Path reconstructs the AS path from AS_PATH and AS4_PATH received
+// over a 2-octet session (RFC 6793 §4.2.3). If AS_PATH has fewer AS numbers
+// than AS4_PATH, AS4_PATH is ignored. Otherwise the result is the leading
+// part of AS_PATH, as many AS numbers and segments as make up the
+// difference, followed by AS4_PATH, so it has as many AS numbers as AS_PATH:
+// the AS_TRANS stand-ins in AS_PATH's tail are replaced by the real 4-octet
+// ASNs. Confederation segments in AS4_PATH, which a speaker must not send
+// there, are dropped.
+func mergeAS4Path(asPath, as4Path []types.ASSegment) []types.ASSegment {
+	var as4 []types.ASSegment
+	for _, s := range as4Path {
+		if s.Type == types.ASSegmentSequence || s.Type == types.ASSegmentSet {
+			as4 = append(as4, s)
+		}
+	}
+	need := asPathCount(asPath) - asPathCount(as4)
+	if need < 0 {
+		return asPath
+	}
+	var out []types.ASSegment
+	for _, s := range asPath {
+		if need == 0 {
+			break
+		}
+		switch s.Type {
+		case types.ASSegmentSequence:
+			k := min(need, len(s.ASNs))
+			out = append(out, types.ASSegment{Type: s.Type, ASNs: s.ASNs[:k:k]})
+			need -= k
+		case types.ASSegmentSet:
+			out = append(out, s)
+			need--
+		default: // confederation segments count none; keep them in place
+			out = append(out, s)
+		}
+	}
+	return append(out, as4...)
 }

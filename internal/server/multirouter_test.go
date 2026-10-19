@@ -66,8 +66,8 @@ func TestTwoRoutersSamePeerAndPrefix(t *testing.T) {
 	}
 	counts := s.table.PeerRouteCounts()
 	a, b := types.NewPeerRef(routerA, 0, rsPeer), types.NewPeerRef(routerB, 0, rsPeer)
-	if counts[a] != 1 || counts[b] != 2 {
-		t.Errorf("counts router A %d, router B %d; want 1 and 2", counts[a], counts[b])
+	if counts[a][types.AdjRIBInPre] != 1 || counts[b][types.AdjRIBInPre] != 2 {
+		t.Errorf("counts router A %d, router B %d; want 1 and 2", counts[a][types.AdjRIBInPre], counts[b][types.AdjRIBInPre])
 	}
 	for router, want := range map[netip.Addr]int{routerA: 1, routerB: 2} {
 		got := routesVia(t, s, "router="+router.String())
@@ -98,8 +98,8 @@ func TestPeerDownAndSessionEndStayOnTheirRouter(t *testing.T) {
 	check := func(step string, wantA uint64) {
 		t.Helper()
 		counts := s.table.PeerRouteCounts()
-		if counts[bRef] != 2 || counts[types.NewPeerRef(routerA, 0, rsPeer)] != wantA {
-			t.Errorf("%s: counts A %d B %d, want %d and 2", step, counts[types.NewPeerRef(routerA, 0, rsPeer)], counts[bRef], wantA)
+		if counts[bRef][types.AdjRIBInPre] != 2 || counts[types.NewPeerRef(routerA, 0, rsPeer)][types.AdjRIBInPre] != wantA {
+			t.Errorf("%s: counts A %d B %d, want %d and 2", step, counts[types.NewPeerRef(routerA, 0, rsPeer)][types.AdjRIBInPre], counts[bRef][types.AdjRIBInPre], wantA)
 		}
 		for _, p := range []string{"1.1.1.0/24", "8.8.8.0/24"} {
 			r := routerRoute(routerB, p)
@@ -121,7 +121,7 @@ func TestPeerDownAndSessionEndStayOnTheirRouter(t *testing.T) {
 	r := routerRoute(routerB, "8.8.8.0/24")
 	w := types.Withdrawal{Router: routerB, PeerAddr: rsPeer, Prefix: r.Prefix, RIBType: types.AdjRIBInPre}
 	s.ingestWithdrawal(w, sessB)
-	if s.table.Get(r.Key()) != nil || s.table.PeerRouteCounts()[bRef] != 1 {
+	if s.table.Get(r.Key()) != nil || s.table.PeerRouteCounts()[bRef][types.AdjRIBInPre] != 1 {
 		t.Error("a withdrawal on router B did not remove router B's route")
 	}
 }

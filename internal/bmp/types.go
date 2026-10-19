@@ -41,6 +41,12 @@ const (
 // BMP Common Header length: 5 bytes (Version + MsgLength + MsgType)
 const CommonHeaderLen = 6 // 1 (version) + 4 (length) + 1 (type)
 
+// MaxMessageLen bounds a BMP message RAVEN accepts. The largest legitimate
+// ones, a Route Monitoring with an RFC 8654 extended (65,535-byte) BGP
+// message, or a Peer Up with two OPENs and information TLVs, are far below
+// it; a session sending a longer one is closed.
+const MaxMessageLen = 1 << 20
+
 // BMP Per-Peer Header length: 42 bytes
 const PerPeerHeaderLen = 42
 

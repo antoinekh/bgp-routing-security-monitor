@@ -170,6 +170,10 @@ func ribTypeString(rt types.RIBType) string {
 		return "post-policy"
 	case types.LocRIB:
 		return "loc-rib"
+	case types.AdjRIBOutPre:
+		return "adj-rib-out-pre"
+	case types.AdjRIBOutPost:
+		return "adj-rib-out-post"
 	default:
 		return "pre-policy"
 	}

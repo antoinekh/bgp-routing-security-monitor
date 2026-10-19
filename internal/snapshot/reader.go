@@ -175,6 +175,10 @@ func parseRIBType(s string) types.RIBType {
 		return types.AdjRIBInPost
 	case "loc-rib":
 		return types.LocRIB
+	case "adj-rib-out-pre":
+		return types.AdjRIBOutPre
+	case "adj-rib-out-post":
+		return types.AdjRIBOutPost
 	default:
 		return types.AdjRIBInPre
 	}

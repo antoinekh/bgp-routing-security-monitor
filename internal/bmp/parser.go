@@ -276,20 +276,36 @@ func parseOpen(data []byte) (openInfo, error) {
 	}
 	o.asn = uint32(binary.BigEndian.Uint16(body[1:3]))
 	optParmLen := int(body[9])
-
 	optParams := body[10:]
+
+	// RFC 9072: an Optional Parameters Length of 255 followed by a
+	// parameter type of 255 marks the extended format, used when the
+	// parameters do not fit in 255 bytes: a 2-byte total length, then
+	// parameters with 2-byte lengths.
+	extended := optParmLen == 255 && len(optParams) >= 3 && optParams[0] == 255
+	if extended {
+		optParmLen = int(binary.BigEndian.Uint16(optParams[1:3]))
+		optParams = optParams[3:]
+	}
 	if optParmLen > len(optParams) {
 		optParmLen = len(optParams)
 	}
 	optParams = optParams[:optParmLen]
+	hdrLen := 2
+	if extended {
+		hdrLen = 3
+	}
 
 	// Walk optional parameters for the Capabilities parameter, then walk
 	// capabilities for the 4-octet AS Number and ADD-PATH capabilities.
 	off := 0
-	for off+2 <= len(optParams) {
+	for off+hdrLen <= len(optParams) {
 		paramType := optParams[off]
 		paramLen := int(optParams[off+1])
-		off += 2
+		if extended {
+			paramLen = int(binary.BigEndian.Uint16(optParams[off+1 : off+3]))
+		}
+		off += hdrLen
 		if off+paramLen > len(optParams) {
 			break
 		}
@@ -360,7 +376,9 @@ func ParseStatsReport(data []byte) (BMPStatsReport, error) {
 	}
 
 	count := binary.BigEndian.Uint32(body[0:4])
-	counters := make(map[uint16]uint64, count)
+	// Each stat takes at least 4 bytes; size the map by what is there, not
+	// by the 32-bit count, which could ask for billions of entries.
+	counters := make(map[uint16]uint64, min(int(count), (len(body)-4)/4))
 	offset := 4
 
 	for i := uint32(0); i < count; i++ {

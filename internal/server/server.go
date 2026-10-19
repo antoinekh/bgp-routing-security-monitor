@@ -18,6 +18,7 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/api"
 	"github.com/nokia/bgp-routing-security-monitor/internal/aspa/recommender"
 	"github.com/nokia/bgp-routing-security-monitor/internal/bmp"
+	"github.com/nokia/bgp-routing-security-monitor/internal/buildinfo"
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 	"github.com/nokia/bgp-routing-security-monitor/internal/events"
 	"github.com/nokia/bgp-routing-security-monitor/internal/external"
@@ -33,6 +34,7 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/validation"
 	"github.com/nokia/bgp-routing-security-monitor/internal/validation/aspa"
 	"github.com/nokia/bgp-routing-security-monitor/internal/whatif"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -110,6 +112,16 @@ type Server struct {
 	// exact points in the loop instead of racing it.
 	testAfterEvent func(types.IngestEvent)
 	testAfterChunk func()
+	// testEmitted, if set, sees each event emitted to the event engine.
+	testEmitted func(events.Event)
+}
+
+// emitEvent hands ev to the event engine.
+func (s *Server) emitEvent(ev events.Event) {
+	if s.testEmitted != nil {
+		s.testEmitted(ev)
+	}
+	s.eventEngine.Emit(ev)
 }
 
 // Background work (withdraw-alls and stale eviction, then revalidation
@@ -181,7 +193,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 
 	// Existing API server
 	srv.bmpListen.SetAllowedRouters(allowed)
-	srv.apiSrv = api.NewServer(table, srv.bmpListen, vrpStore, log, "dev")
+	srv.apiSrv = api.NewServer(table, srv.bmpListen, vrpStore, log, buildinfo.Version)
 
 	// Phase 2b: what-if + recommender
 	sim := whatif.NewSimulator(table)
@@ -764,20 +776,22 @@ func (s *Server) ingestRoute(r types.Route, session, count uint64) {
 	// Notify watch subscribers
 	s.apiSrv.NotifyRoute(&r)
 
-	// Emit to the event engine for active-response rule evaluation.
-	if s.eventEngine != nil {
+	// Emit to the event engine for active-response rule evaluation. Not
+	// for Adj-RIB-Out routes: the rules (and their actions, FlowSpec
+	// mitigation included) are about routes the router receives.
+	if s.eventEngine != nil && !r.RIBType.IsAdjRIBOut() {
 		eventType := events.EventTypeNewRoute
 		if oldPosture != "" {
 			eventType = events.EventTypePostureChange
 		}
-		s.eventEngine.Emit(events.Event{
+		s.emitEvent(events.Event{
 			ID:         events.NewID(),
 			Timestamp:  r.Timestamp,
 			Type:       eventType,
 			Route:      &r,
 			OldPosture: oldPosture,
 			NewPosture: r.SecurityPosture,
-			RouterID:   r.RouterID.String(),
+			RouterID:   r.Router.String(), // the monitored router, not the peer's BGP ID
 		})
 	}
 
@@ -821,14 +835,14 @@ func (s *Server) ingestWithdrawal(w types.Withdrawal, session uint64) {
 	if !s.table.WithdrawFromSession(key, session) {
 		return // nothing to withdraw, or a newer session owns the route
 	}
-	if s.eventEngine != nil && withdrawn != nil && withdrawn.OwnerSession <= session {
-		s.eventEngine.Emit(events.Event{
+	if s.eventEngine != nil && withdrawn != nil && withdrawn.OwnerSession <= session && !key.RIBType.IsAdjRIBOut() {
+		s.emitEvent(events.Event{
 			ID:         events.NewID(),
 			Timestamp:  time.Now(),
 			Type:       events.EventTypeRouteWithdraw,
 			Route:      withdrawn,
 			OldPosture: withdrawn.SecurityPosture,
-			RouterID:   w.PeerAddr.String(),
+			RouterID:   w.Router.String(), // the monitored router; it was the peer's address
 		})
 	}
 }
@@ -843,6 +857,12 @@ func (s *Server) queueRemoval(p *pendingRemoval) {
 func (s *Server) updateRouteMetrics() {
 	routes := s.table.AllPrePolicy()
 	metrics.RouteTableSize.Set(float64(len(routes)))
+	setPostureGauge(metrics.RoutesTotal, routes)
+	setPostureGauge(metrics.AdjRIBOutRoutesTotal, s.table.AllOfRIB(types.AdjRIBOutPre))
+}
+
+// setPostureGauge sets a {posture, afi} gauge to the routes' counts.
+func setPostureGauge(g *prometheus.GaugeVec, routes []*types.Route) {
 
 	// Explicitly zero all known posture/AFI combinations before repopulating.
 	// Using Reset() removes the series entirely, which causes Grafana
@@ -852,7 +872,7 @@ func (s *Server) updateRouteMetrics() {
 		"unverified", "origin-invalid",
 	} {
 		for _, afi := range []string{"ipv4", "ipv6"} {
-			metrics.RoutesTotal.WithLabelValues(posture, afi).Set(0)
+			g.WithLabelValues(posture, afi).Set(0)
 		}
 	}
 
@@ -874,7 +894,7 @@ func (s *Server) updateRouteMetrics() {
 	}
 	for posture, afis := range counts {
 		for afi, n := range afis {
-			metrics.RoutesTotal.WithLabelValues(posture, afi).Set(float64(n))
+			g.WithLabelValues(posture, afi).Set(float64(n))
 		}
 	}
 }
