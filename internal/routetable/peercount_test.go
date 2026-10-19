@@ -13,25 +13,34 @@ import (
 // total.
 func checkPeerCounts(t *testing.T, tbl *Table, step string) {
 	t.Helper()
-	actual := map[types.PeerRef]uint64{}
+	actual := map[types.PeerRef]types.RIBCounts{}
+	var byRIB types.RIBCounts
 	for _, r := range tbl.All() {
-		actual[r.Peer()]++
+		c := actual[r.Peer()]
+		c[r.RIBType]++
+		actual[r.Peer()] = c
+		byRIB[r.RIBType]++
 	}
 	got := tbl.PeerRouteCounts()
 	var sum uint64
-	for p, n := range got {
-		sum += n
-		if actual[p] != n {
-			t.Fatalf("%s: peer %+v counted %d, holds %d", step, p, n, actual[p])
+	for p, c := range got {
+		for _, n := range c {
+			sum += n
+		}
+		if actual[p] != c {
+			t.Fatalf("%s: peer %+v counted %v, holds %v", step, p, c, actual[p])
 		}
 	}
-	for p, n := range actual {
-		if got[p] != n {
-			t.Fatalf("%s: peer %+v holds %d, counted %d", step, p, n, got[p])
+	for p, c := range actual {
+		if got[p] != c {
+			t.Fatalf("%s: peer %+v holds %v, counted %v", step, p, c, got[p])
 		}
 	}
 	if total := tbl.Count(); sum != total {
 		t.Fatalf("%s: per-peer counts sum to %d, table holds %d", step, sum, total)
+	}
+	if got := tbl.CountByRIB(); got != byRIB {
+		t.Fatalf("%s: CountByRIB %v, table holds %v", step, got, byRIB)
 	}
 }
 

@@ -33,6 +33,7 @@ type PeerRouteCount struct {
 	Router            string
 	PeerDistinguisher string
 	PeerAddr          string
+	RIB               string // the RIB counted, e.g. adj-rib-in-pre; inbound and outbound apart
 	PeerASN           uint32
 	Posture           string
 	Count             int64

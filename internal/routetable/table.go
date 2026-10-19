@@ -65,9 +65,9 @@ type shard struct {
 	owned map[ownerKey]routeSet
 
 	// perPeer counts the shard's routes by peer (router, distinguisher and
-	// address). It changes exactly when routes does: a key added, or a key
-	// removed.
-	perPeer map[types.PeerRef]int
+	// address) and RIB type. It changes exactly when routes does: a key
+	// added, or a key removed.
+	perPeer map[types.PeerRef]*types.RIBCounts
 }
 
 // ownerKey is an owner index entry: a BMP session and one peer it reports.
@@ -165,7 +165,7 @@ func New() *Table {
 	for i := range t.shards {
 		t.shards[i].routes = make(map[types.RouteKey]*types.Route)
 		t.shards[i].owned = make(map[ownerKey]routeSet)
-		t.shards[i].perPeer = make(map[types.PeerRef]int)
+		t.shards[i].perPeer = make(map[types.PeerRef]*types.RIBCounts)
 	}
 	return t
 }
@@ -180,7 +180,13 @@ func (t *Table) Insert(route *types.Route) {
 	old := s.routes[key]
 	s.routes[key] = route
 	if old == nil {
-		s.perPeer[key.Peer]++ // a new key; a re-announcement is not
+		// A new key counts; a re-announcement does not.
+		c := s.perPeer[key.Peer]
+		if c == nil {
+			c = new(types.RIBCounts)
+			s.perPeer[key.Peer] = c
+		}
+		c[key.RIBType]++
 	}
 	// Re-inserting the stored pointer itself changes nothing in the owner
 	// index.
@@ -214,13 +220,17 @@ func (t *Table) Insert(route *types.Route) {
 	}
 	t.asnMu.Unlock()
 
-	// Update posture index
-	t.postureMu.Lock()
-	t.unindexPostureExcept(key, route.SecurityPosture)
-	if route.SecurityPosture != "" {
-		addKey(t.postureIdx, route.SecurityPosture, key)
+	// Update posture index: Adj-RIB-In pre-policy routes only, the view
+	// posture counts and raven_routes_total report. It used to take every
+	// RIB, so a router sending pre- and post-policy was counted twice.
+	if key.RIBType == types.AdjRIBInPre {
+		t.postureMu.Lock()
+		t.unindexPostureExcept(key, route.SecurityPosture)
+		if route.SecurityPosture != "" {
+			addKey(t.postureIdx, route.SecurityPosture, key)
+		}
+		t.postureMu.Unlock()
 	}
-	t.postureMu.Unlock()
 }
 
 // unindexPostureExcept removes key from every posture index entry other than
@@ -296,8 +306,11 @@ func (t *Table) withdrawOne(key types.RouteKey, pred func(*types.Route) bool) bo
 	if exists {
 		delete(s.routes, key)
 		s.disown(route)
-		if s.perPeer[key.Peer]--; s.perPeer[key.Peer] <= 0 {
-			delete(s.perPeer, key.Peer)
+		if c := s.perPeer[key.Peer]; c != nil {
+			c[key.RIBType]--
+			if *c == (types.RIBCounts{}) {
+				delete(s.perPeer, key.Peer)
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -526,7 +539,7 @@ func (t *Table) Replace(old, updated *types.Route) bool {
 	// unindex it in between and leave updated's posture listed. Lock order
 	// shard → postureMu; no reader holds an index lock while taking a
 	// shard lock.
-	if updated.SecurityPosture != old.SecurityPosture {
+	if updated.SecurityPosture != old.SecurityPosture && key.RIBType == types.AdjRIBInPre {
 		t.postureMu.Lock()
 		t.unindexPostureExcept(key, updated.SecurityPosture)
 		if updated.SecurityPosture != "" {
@@ -692,18 +705,40 @@ func (t *Table) All() []*types.Route {
 // AllPrePolicy returns only Adj-RIB-In Pre-Policy routes — the default
 // operator view showing what routers received before import filtering.
 func (t *Table) AllPrePolicy() []*types.Route {
+	return t.AllOfRIB(types.AdjRIBInPre)
+}
+
+// AllOfRIB returns the routes of one RIB type.
+func (t *Table) AllOfRIB(rib types.RIBType) []*types.Route {
 	var routes []*types.Route
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
 		for _, route := range s.routes {
-			if route.RIBType == types.AdjRIBInPre {
+			if route.RIBType == rib {
 				routes = append(routes, route)
 			}
 		}
 		s.mu.RUnlock()
 	}
 	return routes
+}
+
+// CountByRIB returns the number of routes of each RIB type. It reads the
+// per-peer counts, not the routes.
+func (t *Table) CountByRIB() types.RIBCounts {
+	var out types.RIBCounts
+	for i := range t.shards {
+		s := &t.shards[i]
+		s.mu.RLock()
+		for _, c := range s.perPeer {
+			for r := range c {
+				out[r] += c[r]
+			}
+		}
+		s.mu.RUnlock()
+	}
+	return out
 }
 
 // Count returns the total number of routes.
@@ -718,16 +753,21 @@ func (t *Table) Count() uint64 {
 	return total
 }
 
-// PeerRouteCounts returns how many routes the table holds for each peer:
-// per router, per instance, per address. Peers with none are absent. It
-// reads each shard's counts, not its routes.
-func (t *Table) PeerRouteCounts() map[types.PeerRef]uint64 {
-	out := make(map[types.PeerRef]uint64)
+// PeerRouteCounts returns how many routes the table holds for each peer
+// (per router, per instance, per address), per RIB type: inbound and
+// outbound are never added together. Peers with none are absent. It reads
+// each shard's counts, not its routes.
+func (t *Table) PeerRouteCounts() map[types.PeerRef]types.RIBCounts {
+	out := make(map[types.PeerRef]types.RIBCounts)
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
-		for p, n := range s.perPeer {
-			out[p] += uint64(n)
+		for p, c := range s.perPeer {
+			sum := out[p]
+			for r := range c {
+				sum[r] += c[r]
+			}
+			out[p] = sum
 		}
 		s.mu.RUnlock()
 	}

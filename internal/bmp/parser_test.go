@@ -131,7 +131,8 @@ func TestParseASPath(t *testing.T) {
 	binary.BigEndian.PutUint32(asn2, 13335)
 	data = append(data, asn2...)
 
-	flat, raw := parseASPath(data)
+	raw := parseASPath(data, 4)
+	flat := flattenASPath(raw)
 
 	if len(flat) != 2 {
 		t.Fatalf("flat AS_PATH length = %d, want 2", len(flat))

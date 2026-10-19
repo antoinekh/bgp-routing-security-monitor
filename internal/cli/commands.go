@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/nokia/bgp-routing-security-monitor/internal/buildinfo"
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 	"github.com/nokia/bgp-routing-security-monitor/internal/server"
 )
@@ -25,7 +26,7 @@ var serveCmd = &cobra.Command{
 	Short: "Start the RAVEN daemon (BMP receiver + RTR client + outputs)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log := initLogger()
-		log.Info("starting raven", "version", version, "commit", commit)
+		log.Info("starting raven", "version", buildinfo.Version, "commit", buildinfo.Commit)
 
 		cfg, err := config.Load()
 		if err != nil {
@@ -85,9 +86,9 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show RAVEN version and build information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("raven %s\n", version)
-		fmt.Printf("  commit: %s\n", commit)
-		fmt.Printf("  built:  %s\n", date)
+		fmt.Printf("raven %s\n", buildinfo.Version)
+		fmt.Printf("  commit: %s\n", buildinfo.Commit)
+		fmt.Printf("  built:  %s\n", buildinfo.Date)
 	},
 }
 
@@ -115,6 +116,7 @@ var statusCmd = &cobra.Command{
 			RouteTable struct {
 				TotalRoutes uint64            `json:"total_routes"`
 				ByPosture   map[string]uint64 `json:"by_posture"`
+				ByRIB       map[string]uint64 `json:"by_rib"`
 			} `json:"route_table"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
@@ -123,18 +125,27 @@ var statusCmd = &cobra.Command{
 
 		fmt.Printf("RAVEN %s  uptime %s\n\n", status.Version, status.Uptime)
 
-		fmt.Printf("Route Table: %d routes\n", status.RouteTable.TotalRoutes)
+		fmt.Printf("Route Table: %d routes received (Adj-RIB-In pre-policy)\n", status.RouteTable.TotalRoutes)
 		for posture, count := range status.RouteTable.ByPosture {
 			fmt.Printf("  %-20s %d\n", posture, count)
+		}
+		if len(status.RouteTable.ByRIB) > 1 {
+			fmt.Printf("By RIB:\n")
+			for _, rib := range []string{"adj-rib-in-pre", "adj-rib-in-post", "loc-rib", "adj-rib-out-pre", "adj-rib-out-post"} {
+				if n, ok := status.RouteTable.ByRIB[rib]; ok {
+					fmt.Printf("  %-20s %d\n", rib, n)
+				}
+			}
 		}
 
 		fmt.Printf("\nRPKI: %d VRPs (serial %d)\n", status.RTR.VRPCount, status.RTR.Serial)
 
 		fmt.Printf("\nBMP Peers: %d\n", len(status.BMP))
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "  ROUTER\tPEER\tASN\tSTATE\tROUTES\n")
+		out := anyOutbound(status.BMP)
+		fmt.Fprintf(tw, "  ROUTER\tPEER\tASN\tSTATE\tROUTES%s\n", outHeader(out))
 		for _, p := range status.BMP {
-			fmt.Fprintf(tw, "  %s\t%s\t%d\t%s\t%d\n", p.router(), p.peer(), p.ASN, p.State, p.RouteCount)
+			fmt.Fprintf(tw, "  %s\t%s\t%d\t%s\t%d%s\n", p.router(), p.peer(), p.ASN, p.State, p.RouteCount, p.outCell(out))
 		}
 		tw.Flush()
 		return nil
@@ -146,15 +157,42 @@ var statusCmd = &cobra.Command{
 // peerRow is a BMP peer as /api/v1/status and /api/v1/peers report it: one
 // peer on one router, in one instance, with its route count there.
 type peerRow struct {
-	Router            string `json:"router"`
-	RouterName        string `json:"router_name"`
-	PeerDistinguisher string `json:"peer_distinguisher"`
-	Addr              string `json:"addr"`
-	ASN               uint32 `json:"asn"`
-	RouterID          string `json:"router_id"`
-	State             string `json:"state"`
-	RouteCount        uint64 `json:"route_count"`
-	UpSince           string `json:"up_since"`
+	Router            string            `json:"router"`
+	RouterName        string            `json:"router_name"`
+	PeerDistinguisher string            `json:"peer_distinguisher"`
+	Addr              string            `json:"addr"`
+	ASN               uint32            `json:"asn"`
+	RouterID          string            `json:"router_id"`
+	State             string            `json:"state"`
+	RouteCount        uint64            `json:"route_count"` // Adj-RIB-In pre-policy
+	RoutesByRIB       map[string]uint64 `json:"routes_by_rib"`
+	UpSince           string            `json:"up_since"`
+}
+
+// anyOutbound reports whether any peer has Adj-RIB-Out routes: only then do
+// status and peers show an OUT column, the peer's Adj-RIB-Out pre-policy
+// count, beside ROUTES (received) so the two are never added together.
+func anyOutbound(rows []peerRow) bool {
+	for _, p := range rows {
+		if p.RoutesByRIB["adj-rib-out-pre"] != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func outHeader(show bool) string {
+	if show {
+		return "\tOUT"
+	}
+	return ""
+}
+
+func (p peerRow) outCell(show bool) string {
+	if show {
+		return fmt.Sprintf("\t%d", p.RoutesByRIB["adj-rib-out-pre"])
+	}
+	return ""
 }
 
 // router is the ROUTER column: the router's sysName, or its address.
@@ -193,10 +231,11 @@ var peersCmd = &cobra.Command{
 		}
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "ROUTER\tPEER\tASN\tROUTER ID\tSTATE\tROUTES\tUP SINCE\n")
+		out := anyOutbound(peers)
+		fmt.Fprintf(tw, "ROUTER\tPEER\tASN\tROUTER ID\tSTATE\tROUTES%s\tUP SINCE\n", outHeader(out))
 		for _, p := range peers {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d\t%s\n",
-				p.router(), p.peer(), p.ASN, p.RouterID, p.State, p.RouteCount, p.UpSince)
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d%s\t%s\n",
+				p.router(), p.peer(), p.ASN, p.RouterID, p.State, p.RouteCount, p.outCell(out), p.UpSince)
 		}
 		tw.Flush()
 		return nil

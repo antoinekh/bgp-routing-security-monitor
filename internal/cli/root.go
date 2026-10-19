@@ -9,13 +9,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Set via ldflags at build time (see Makefile)
-var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
-)
-
 var cfgFile string
 var addr string
 

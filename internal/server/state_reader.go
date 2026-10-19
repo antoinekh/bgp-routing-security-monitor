@@ -38,14 +38,21 @@ func (s *Server) PeerRouteCounts() []ravenotel.PeerRouteCount {
 	counts := s.table.PeerRouteCounts()
 	result := make([]ravenotel.PeerRouteCount, 0, len(peers))
 	for _, p := range peers {
-		result = append(result, ravenotel.PeerRouteCount{
-			Router:            p.Router.String(),
-			PeerDistinguisher: api.FormatRD(p.Distinguisher),
-			PeerAddr:          p.Addr.String(),
-			PeerASN:           p.ASN,
-			Posture:           "unverified", // per-peer posture not tracked; use "unverified"
-			Count:             int64(counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)]),
-		})
+		c := counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)]
+		for _, rib := range types.AllRIBTypes {
+			if c[rib] == 0 && rib != types.AdjRIBInPre {
+				continue // every peer reports its Adj-RIB-In pre-policy count, even 0
+			}
+			result = append(result, ravenotel.PeerRouteCount{
+				Router:            p.Router.String(),
+				PeerDistinguisher: api.FormatRD(p.Distinguisher),
+				PeerAddr:          p.Addr.String(),
+				PeerASN:           p.ASN,
+				RIB:               rib.String(),
+				Posture:           "unverified", // per-peer posture not tracked; use "unverified"
+				Count:             int64(c[rib]),
+			})
+		}
 	}
 	return result
 }

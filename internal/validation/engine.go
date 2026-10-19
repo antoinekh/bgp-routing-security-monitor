@@ -60,11 +60,23 @@ func (e *Engine) ValidateRoute(route *types.Route) {
 	route.ROV, route.ASPA, route.SecurityPosture = e.annotate(route)
 }
 
+// aspaNotVerifiedOutbound is the ASPA Reason on Adj-RIB-Out routes.
+const aspaNotVerifiedOutbound = "not ASPA-verified: Adj-RIB-Out (outbound) route; ASPA verification applies to routes received from a neighbor"
+
 // annotate runs ROV and ASPA for route against the current stores without
 // changing it.
 func (e *Engine) annotate(route *types.Route) (types.ROVResult, types.ASPAResult, types.SecurityPosture) {
 	// ROV
 	rovRes := e.rovAnnotator.Validate(route)
+	if route.RIBType.IsAdjRIBOut() {
+		// An Adj-RIB-Out route is one the router sends, not one it
+		// received. ASPA verification (upstream or downstream) is defined
+		// for a route received from a neighbour, by the neighbour's
+		// relationship to the verifier, so it says nothing meaningful
+		// here. ROV, about the prefix's origin, still applies.
+		a := types.ASPAResult{State: types.ASPAUnverifiable, Reason: aspaNotVerifiedOutbound}
+		return rovRes, a, types.ComputePosture(rovRes.State, a.State)
+	}
 	// ASPA, with the procedure for the peer the route was learned from
 	sel := e.aspaSelector.Select(route.PeerAddr, route.PeerASN)
 	a := e.aspaAnnotator.ValidateSelection(route, sel)

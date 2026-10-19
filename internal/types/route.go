@@ -1,6 +1,7 @@
 package types
 
 import (
+	"fmt"
 	"net/netip"
 	"time"
 )
@@ -156,8 +157,10 @@ func (w *Withdrawal) Key() RouteKey {
 type ASSegmentType uint8
 
 const (
-	ASSegmentSequence ASSegmentType = 2 // AS_SEQUENCE
-	ASSegmentSet      ASSegmentType = 1 // AS_SET
+	ASSegmentSet            ASSegmentType = 1 // AS_SET
+	ASSegmentSequence       ASSegmentType = 2 // AS_SEQUENCE
+	ASSegmentConfedSequence ASSegmentType = 3 // AS_CONFED_SEQUENCE (RFC 5065)
+	ASSegmentConfedSet      ASSegmentType = 4 // AS_CONFED_SET (RFC 5065)
 )
 
 type ASSegment struct {
@@ -206,7 +209,37 @@ const (
 	AdjRIBInPre  RIBType = 0
 	AdjRIBInPost RIBType = 1
 	LocRIB       RIBType = 2
+	// Adj-RIB-Out (RFC 8671, per-peer header O flag): routes the monitored
+	// router sends to the peer, before or after its outbound policy.
+	AdjRIBOutPre  RIBType = 3
+	AdjRIBOutPost RIBType = 4
 )
+
+// AllRIBTypes lists every RIB type, in order.
+var AllRIBTypes = []RIBType{AdjRIBInPre, AdjRIBInPost, LocRIB, AdjRIBOutPre, AdjRIBOutPost}
+
+// RIBCounts holds a route count per RIB type, indexed by RIBType.
+type RIBCounts [5]uint64
+
+// IsAdjRIBOut reports whether routes of this RIB are outbound: sent to the
+// peer, not received from it.
+func (t RIBType) IsAdjRIBOut() bool { return t == AdjRIBOutPre || t == AdjRIBOutPost }
+
+func (t RIBType) String() string {
+	switch t {
+	case AdjRIBInPre:
+		return "adj-rib-in-pre"
+	case AdjRIBInPost:
+		return "adj-rib-in-post"
+	case LocRIB:
+		return "loc-rib"
+	case AdjRIBOutPre:
+		return "adj-rib-out-pre"
+	case AdjRIBOutPost:
+		return "adj-rib-out-post"
+	}
+	return "unknown"
+}
 
 // ─── ROV (RFC 6811) ───
 
@@ -372,4 +405,23 @@ func ComputePosture(rov ROVState, aspa ASPAState) SecurityPosture {
 		// ROVNotFound + ASPAUnknown/Unverifiable
 		return PostureUnverified
 	}
+}
+
+// FormatRD renders a Peer Distinguisher as a route distinguisher (RFC 4364
+// §4.2): type 0 "ASN:n", type 1 "IPv4:n", type 2 "ASN4:n"; any other value
+// in hex. Zero (a global-instance peer) renders as "".
+func FormatRD(rd uint64) string {
+	if rd == 0 {
+		return ""
+	}
+	switch rd >> 48 {
+	case 0:
+		return fmt.Sprintf("%d:%d", (rd>>32)&0xffff, rd&0xffffffff)
+	case 1:
+		ip := netip.AddrFrom4([4]byte{byte(rd >> 40), byte(rd >> 32), byte(rd >> 24), byte(rd >> 16)})
+		return fmt.Sprintf("%s:%d", ip, rd&0xffff)
+	case 2:
+		return fmt.Sprintf("%d:%d", (rd>>16)&0xffffffff, rd&0xffff)
+	}
+	return fmt.Sprintf("0x%016x", rd)
 }
