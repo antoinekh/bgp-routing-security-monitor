@@ -603,6 +603,14 @@ func (l *Listener) processMessage(
 			}
 			l.peerMu.Unlock()
 		}
+		// A per-peer header timestamp of 0 means the router gave none (RFC
+		// 7854 §4.2); stamp RAVEN's receive time instead.
+		now := time.Now()
+		for i := range routes {
+			if routes[i].Timestamp.Equal(bmpNoTimestamp) {
+				routes[i].Timestamp = now
+			}
+		}
 		for i := range routes {
 			if !l.emitFrom(ctx, sess, types.IngestEvent{Route: &routes[i]}) {
 				return
@@ -639,6 +647,9 @@ func (l *Listener) processMessage(
 		log.Debug("unknown BMP message type", "type", hdr.MsgType)
 	}
 }
+
+// bmpNoTimestamp is a per-peer header timestamp of zero: none given.
+var bmpNoTimestamp = time.Unix(0, 0)
 
 // peerKey is the peer a per-peer header describes on router.
 func peerKey(router netip.Addr, pph BMPPerPeerHeader) PeerKey {

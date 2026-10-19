@@ -181,14 +181,14 @@ func strictAttrs(body []byte, as2 bool) (origin uint8, path []types.ASSegment, o
 
 // rfc6811Origin is the origin AS of a path per RFC 6811 §2, written apart
 // from types.Route.OriginASN: the last AS of a final AS_SEQUENCE; 0 (no
-// origin RAVEN can name) after a final confederation segment or for an
-// empty path. A final AS_SET gives its last member, as RAVEN does.
+// origin RAVEN can name) after a final confederation segment or AS_SET
+// (NONE), or for an empty path.
 func rfc6811Origin(path []types.ASSegment) uint32 {
 	if len(path) == 0 {
 		return 0
 	}
 	last := path[len(path)-1]
-	if last.Type == types.ASSegmentConfedSequence || last.Type == types.ASSegmentConfedSet || len(last.ASNs) == 0 {
+	if last.Type != types.ASSegmentSequence || len(last.ASNs) == 0 {
 		return 0
 	}
 	return last.ASNs[len(last.ASNs)-1]

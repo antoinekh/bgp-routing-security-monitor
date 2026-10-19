@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -338,6 +340,67 @@ type FileOutput struct {
 type LoggingConfig struct {
 	Level  string `mapstructure:"level"`
 	Format string `mapstructure:"format"`
+}
+
+// EnvPrefix is the prefix of every environment variable that overrides a
+// config key.
+const EnvPrefix = "RAVEN"
+
+// envKeyReplacer maps a config key to its environment variable suffix: both
+// the nesting dot and the hyphen in a key become an underscore, so
+// validation.aspa-default-procedure is RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE.
+var envKeyReplacer = strings.NewReplacer(".", "_", "-", "_")
+
+// ConfigureEnv makes RAVEN_* environment variables override config keys.
+//
+// AutomaticEnv alone is not enough. Without the key replacer viper looks up
+// bmp.listen as RAVEN_BMP.LISTEN, a name no shell can export. And
+// viper.Unmarshal only fills keys viper already knows about, from the
+// config file, a default or a binding, so a key with no default
+// (rtr.expire-interval, bmp.tls.ca, ...) would ignore its env var. Binding
+// every key of Config explicitly closes that gap.
+//
+// Keys inside lists (rtr.caches, events.rules) and maps (headers,
+// resource_attributes) have no fixed name and cannot be set from the
+// environment.
+func ConfigureEnv() {
+	viper.SetEnvPrefix(EnvPrefix)
+	viper.SetEnvKeyReplacer(envKeyReplacer)
+	viper.AutomaticEnv()
+	for _, key := range envKeys(reflect.TypeOf(Config{}), "") {
+		// BindEnv with only a key cannot fail.
+		_ = viper.BindEnv(key)
+	}
+}
+
+// envKeys returns the dotted config key of every scalar field reachable from
+// struct type t, following nested and pointer-to structs. Lists of structs
+// and maps are skipped; see ConfigureEnv.
+func envKeys(t reflect.Type, prefix string) []string {
+	var keys []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name := f.Tag.Get("mapstructure")
+		if name == "" || name == "-" {
+			continue
+		}
+		key := prefix + name
+
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		switch {
+		case ft.Kind() == reflect.Struct:
+			keys = append(keys, envKeys(ft, key+".")...)
+		case ft.Kind() == reflect.Map,
+			ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct:
+			// No fixed key to bind.
+		default:
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // Load reads the viper-populated config into typed structs and applies defaults.

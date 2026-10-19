@@ -115,15 +115,18 @@ type Client struct {
 
 	// State of the cache's data as of the last End of Data. Owned by the
 	// goroutine running Start.
-	sessionID     uint16
-	serial        uint32
-	haveSerial    bool
-	refresh       uint32 // seconds (see unit)
-	retry         uint32
-	expire        uint32
-	expireTimer   *time.Timer // fires Expire after the last End of Data
-	expired       bool
-	sessionSynced bool // the current session has completed a sync
+	sessionID   uint16
+	serial      uint32
+	haveSerial  bool
+	refresh     uint32 // seconds (see unit)
+	retry       uint32
+	expire      uint32
+	expireTimer *time.Timer // fires Expire after the last End of Data
+	// expireOverride, if not 0, replaces the cache's Expire Interval
+	// (rtr.expire-interval, clamped by ExpireOverride).
+	expireOverride uint32
+	expired        bool
+	sessionSynced  bool // the current session has completed a sync
 
 	// unit is what one second of an End of Data interval lasts. Only tests
 	// shorten it.
@@ -259,6 +262,35 @@ func (c *Client) SetVersionReprobeInterval(d time.Duration) {
 		c.reprobeInterval = d
 	}
 }
+
+// ExpireOverride returns the Expire Interval, in seconds, that a configured
+// rtr.expire-interval sets: the value clamped to RFC 8210's range (600 to
+// 172800 seconds, §6), and whether it had to be clamped. Zero or less is
+// unset: 0, and each cache's own interval applies.
+func ExpireOverride(seconds int) (effective uint32, clamped bool) {
+	if seconds <= 0 {
+		return 0, false
+	}
+	v := uint32(min(seconds, int(expireRange[1])))
+	if v < expireRange[0] {
+		v = expireRange[0]
+	}
+	return v, int(v) != seconds
+}
+
+// SetExpireOverride makes seconds (from ExpireOverride) the Expire Interval
+// in place of the one each End of Data carries; 0 keeps the cache's.
+func (c *Client) SetExpireOverride(seconds uint32) {
+	c.expireOverride = seconds
+	if seconds != 0 {
+		c.expire = seconds
+	}
+}
+
+// ExpireInterval returns the Expire Interval in effect, in seconds: the
+// override if one is set, else the last End of Data's (the default before
+// the first).
+func (c *Client) ExpireInterval() uint32 { return c.expire }
 
 // SetTelemetry attaches a telemetry recorder. Passing nil (or never calling
 // this) disables telemetry; all recording calls become no-ops.
@@ -744,6 +776,9 @@ func (c *Client) endOfData(sessionID uint16, eod endOfData) {
 	c.delta = nil
 	c.sessionID, c.serial, c.haveSerial = sessionID, eod.serial, true
 	c.refresh, c.retry, c.expire = eod.refresh, eod.retry, eod.expire
+	if c.expireOverride != 0 {
+		c.expire = c.expireOverride
+	}
 
 	c.vrpStore.SetSerial(eod.serial, sessionID)
 	if dataChanged {
@@ -803,6 +838,7 @@ func (c *Client) endOfData(sessionID uint16, eod endOfData) {
 		"serial_changed", serialChanged,
 		"session_id", sessionID,
 		"refresh", eod.refresh, "retry", eod.retry, "expire", eod.expire,
+		"expire_effective", c.expire,
 	)
 	// Update before sync: whoever sees the sync recorded can rely on the
 	// update (in raven serve, the revalidation request) having been made.

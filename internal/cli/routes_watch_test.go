@@ -147,3 +147,62 @@ func TestPeersMalformedColumn(t *testing.T) {
 		t.Errorf("MALFORMED column with no marked peer:\n%s", out)
 	}
 }
+
+// raven validate rejects --origin-asn and --rtr, which it used to accept and
+// ignore, until one-shot RTR validation exists; --prefix alone still works.
+func TestValidateRejectsUnsupportedFlags(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+	if out := runCLI(t, srv, "validate", "--prefix", "1.1.1.0/24"); !strings.Contains(out, "no routes found") || calls != 1 {
+		t.Fatalf("--prefix alone: %d API calls, output %q", calls, out)
+	}
+	for _, args := range [][]string{
+		{"--prefix", "1.1.1.0/24", "--origin-asn", "13335"},
+		{"--prefix", "1.1.1.0/24", "--rtr", "rpki.example.net:3323"},
+		{"--prefix", "1.1.1.0/24", "--origin-asn", "0"},
+	} {
+		rootCmd.SetArgs(append(append([]string{"validate"}, args...), "--address", strings.TrimPrefix(srv.URL, "http://")))
+		err := rootCmd.Execute()
+		rootCmd.SetArgs(nil)
+		for _, name := range []string{"origin-asn", "rtr"} {
+			f := validateCmd.Flags().Lookup(name)
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		}
+		if err == nil || !strings.Contains(err.Error(), "not supported yet; validate reads the running daemon's routes for --prefix") {
+			t.Errorf("validate %v: err %v, want the not-supported error", args, err)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("%d API calls, want none for the rejected runs", calls-1)
+	}
+}
+
+// raven status and raven peers send --router (an address or sysName),
+// which the API matches as routes and watch do.
+func TestStatusAndPeersSendRouter(t *testing.T) {
+	got := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got[r.URL.Path] = r.URL.Query().Get("router")
+		if r.URL.Path == "/api/v1/status" {
+			io.WriteString(w, `{"version":"t","uptime":"1s","bmp_peers":[]}`)
+			return
+		}
+		io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+	runCLI(t, srv, "status", "--router", "br1.nyc")
+	runCLI(t, srv, "peers", "--router", "192.0.2.1")
+	if got["/api/v1/status"] != "br1.nyc" || got["/api/v1/peers"] != "192.0.2.1" {
+		t.Errorf("router sent: %v", got)
+	}
+	runCLI(t, srv, "status", "--router", "")
+	runCLI(t, srv, "peers", "--router", "")
+	if got["/api/v1/status"] != "" || got["/api/v1/peers"] != "" {
+		t.Errorf("router sent without --router: %v", got)
+	}
+}

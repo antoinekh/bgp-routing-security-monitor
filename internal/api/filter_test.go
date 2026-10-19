@@ -235,3 +235,100 @@ func TestRoutesRIB(t *testing.T) {
 		t.Error("watch RIB filtering wrong")
 	}
 }
+
+// --prefix and --origin-asn look up indexes that hold every RIB: an
+// Adj-RIB-Out and a post-policy route for the prefix must stay out of the
+// default (Adj-RIB-In pre-policy) answer and be the answer with their --rib.
+func TestRoutesPrefixAndOriginApplyRIB(t *testing.T) {
+	table := routetable.New()
+	peer := netip.MustParseAddr("80.81.194.180")
+	for _, rib := range []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost, types.AdjRIBOutPre} {
+		table.Insert(&types.Route{PeerAddr: peer, Prefix: netip.MustParsePrefix("1.1.1.0/24"),
+			ASPath: []uint32{64501, 13335}, RIBType: rib, SecurityPosture: types.PostureSecured})
+	}
+	s := NewServer(table, nil, store.NewVRPStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	for _, q := range []url.Values{{"prefix": {"1.1.1.0/24"}}, {"origin-asn": {"13335"}}} {
+		for rib, want := range map[string]string{
+			"":                 "adj-rib-in-pre",
+			"adj-rib-in-pre":   "adj-rib-in-pre",
+			"adj-rib-in-post":  "adj-rib-in-post",
+			"adj-rib-out-pre":  "adj-rib-out-pre",
+			"adj-rib-out-post": "",
+		} {
+			qq := url.Values{}
+			for k, v := range q {
+				qq[k] = v
+			}
+			if rib != "" {
+				qq.Set("rib", rib)
+			}
+			code, routes := getRoutes(t, s, qq)
+			var got []string
+			for _, r := range routes {
+				got = append(got, r.RIB)
+			}
+			if code != http.StatusOK || (want == "" && len(got) != 0) || (want != "" && !slices.Equal(got, []string{want})) {
+				t.Errorf("%v: status %d, RIBs %v, want [%s]", qq, code, got, want)
+			}
+		}
+	}
+}
+
+// Routes and watch output carry the route's receive time, RFC 3339 in UTC;
+// it was always "". A route with no time gives "".
+func TestRouteTimestamp(t *testing.T) {
+	table := routetable.New()
+	received := time.Date(2026, 10, 18, 14, 30, 5, 123000000, time.FixedZone("CEST", 2*3600))
+	table.Insert(&types.Route{PeerAddr: netip.MustParseAddr("80.81.194.180"), Prefix: netip.MustParsePrefix("1.1.1.0/24"),
+		ASPath: []uint32{64501, 13335}, Timestamp: received})
+	table.Insert(&types.Route{PeerAddr: netip.MustParseAddr("80.81.194.180"), Prefix: netip.MustParsePrefix("8.8.8.0/24"),
+		ASPath: []uint32{64501, 15169}})
+	s := NewServer(table, nil, store.NewVRPStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	const want = "2026-10-18T12:30:05Z"
+
+	_, routes := getRoutes(t, s, url.Values{})
+	got := map[string]string{}
+	for _, r := range routes {
+		got[r.Prefix] = r.Timestamp
+	}
+	if got["1.1.1.0/24"] != want || got["8.8.8.0/24"] != "" {
+		t.Errorf("routes timestamps %v, want 1.1.1.0/24 %s and 8.8.8.0/24 empty", got, want)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(s.handleWatch))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	for {
+		s.watchMu.RLock()
+		n := len(s.watchSubs)
+		s.watchMu.RUnlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	s.NotifyRoute(table.GetByPrefix(netip.MustParsePrefix("1.1.1.0/24"))[0])
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line, ok := strings.CutPrefix(sc.Text(), "data: ")
+		if !ok {
+			continue
+		}
+		var rr RouteResponse
+		if err := json.Unmarshal([]byte(line), &rr); err != nil {
+			t.Fatal(err)
+		}
+		if rr.Timestamp != want {
+			t.Errorf("watch timestamp %q, want %s", rr.Timestamp, want)
+		}
+		return
+	}
+	t.Fatalf("no event: %v", sc.Err())
+}

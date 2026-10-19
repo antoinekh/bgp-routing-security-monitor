@@ -291,30 +291,17 @@ func (s *Server) Run() error {
 		close(s.rtrReady)
 	} else {
 		s.log.Info("starting RTR clients", "count", len(s.cfg.RTR.Caches))
+		expireOverride := logExpireInterval(s.log, s.cfg.RTR.ExpireInterval)
 		for _, cache := range s.cfg.RTR.Caches {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				addr := cache.Address
-				transport := cache.Transport
-				if transport == "" {
-					transport = "tcp"
-				}
-				var configVersion uint8
-				switch s.cfg.RTR.RTRVersion {
-				case "1":
-					configVersion = 1
-				case "2", "auto", "":
-					configVersion = 2
-				default:
-					configVersion = 2
-				}
-				client, err := rtr.NewClient(addr, transport, cache.TLS, s.vrpStore, s.aspaStore, configVersion, s.log)
+				client, err := s.newRTRClient(cache, expireOverride)
 				if err != nil {
 					s.log.Error("failed to build RTR client", "cache", addr, "error", err)
 					return
 				}
-				client.SetVersionReprobeInterval(s.cfg.RTR.VersionReprobeInterval)
 				s.wireRTRClient(client, addr)
 				// Signal server when first RTR sync completes
 				go func() {
@@ -1004,4 +991,48 @@ func (s *Server) runPrometheus(ctx context.Context, ln net.Listener) {
 	if err := srv.Serve(ln); err != http.ErrServerClosed {
 		s.log.Error("Prometheus server error", "error", err)
 	}
+}
+
+// logExpireInterval logs, once at startup, the RTR Expire Interval in
+// effect, and returns the override for each client: rtr.expire-interval
+// clamped to RFC 8210's range (a WARN if it had to be), or 0 when unset, in
+// which case each cache's End of Data interval applies.
+func logExpireInterval(log *slog.Logger, configured int) uint32 {
+	eff, clamped := rtr.ExpireOverride(configured)
+	switch {
+	case eff == 0:
+		log.Info("RTR expire interval: each cache's own (End of Data)", "expire_interval", "cache")
+	case clamped:
+		log.Warn("rtr.expire-interval outside RFC 8210's 600-172800 s; clamped",
+			"configured", configured, "expire_interval", eff)
+	default:
+		log.Info("RTR expire interval: rtr.expire-interval overrides each cache's",
+			"expire_interval", eff)
+	}
+	return eff
+}
+
+// newRTRClient builds the RTR client for a configured cache: transport, the
+// configured protocol version, the version re-probe interval, and
+// expireOverride (from logExpireInterval; 0 keeps the cache's Expire
+// Interval).
+func (s *Server) newRTRClient(cache config.RTRCacheConfig, expireOverride uint32) (*rtr.Client, error) {
+	transport := cache.Transport
+	if transport == "" {
+		transport = "tcp"
+	}
+	var configVersion uint8
+	switch s.cfg.RTR.RTRVersion {
+	case "1":
+		configVersion = 1
+	default: // "2", "auto", ""
+		configVersion = 2
+	}
+	client, err := rtr.NewClient(cache.Address, transport, cache.TLS, s.vrpStore, s.aspaStore, configVersion, s.log)
+	if err != nil {
+		return nil, err
+	}
+	client.SetVersionReprobeInterval(s.cfg.RTR.VersionReprobeInterval)
+	client.SetExpireOverride(expireOverride)
+	return client, nil
 }

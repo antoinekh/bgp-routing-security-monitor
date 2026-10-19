@@ -12,6 +12,8 @@ import (
 
 type Route struct {
 	// Populated by BMP Ingest
+	// Timestamp is when the route was received: the BMP per-peer header's
+	// timestamp, the router's receive time, or RAVEN's if the router sent 0.
 	Timestamp time.Time
 	// Router is the monitored router the route was learned on: the source
 	// address of its BMP session, IPv4 in plain form.
@@ -107,13 +109,13 @@ type IngestEvent struct {
 // (the session's OPEN carries the member AS), so the result is 0, as for
 // an empty AS_PATH: no origin.
 //
-// A final AS_SET gives its last member, though RFC 6811 makes the origin
-// NONE. A route with no ASPathRaw (one built without segments) uses the
-// last AS of ASPath.
+// After a final AS_SET the origin is NONE (RFC 6811 §2; see OriginIsNone),
+// and the result is 0 too. A route with no ASPathRaw (one built without
+// segments) uses the last AS of ASPath.
 func (r *Route) OriginASN() uint32 {
 	if n := len(r.ASPathRaw); n > 0 {
 		last := r.ASPathRaw[n-1]
-		if last.Type.IsConfed() || len(last.ASNs) == 0 {
+		if last.Type != ASSegmentSequence || len(last.ASNs) == 0 {
 			return 0
 		}
 		return last.ASNs[len(last.ASNs)-1]
@@ -122,6 +124,19 @@ func (r *Route) OriginASN() uint32 {
 		return 0
 	}
 	return r.ASPath[len(r.ASPath)-1]
+}
+
+// OriginIsNone reports whether the route's origin is RFC 6811's NONE: the
+// AS_PATH's final segment is an AS_SET (any type other than AS_SEQUENCE or
+// a confederation segment). No VRP matches a NONE origin, so such a route
+// is Invalid wherever a VRP covers it.
+func (r *Route) OriginIsNone() bool {
+	n := len(r.ASPathRaw)
+	if n == 0 {
+		return false
+	}
+	t := r.ASPathRaw[n-1].Type
+	return t != ASSegmentSequence && !t.IsConfed()
 }
 
 // HasConfedSegment reports whether the AS_PATH has an AS_CONFED_SEQUENCE

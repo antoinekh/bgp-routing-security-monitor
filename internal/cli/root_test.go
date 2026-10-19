@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 )
 
 // malformedConfig has a mis-indented `preference` key under the first RTR
@@ -126,4 +128,21 @@ func TestConfigReadErrorOnlyForMalformedFiles(t *testing.T) {
 			t.Errorf("configReadErr = %v, want nil when no config file exists", configReadErr)
 		}
 	})
+}
+
+// ─── TestInitConfigAppliesEnvOverrides ───
+
+// The reported bug, end to end through initConfig: bmp.listen in the file
+// and RAVEN_BMP_LISTEN in the environment, and serve logged the file value.
+func TestInitConfigAppliesEnvOverrides(t *testing.T) {
+	t.Setenv("RAVEN_BMP_LISTEN", "127.0.0.1:21119")
+	loadConfigFile(t, "bmp:\n  listen: 127.0.0.1:21019\n")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.BMP.Listen != "127.0.0.1:21119" {
+		t.Errorf("BMP.Listen = %q, want the RAVEN_BMP_LISTEN value 127.0.0.1:21119", cfg.BMP.Listen)
+	}
 }

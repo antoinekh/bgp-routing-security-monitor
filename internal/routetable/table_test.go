@@ -315,3 +315,33 @@ func TestGetByPosture(t *testing.T) {
 		t.Errorf("origin-invalid routes = %d, want 1", len(invalid))
 	}
 }
+
+// The prefix and origin indexes hold every RIB; the lookups return the one
+// asked for, Adj-RIB-In pre-policy by default.
+func TestIndexLookupsByRIB(t *testing.T) {
+	tbl := New()
+	p := netip.MustParsePrefix("1.1.1.0/24")
+	for _, rib := range types.AllRIBTypes {
+		tbl.Insert(&types.Route{PeerAddr: netip.MustParseAddr("192.0.2.9"), Prefix: p,
+			ASPath: []uint32{64501, 13335}, RIBType: rib, SecurityPosture: types.PostureSecured})
+	}
+	for _, rib := range types.AllRIBTypes {
+		for name, got := range map[string][]*types.Route{
+			"prefix": tbl.GetByPrefixIn(p, rib),
+			"origin": tbl.GetByOriginASNIn(13335, rib),
+		} {
+			if len(got) != 1 || got[0].RIBType != rib {
+				t.Errorf("%s lookup in %s: %d routes", name, rib, len(got))
+			}
+		}
+	}
+	for name, got := range map[string][]*types.Route{
+		"GetByPrefix":    tbl.GetByPrefix(p),
+		"GetByOriginASN": tbl.GetByOriginASN(13335),
+		"GetByPosture":   tbl.GetByPosture(types.PostureSecured),
+	} {
+		if len(got) != 1 || got[0].RIBType != types.AdjRIBInPre {
+			t.Errorf("%s: %d routes, want the one Adj-RIB-In pre-policy route", name, len(got))
+		}
+	}
+}

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -127,5 +129,120 @@ func TestAPIListenDefault(t *testing.T) {
 	}
 	if got := loadYAML(t, "api:\n  listen: \"0.0.0.0:11020\"\n").API.Listen; got != "0.0.0.0:11020" {
 		t.Errorf("explicit api.listen = %q, want 0.0.0.0:11020", got)
+	}
+}
+
+// loadWithEnv runs the same sequence the CLI does — read the config file,
+// wire up env overrides, Load — on a fresh viper, and returns the result.
+// An empty body means no config file at all.
+func loadWithEnv(t *testing.T, body string) *Config {
+	t.Helper()
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	if body != "" {
+		path := filepath.Join(t.TempDir(), "raven.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		viper.SetConfigFile(path)
+		if err := viper.ReadInConfig(); err != nil {
+			t.Fatalf("read config: %v", err)
+		}
+	}
+
+	ConfigureEnv()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg
+}
+
+// ─── TestEnvOverridesNestedKeys ───
+
+// RAVEN_BMP_LISTEN must beat bmp.listen from the file. Before the key
+// replacer, viper looked the key up as RAVEN_BMP.LISTEN and the file value
+// silently won.
+func TestEnvOverridesNestedKeys(t *testing.T) {
+	t.Setenv("RAVEN_BMP_LISTEN", "127.0.0.1:21119")
+	t.Setenv("RAVEN_API_LISTEN", "127.0.0.1:21120")
+	t.Setenv("RAVEN_LOGGING_LEVEL", "debug")
+
+	cfg := loadWithEnv(t, "bmp:\n  listen: 127.0.0.1:21019\nlogging:\n  level: info\n")
+
+	if cfg.BMP.Listen != "127.0.0.1:21119" {
+		t.Errorf("BMP.Listen = %q, want the RAVEN_BMP_LISTEN value 127.0.0.1:21119", cfg.BMP.Listen)
+	}
+	if cfg.API.Listen != "127.0.0.1:21120" {
+		t.Errorf("API.Listen = %q, want the RAVEN_API_LISTEN value 127.0.0.1:21120 over the default", cfg.API.Listen)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Errorf("Logging.Level = %q, want the RAVEN_LOGGING_LEVEL value debug", cfg.Logging.Level)
+	}
+}
+
+// ─── TestEnvOverridesHyphenatedKeys ───
+
+// A hyphen in a key maps to an underscore, like the nesting dot.
+func TestEnvOverridesHyphenatedKeys(t *testing.T) {
+	t.Setenv("RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE", "downstream")
+	t.Setenv("RAVEN_EXTERNAL_RIPESTAT_RATE_LIMIT_PER_MIN", "3")
+
+	cfg := loadWithEnv(t, "")
+
+	if cfg.Validation.ASPADefaultProcedure != "downstream" {
+		t.Errorf("Validation.ASPADefaultProcedure = %q, want downstream", cfg.Validation.ASPADefaultProcedure)
+	}
+	if cfg.External.RIPEstat.RateLimitPerMin != 3 {
+		t.Errorf("External.RIPEstat.RateLimitPerMin = %d, want 3", cfg.External.RIPEstat.RateLimitPerMin)
+	}
+}
+
+// ─── TestEnvOverridesKeysWithoutDefaults ───
+
+// viper.Unmarshal only fills keys viper knows about. A key with no SetDefault
+// and no entry in the file — including one under a pointer section like
+// bmp.tls — must still be settable from the environment.
+func TestEnvOverridesKeysWithoutDefaults(t *testing.T) {
+	t.Setenv("RAVEN_RTR_EXPIRE_INTERVAL", "600")
+	t.Setenv("RAVEN_BMP_TLS_CA", "/etc/raven/ca.pem")
+	t.Setenv("RAVEN_BMP_TLS_TLS_MIN_VERSION", "1.3")
+
+	cfg := loadWithEnv(t, "")
+
+	if cfg.RTR.ExpireInterval != 600 {
+		t.Errorf("RTR.ExpireInterval = %d, want 600", cfg.RTR.ExpireInterval)
+	}
+	if cfg.BMP.TLS == nil {
+		t.Fatal("BMP.TLS = nil, want it built from RAVEN_BMP_TLS_*")
+	}
+	if cfg.BMP.TLS.CA != "/etc/raven/ca.pem" {
+		t.Errorf("BMP.TLS.CA = %q, want /etc/raven/ca.pem", cfg.BMP.TLS.CA)
+	}
+	if cfg.BMP.TLS.MinVersion != "1.3" {
+		t.Errorf("BMP.TLS.MinVersion = %q, want 1.3", cfg.BMP.TLS.MinVersion)
+	}
+}
+
+// ─── TestUnsetEnvLeavesOptionalSectionsNil ───
+
+// Binding every key must not conjure up optional sections: with no env var
+// and no file entry, BMP TLS and Kafka ingest stay nil (plain TCP, embedded
+// receiver), as before.
+func TestUnsetEnvLeavesOptionalSectionsNil(t *testing.T) {
+	cfg := loadWithEnv(t, "")
+
+	if cfg.BMP.TLS != nil {
+		t.Errorf("BMP.TLS = %+v, want nil", cfg.BMP.TLS)
+	}
+	if cfg.BMP.Kafka != nil {
+		t.Errorf("BMP.Kafka = %+v, want nil", cfg.BMP.Kafka)
+	}
+	if cfg.Outputs.Kafka != nil {
+		t.Errorf("Outputs.Kafka = %+v, want nil", cfg.Outputs.Kafka)
+	}
+	if cfg.BMP.Listen != ":11019" {
+		t.Errorf("BMP.Listen = %q, want the default :11019", cfg.BMP.Listen)
 	}
 }

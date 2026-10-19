@@ -44,6 +44,22 @@ All notable changes to RAVEN are recorded here.
   used to be treated as hops.
 
 ### Fixed
+- ROV follows RFC 6811 §2 for a route whose AS_PATH ends in an AS_SET: its
+  origin is NONE, so it is Invalid under any covering VRP and NotFound
+  otherwise, each with a reason. The set's last member used to be taken as
+  the origin, which a VRP could match (Valid). Its `origin_asn` is now 0.
+- `RAVEN_*` environment variables override nested and hyphenated config
+  keys (`RAVEN_BMP_LISTEN`, `RAVEN_API_LISTEN`, `RAVEN_LOGGING_LEVEL`,
+  `RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE`, ...): dots and dashes map to
+  underscores, and keys without a default are bound too. They were ignored.
+- `rtr.expire-interval` is applied: it overrides each cache's Expire
+  Interval, clamped to RFC 8210's 600-172800 s, and the value in effect is
+  logged at startup. It was read and never used.
+- Route JSON `timestamp` (routes and watch) is the route's receive time,
+  RFC 3339 UTC: the BMP per-peer header's, or RAVEN's when the router sends
+  0. It was always "".
+- `raven validate` rejects `--origin-asn` and `--rtr`, which it accepted and
+  ignored, until one-shot RTR validation exists.
 - A Route Monitoring message whose BGP Length field was below 19 panicked
   and took down the daemon. The fuzz targets missed it: they reimplemented
   that step with a guard; they now call the listener's decoder.
@@ -64,6 +80,13 @@ All notable changes to RAVEN are recorded here.
 - RFC 9072 extended OPEN optional parameters are read in Peer Up.
 
 ### Added
+- `raven status --router` and `raven peers --router` (API `router` on
+  `/api/v1/status` and `/api/v1/peers`): only that router's peers, by
+  address or BMP sysName, as `routes` and `watch` match it. Status totals
+  stay daemon-wide.
+- `raven routes --rib` with `--prefix` or `--origin-asn` looks up that RIB in
+  the prefix and origin indexes, which hold every RIB, instead of scanning
+  the table.
 - `raven_bmp_unsupported_nlri_total{afi,safi}` counts NLRI RAVEN does not
   decode, instead of dropping it silently.
 - `raven_bmp_malformed_updates_total{action,reason}` counts malformed

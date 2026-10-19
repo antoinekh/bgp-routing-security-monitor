@@ -247,3 +247,33 @@ func TestROVConfederationOrigin(t *testing.T) {
 		t.Errorf("got %s (%s), want Valid for origin AS64500", result.State, result.Reason)
 	}
 }
+
+// RFC 6811 §2: after a final AS_SET the origin is NONE, which no VRP
+// matches. Covered, the route is Invalid even if a VRP names a set member
+// (RAVEN used to take the last member as origin, which made this Valid);
+// uncovered, it is NotFound. Each says why.
+func TestROVASSetOriginIsNone(t *testing.T) {
+	s := store.NewVRPStore()
+	s.ReplaceAll([]types.VRP{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), ASN: 64511, MaxLength: 24},
+	}, 1, 1)
+	a := NewAnnotator(s)
+	route := func(prefix string) *types.Route {
+		return &types.Route{
+			Prefix: netip.MustParsePrefix(prefix),
+			ASPath: []uint32{64501, 64510, 64511},
+			ASPathRaw: []types.ASSegment{
+				{Type: types.ASSegmentSequence, ASNs: []uint32{64501}},
+				{Type: types.ASSegmentSet, ASNs: []uint32{64510, 64511}},
+			},
+		}
+	}
+	covered := a.Validate(route("198.51.100.0/24"))
+	if covered.State != types.ROVInvalid || covered.Reason != noneOriginInvalidReason || len(covered.MatchedVRPs) != 1 {
+		t.Errorf("covered: %s (%s) %d VRPs, want Invalid: %s", covered.State, covered.Reason, len(covered.MatchedVRPs), noneOriginInvalidReason)
+	}
+	uncovered := a.Validate(route("203.0.113.0/24"))
+	if uncovered.State != types.ROVNotFound || uncovered.Reason != noneOriginNotFoundReason {
+		t.Errorf("uncovered: %s (%s), want NotFound: %s", uncovered.State, uncovered.Reason, noneOriginNotFoundReason)
+	}
+}

@@ -5,9 +5,11 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr"
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/rtrtest"
 )
@@ -79,5 +81,45 @@ func TestRTRPollWithUnchangedSerialRequestsNoRevalidation(t *testing.T) {
 	waitSynced("the changed poll's sync")
 	if n := len(s.revalidateCh); n != 1 {
 		t.Errorf("%d revalidation requests after a poll that changed the data, want 1", n)
+	}
+}
+
+// The Expire Interval in effect is logged once at startup: the configured
+// rtr.expire-interval, clamped (with a WARN) to RFC 8210's range, or each
+// cache's own when unset.
+func TestLogExpireInterval(t *testing.T) {
+	for _, tc := range []struct {
+		configured int
+		want       uint32
+		log        string
+	}{
+		{0, 0, `level=INFO msg="RTR expire interval: each cache's own (End of Data)"`},
+		{3600, 3600, `level=INFO msg="RTR expire interval: rtr.expire-interval overrides each cache's" expire_interval=3600`},
+		{60, 600, `level=WARN msg="rtr.expire-interval outside RFC 8210's 600-172800 s; clamped" configured=60 expire_interval=600`},
+	} {
+		var buf strings.Builder
+		got := logExpireInterval(slog.New(slog.NewTextHandler(&buf, nil)), tc.configured)
+		if got != tc.want || !strings.Contains(buf.String(), tc.log) {
+			t.Errorf("configured %d: override %d, log %q; want %d and %q", tc.configured, got, buf.String(), tc.want, tc.log)
+		}
+	}
+}
+
+// raven serve builds each RTR client with rtr.expire-interval applied:
+// clamped when set, the default (then each cache's) when unset.
+func TestRTRClientGetsExpireOverride(t *testing.T) {
+	s := newTestServer(t)
+	for _, tc := range []struct {
+		configured int
+		want       uint32
+	}{{0, 7200}, {3600, 3600}, {60, 600}} {
+		eff, _ := rtr.ExpireOverride(tc.configured)
+		client, err := s.newRTRClient(config.RTRCacheConfig{Address: "127.0.0.1:3323"}, eff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := client.ExpireInterval(); got != tc.want {
+			t.Errorf("rtr.expire-interval %d: client expire interval %d, want %d", tc.configured, got, tc.want)
+		}
 	}
 }

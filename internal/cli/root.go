@@ -7,6 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/nokia/bgp-routing-security-monitor/internal/config"
 )
 
 var cfgFile string
@@ -82,8 +84,7 @@ func initConfig() {
 		viper.AddConfigPath("/etc/raven")
 	}
 
-	viper.SetEnvPrefix("RAVEN")
-	viper.AutomaticEnv()
+	config.ConfigureEnv()
 
 	configReadErr = nil
 	if err := viper.ReadInConfig(); err != nil {

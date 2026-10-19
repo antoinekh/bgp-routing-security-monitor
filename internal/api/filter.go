@@ -32,6 +32,24 @@ type routeFilter struct {
 	ribGiven bool
 }
 
+// parseRouter reads the router query parameter, as routes, watch, peers and
+// status take it: a router address, or a BMP sysName that named resolves to
+// the routers that have it (none, if no router has it). given is false when
+// the parameter is absent.
+func parseRouter(q url.Values, named func(string) []netip.Addr) (given bool, routers []netip.Addr) {
+	v := q.Get("router")
+	if v == "" {
+		return false, nil
+	}
+	if a, err := netip.ParseAddr(v); err == nil {
+		return true, []netip.Addr{a.Unmap()}
+	}
+	if named != nil {
+		routers = named(v)
+	}
+	return true, routers
+}
+
 // parseRIB returns the RIB type a name (types.RIBType.String) gives.
 func parseRIB(name string) (types.RIBType, bool) {
 	for _, r := range types.AllRIBTypes {
@@ -47,14 +65,7 @@ func parseRIB(name string) (types.RIBType, bool) {
 // resolves a sysName to the routers that have it.
 func parseRouteFilter(q url.Values, named func(string) []netip.Addr) (routeFilter, error) {
 	var f routeFilter
-	if v := q.Get("router"); v != "" {
-		f.byRouter = true
-		if a, err := netip.ParseAddr(v); err == nil {
-			f.routers = []netip.Addr{a.Unmap()}
-		} else if named != nil {
-			f.routers = named(v)
-		}
-	}
+	f.byRouter, f.routers = parseRouter(q, named)
 	if v := q.Get("prefix"); v != "" {
 		p, err := netip.ParsePrefix(v)
 		if err != nil {
@@ -99,30 +110,32 @@ func (f *routeFilter) match(r *types.Route) bool {
 }
 
 // routes returns the table's routes of the filter's RIB (Adj-RIB-In
-// pre-policy by default) that pass the filter. For Adj-RIB-In pre-policy it
-// starts from the most selective index the filter allows; the indexes
-// return only that RIB, so any other is scanned whole.
+// pre-policy by default) that pass the filter, starting from the most
+// selective index the filter allows. The prefix and origin indexes hold
+// every RIB and are looked up for the filter's; the posture index holds only
+// Adj-RIB-In pre-policy, so for another RIB a posture, peer or router filter
+// scans that RIB.
 func (f *routeFilter) routes(t *routetable.Table) []*types.Route {
 	var candidates []*types.Route
+	pre := f.rib == types.AdjRIBInPre
 	switch {
-	case f.rib != types.AdjRIBInPre:
-		candidates = t.AllOfRIB(f.rib)
 	case f.prefix.IsValid():
-		candidates = t.GetByPrefix(f.prefix)
+		candidates = t.GetByPrefixIn(f.prefix, f.rib)
 	case f.origin != 0:
-		candidates = t.GetByOriginASN(f.origin)
-	case f.peer.IsValid():
+		candidates = t.GetByOriginASNIn(f.origin, f.rib)
+	case pre && f.peer.IsValid():
 		candidates = t.GetByPeer(f.peer)
-	case f.posture != "":
+	case pre && f.posture != "":
 		candidates = t.GetByPosture(f.posture)
-	case f.byRouter:
-		candidates = t.AllPrePolicy()
+	case f.peer.IsValid() || f.posture != "" || f.byRouter:
+		candidates = t.AllOfRIB(f.rib)
 	default:
-		return t.AllPrePolicy()
+		return t.AllOfRIB(f.rib)
 	}
+	// Every candidate source above is of the filter's RIB alone.
 	out := candidates[:0]
 	for _, r := range candidates {
-		if r.RIBType == f.rib && f.match(r) {
+		if f.match(r) {
 			out = append(out, r)
 		}
 	}

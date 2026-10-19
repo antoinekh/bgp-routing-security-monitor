@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/nokia/bgp-routing-security-monitor/internal/bmp"
 	"github.com/nokia/bgp-routing-security-monitor/internal/routetable"
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/store"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
@@ -89,6 +92,48 @@ func TestFormatRD(t *testing.T) {
 	} {
 		if got := FormatRD(rd); got != want {
 			t.Errorf("FormatRD(%#x) = %q, want %q", rd, got, want)
+		}
+	}
+}
+
+type fakePeers []bmp.Peer
+
+func (f fakePeers) GetPeers() []bmp.Peer { return f }
+
+// /api/v1/peers and /api/v1/status take router like routes and watch: an
+// address (either IPv4 form) or a BMP sysName, listing only that router's
+// peers. Status totals stay daemon-wide.
+func TestPeersAndStatusRouterFilter(t *testing.T) {
+	a, b := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")
+	s := NewServer(routetable.New(), nil, store.NewVRPStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	s.routers = fakeRouters{a: "br1.nyc", b: "br2.nyc"}
+	s.bmpPeers = fakePeers{
+		{Router: a, Addr: netip.MustParseAddr("80.81.194.180"), State: "up"},
+		{Router: a, Addr: netip.MustParseAddr("80.81.194.181"), State: "up"},
+		{Router: b, Addr: netip.MustParseAddr("80.81.194.180"), State: "up"},
+	}
+	for _, tc := range []struct {
+		router string
+		want   int
+	}{{"", 3}, {"192.0.2.1", 2}, {"::ffff:192.0.2.1", 2}, {"br1.nyc", 2}, {"br2.nyc", 1}, {"br9.nowhere", 0}} {
+		q := url.Values{}
+		if tc.router != "" {
+			q.Set("router", tc.router)
+		}
+		rec := httptest.NewRecorder()
+		s.handlePeers(rec, httptest.NewRequest(http.MethodGet, "/api/v1/peers?"+q.Encode(), nil))
+		var peers []PeerResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &peers); err != nil {
+			t.Fatal(err)
+		}
+		rec = httptest.NewRecorder()
+		s.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/api/v1/status?"+q.Encode(), nil))
+		var status StatusResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		if len(peers) != tc.want || len(status.BMP) != tc.want {
+			t.Errorf("router %q: peers %d, status peers %d, want %d", tc.router, len(peers), len(status.BMP), tc.want)
 		}
 	}
 }
