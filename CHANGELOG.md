@@ -4,6 +4,20 @@ All notable changes to RAVEN are recorded here.
 
 ## Unreleased
 
+## v0.4.0 (2026-10-19)
+
+### Security
+- A Route Monitoring message whose Withdrawn Routes Length exceeded the
+  UPDATE, or whose BGP Length was below 19, panicked the daemon. Any source
+  able to reach the BMP port could crash RAVEN with one message.
+- A single BMP message header could make RAVEN allocate up to 4 GB. BMP
+  messages are now capped at 1 MiB (the session is closed) and Statistics
+  Report sizing is bounded by the bytes present.
+- New `bmp.allowed-routers` closes connections from any other source before
+  reading a byte; the HTTP API now binds to loopback by default.
+- If you run an earlier version with a BMP port reachable from untrusted
+  networks, upgrade and restrict BMP sources (allowlist and host firewall).
+
 ### Changed
 - **Breaking:** the HTTP API the CLI talks to now binds to `127.0.0.1:11020`
   by default instead of every interface (`:11020`). Anyone running the CLI
@@ -54,42 +68,6 @@ All notable changes to RAVEN are recorded here.
   the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
   used to be treated as hops.
 
-### Fixed
-- ROV follows RFC 6811 §2 for a route whose AS_PATH ends in an AS_SET: its
-  origin is NONE, so it is Invalid under any covering VRP and NotFound
-  otherwise, each with a reason. The set's last member used to be taken as
-  the origin, which a VRP could match (Valid). Its `origin_asn` is now 0.
-- `RAVEN_*` environment variables override nested and hyphenated config
-  keys (`RAVEN_BMP_LISTEN`, `RAVEN_API_LISTEN`, `RAVEN_LOGGING_LEVEL`,
-  `RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE`, ...): dots and dashes map to
-  underscores, and keys without a default are bound too. They were ignored.
-- `rtr.expire-interval` is applied: it overrides each cache's Expire
-  Interval, clamped to RFC 8210's 600-172800 s, and the value in effect is
-  logged at startup. It was read and never used.
-- Route JSON `timestamp` (routes and watch) is the route's receive time,
-  RFC 3339 UTC: the BMP per-peer header's, or RAVEN's when the router sends
-  0. It was always "".
-- `raven validate` rejects `--origin-asn` and `--rtr`, which it accepted and
-  ignored, until one-shot RTR validation exists.
-- A Route Monitoring message whose BGP Length field was below 19 panicked
-  and took down the daemon. The fuzz targets missed it: they reimplemented
-  that step with a guard; they now call the listener's decoder.
-- Withdrawals in an UPDATE whose other fields are malformed are applied;
-  the whole UPDATE used to be dropped, leaving the routes in the table.
-- BMP/BGP decoding of untrusted input: a malformed UPDATE (Withdrawn Routes
-  Length past the message) panicked and took down the daemon; a BMP header
-  could make RAVEN allocate up to 4 GB (messages are now capped at 1 MiB and
-  the session closed); a Statistics Report count sized a map.
-- AS_PATH from peers on 2-octet sessions (BMP A flag) is read with 2-octet
-  ASNs and merged with AS4_PATH (RFC 6793); it was read as 4-octet.
-- Adj-RIB-Out (RFC 8671) routes are stored as such, no longer overwriting
-  the peer's Adj-RIB-In routes. They get ROV; ASPA verification, defined for
-  received routes, is not run (ASPA Unverifiable, with the reason). They
-  raise no events. Counted in `raven_adj_rib_out_routes_total`.
-- IPv4 unicast in MP_REACH/MP_UNREACH (including RFC 8950 IPv6 next hops) is
-  decoded; it was dropped.
-- RFC 9072 extended OPEN optional parameters are read in Peer Up.
-
 ### Added
 - `raven status --router` and `raven peers --router` (API `router` on
   `/api/v1/status` and `/api/v1/peers`): only that router's peers, by
@@ -137,6 +115,40 @@ All notable changes to RAVEN are recorded here.
   bound beyond loopback.
 
 ### Fixed
+- ROV follows RFC 6811 §2 for a route whose AS_PATH ends in an AS_SET: its
+  origin is NONE, so it is Invalid under any covering VRP and NotFound
+  otherwise, each with a reason. The set's last member used to be taken as
+  the origin, which a VRP could match (Valid). Its `origin_asn` is now 0.
+- `RAVEN_*` environment variables override nested and hyphenated config
+  keys (`RAVEN_BMP_LISTEN`, `RAVEN_API_LISTEN`, `RAVEN_LOGGING_LEVEL`,
+  `RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE`, ...): dots and dashes map to
+  underscores, and keys without a default are bound too. They were ignored.
+- `rtr.expire-interval` is applied: it overrides each cache's Expire
+  Interval, clamped to RFC 8210's 600-172800 s, and the value in effect is
+  logged at startup. It was read and never used.
+- Route JSON `timestamp` (routes and watch) is the route's receive time,
+  RFC 3339 UTC: the BMP per-peer header's, or RAVEN's when the router sends
+  0. It was always "".
+- `raven validate` rejects `--origin-asn` and `--rtr`, which it accepted and
+  ignored, until one-shot RTR validation exists.
+- A Route Monitoring message whose BGP Length field was below 19 panicked
+  and took down the daemon. The fuzz targets missed it: they reimplemented
+  that step with a guard; they now call the listener's decoder.
+- Withdrawals in an UPDATE whose other fields are malformed are applied;
+  the whole UPDATE used to be dropped, leaving the routes in the table.
+- BMP/BGP decoding of untrusted input: a malformed UPDATE (Withdrawn Routes
+  Length past the message) panicked and took down the daemon; a BMP header
+  could make RAVEN allocate up to 4 GB (messages are now capped at 1 MiB and
+  the session closed); a Statistics Report count sized a map.
+- AS_PATH from peers on 2-octet sessions (BMP A flag) is read with 2-octet
+  ASNs and merged with AS4_PATH (RFC 6793); it was read as 4-octet.
+- Adj-RIB-Out (RFC 8671) routes are stored as such, no longer overwriting
+  the peer's Adj-RIB-In routes. They get ROV; ASPA verification, defined for
+  received routes, is not run (ASPA Unverifiable, with the reason). They
+  raise no events. Counted in `raven_adj_rib_out_routes_total`.
+- IPv4 unicast in MP_REACH/MP_UNREACH (including RFC 8950 IPv6 next hops) is
+  decoded; it was dropped.
+- RFC 9072 extended OPEN optional parameters are read in Peer Up.
 - RTR anomaly detector no longer evaluates or contaminates its baseline
   with full (non-incremental) RTR syncs, which previously produced a
   false-positive high-severity anomaly on every `raven rtr monitor`
@@ -200,6 +212,10 @@ All notable changes to RAVEN are recorded here.
   0 or 1 session the ASPA store is cleared and a WARN says ASPA validation
   is unavailable.
   
+- Prefix queries (`raven routes --prefix`, `/api/v1/routes?prefix=`) running
+  while routes on the same prefix were withdrawn could return duplicate routes
+  and miss others (data race in the prefix index).
+
 ## v0.3.3 (2026-07-02)
 
 ### Added
