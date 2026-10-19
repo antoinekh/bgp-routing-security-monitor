@@ -4,6 +4,9 @@ All notable changes to RAVEN are recorded here.
 
 ## Unreleased
 
+### Changed
+- Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
+
 ## v0.4.0 (2026-10-19)
 
 ### Security
@@ -67,7 +70,6 @@ All notable changes to RAVEN are recorded here.
   does not verify routes with confederation segments (Unverifiable, with
   the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
   used to be treated as hops.
-- Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
 
 ### Added
 - `raven status --router` and `raven peers --router` (API `router` on
