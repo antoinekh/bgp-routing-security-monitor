@@ -24,6 +24,13 @@ connecting to a local Routinator instance.
 
 bmp:
   listen: ":11019"                  # BMP listener address (default: :11019)
+  allowed-routers:                  # accept BMP only from these sources (default: any)
+    - 192.0.2.10
+    - 198.51.100.0/28
+    - 2001:db8:100::1
+
+api:
+  listen: "127.0.0.1:11020"         # API for the raven CLI (default: 127.0.0.1:11020)
 
 rtr:
   caches:
@@ -37,13 +44,18 @@ rtr:
         ca: "/etc/raven/rpki-ca.pem"
         tls-min-version: "1.2"      # 1.2 (default) | 1.3
   rtr-version: auto                 # auto | 1 | 2 (default: auto)
-  expire-interval: 7200             # Override cache expire in seconds
+  expire-interval: 7200             # Override every cache's Expire Interval (600-172800 s; default: the cache's own)
 
 validation:
   rov: true                         # Enable ROV annotation (default: true)
   aspa: true                        # Enable ASPA annotation (default: true)
-  aspa-default-procedure: upstream  # upstream | downstream | auto
+  aspa-default-procedure: upstream  # upstream (default) | downstream | auto
   aspa-as-set-behavior: unverifiable # unverifiable | best-effort
+  aspa-peers:                       # per-peer ASPA procedure (default: none)
+    - address: 192.0.2.1
+      neighbor-role: provider       # provider | customer | peer | rs | rs-client
+    - asn: 64500
+      neighbor-role: customer
 
 outputs:
   prometheus:
@@ -70,9 +82,8 @@ debug:
     listen: ""                      # e.g. "localhost:6060"; empty = disabled (default)
 ```
 
-!!! note
-    There is no `api:` section. The API server always binds to `:11020`
-    (not configurable). See [API Section](#api-section) below.
+Before you expose RAVEN beyond the monitoring host, read
+[Deployment Hardening](../deployment/hardening.md).
 
 ## Configuration Options Explained
 
@@ -84,8 +95,44 @@ or `192.0.2.10:11019` to bind to a specific interface.
 
 !!! warning
     The BMP listener is unauthenticated TCP. It should be reachable only from
-    your routers — not from the public internet. Use firewall rules or bind to
-    a management interface.
+    your routers, never from the internet. Set `bmp.allowed-routers` and
+    filter the port in your host firewall; see
+    [Deployment Hardening](../deployment/hardening.md#restrict-bmp-sources).
+
+<a id="bmpallowed-routers"></a>
+**`bmp.allowed-routers`** — The sources RAVEN accepts BMP connections from.
+Each entry is an IP address (a single router) or a prefix, IPv4 or IPv6:
+
+```yaml
+bmp:
+  allowed-routers:
+    - 192.0.2.10
+    - 198.51.100.0/28
+    - 2001:db8:100::1
+```
+
+RAVEN checks the source address as soon as it accepts a connection, before
+it reads a byte or starts a TLS handshake. A connection from any other
+source is closed, logged at WARN (`BMP connection rejected: source not in
+bmp.allowed-routers`) and counted in
+[`raven_bmp_rejected_connections_total`](observability.md#bmp-ingest-health).
+Checking at accept means an unlisted source never reaches the BMP decoder
+and never makes RAVEN do TLS work on its behalf.
+
+- An IPv4 router that connects to a dual-stack listener arrives as an
+  IPv4-mapped IPv6 address. RAVEN matches it against your IPv4 entries, so
+  list routers by their IPv4 address. An IPv4-mapped entry
+  (`::ffff:192.0.2.10`) is read as IPv4, and an IPv4-mapped prefix must be
+  /96 or longer.
+- Host bits in a prefix are ignored: `198.51.100.5/28` means
+  `198.51.100.0/28`.
+- Hostnames and zoned addresses (`fe80::1%eth0`) are not accepted.
+- RAVEN refuses to start when an entry cannot be parsed, and the error names
+  it, for example `bmp.allowed-routers[1]: "router-2" is not an IP address
+  or prefix`.
+- Empty or absent (the default) accepts BMP from any source. RAVEN then logs
+  a startup WARN if the listener is not on a loopback address, because
+  anything that can reach the port can feed routes into your route table.
 
 ### RTR Section
 
@@ -100,18 +147,101 @@ primary. If the primary fails, it falls back to the next.
 - `1` — Force RTR v1 (VRPs only, no ASPA)
 - `2` — Force RTR v2 (VRPs + ASPA). Will fail if validator doesn't support it.
 
-**`rtr.expire-interval`** — Override the cache expiry interval in seconds.
-Use this if your validator's expire interval is too short for your environment.
+**`rtr.expire-interval`** — Overrides the Expire Interval, in seconds, for
+every RTR cache. The Expire Interval is how long RPKI data from a cache
+stays usable without a successful sync; once it passes,
+`raven_rtr_data_expired` goes to 1 (RAVEN keeps validating with the data it
+has). Without this key, or with 0, RAVEN uses the interval each cache sends
+in its End of Data PDU, or 7200 seconds if the cache sends none.
+
+Set it when you want the expiry alert on your own schedule rather than your
+validator's, for example a shorter interval so that a stalled cache alerts
+sooner. RFC 8210 limits the Expire Interval to 600–172800 seconds, so
+RAVEN clamps a value outside that range to the nearest limit.
+
+At startup RAVEN logs which interval applies:
+
+```json
+{"time":"2026-10-18T23:45:08.703251144-04:00","level":"INFO","msg":"RTR expire interval: each cache's own (End of Data)","expire_interval":"cache"}
+```
+
+```json
+{"time":"2026-10-18T23:45:12.674034682-04:00","level":"INFO","msg":"RTR expire interval: rtr.expire-interval overrides each cache's","expire_interval":3600}
+```
+
+and, for `expire-interval: 300`:
+
+```json
+{"time":"2026-10-18T23:45:15.651935592-04:00","level":"WARN","msg":"rtr.expire-interval outside RFC 8210's 600-172800 s; clamped","configured":300,"expire_interval":600}
+```
+
+Each `RTR sync complete` log line also reports the cache's own value
+(`expire`) beside the one in effect (`expire_effective`).
 
 ### Validation Section
 
-**`validation.aspa-default-procedure`** — How to determine the ASPA verification
-procedure for each route:
+RAVEN picks the ASPA verification procedure for each route from the BMP
+peer that sent it: an `aspa-peers` entry for the peer's address first, then
+one for the peer's ASN, then `aspa-default-procedure`. See
+[ASPA Path Verification](../getting-started/concepts.md#upstream-and-downstream-verification)
+for what the two procedures check and why the choice matters.
 
-- `upstream` — Always use upstream verification (catches route leaks from customers/peers)
-- `downstream` — Always use downstream verification (weaker, use when receiving from providers)
-- `auto` — Infer from BGP Role capability (RFC 9234) in BMP peer data. Falls back
-  to `upstream` if BGP Role is not available.
+<a id="validationaspa-peers"></a>
+**`validation.aspa-peers`** — Maps BMP peers to the neighbor's role, which
+selects the procedure for routes learned from that peer. The role is what
+the neighbor is to your monitored router:
+
+| `neighbor-role` | The neighbor is your... | Procedure |
+|---|---|---|
+| `provider` | transit provider | `downstream` |
+| `customer` | customer | `upstream` |
+| `peer` | lateral (settlement-free) peer | `upstream` |
+| `rs` | route server at an exchange | `upstream`, without the neighbor-AS check |
+| `rs-client` | route-server client (you operate the route server) | `upstream` |
+
+```yaml
+validation:
+  aspa-peers:
+    - address: 192.0.2.1            # one session to a transit provider
+      neighbor-role: provider
+    - asn: 64500                    # every session with this customer AS
+      neighbor-role: customer
+    - address: 2001:db8::6777       # the exchange's route server
+      neighbor-role: rs
+```
+
+Each entry sets exactly one of `address` (the BMP peer address) or `asn`
+(the peer's ASN). An address entry wins over an ASN entry for the same peer,
+so you can map a whole AS by ASN and override one session by address. An
+`address` entry matches that peer address on every monitored router. RAVEN
+refuses to start on an entry with both or neither of `address` and `asn`, an
+unknown role, an unparseable address, or a repeated address or ASN.
+
+For every peer an entry maps, except `rs`, RAVEN also runs the draft's
+neighbor-AS check: the first AS in the AS_PATH must be the peer's ASN, or
+the route is ASPA `Invalid` with the reason in `aspa_reason`. A route server
+is left out because it does not add its own AS to the AS_PATH, so the check
+would fail on every route it sends. RAVEN skips the check for routes with an
+empty AS_PATH or an unknown peer ASN.
+
+RAVEN reads `aspa-peers` once at startup; restart it to apply changes.
+
+<a id="validationaspa-default-procedure"></a>
+**`validation.aspa-default-procedure`** — The procedure for peers that no
+`aspa-peers` entry maps:
+
+- `upstream` (default) — Verify every unmapped peer as a customer, lateral
+  peer or route server. A provider's ordinary transit routes can fail this
+  procedure, so map your providers in `aspa-peers`.
+- `downstream` — Verify every unmapped peer as a provider. Use this when
+  most of your BMP peers are transit providers and you map the rest.
+- `auto` — Meant to read each neighbor's role from the BGP Role capability
+  (RFC 9234). RAVEN does not parse BGP Role yet, so `auto` selects
+  `upstream` today and RAVEN logs a WARN at startup saying so.
+
+Routes verified with the default report `aspa_procedure_source: default`.
+RAVEN never runs the neighbor-AS check on them, because it does not know
+what the neighbor is.
 
 **`validation.aspa-as-set-behavior`** — How to handle AS_PATHs containing AS_SET segments:
 
@@ -135,15 +265,36 @@ topic (`brokers`, `topic`).
 
 ### API Section
 
-The API server is **not configurable**. It always binds to `:11020`
-(hardcoded — see `internal/server/server.go:39` and `:339`). There is no
-`api:` section in `raven.yaml`; adding one has no effect.
+<a id="apilisten"></a>
+**`api.listen`** — The address the HTTP API binds to. The `raven` CLI
+(`status`, `peers`, `routes`, `watch` and the rest) reads everything through
+this API. Default: `127.0.0.1:11020`, so only processes on the monitoring
+host can reach it.
+
+!!! warning "Breaking change for remote CLI use"
+    Earlier releases bound the API to port 11020 on every interface, with no
+    setting to change it. The API now binds to loopback unless you set
+    `api.listen`. If you run `raven --address <host>:11020` from another
+    machine, set `api.listen` on the daemon to an address that machine can
+    reach, and protect it: the API has no authentication. See
+    [Keep the API on loopback](../deployment/hardening.md#keep-the-api-on-loopback).
+
+```yaml
+api:
+  listen: "192.0.2.10:11020"        # reachable from the management network
+```
 
 The CLI's `--address` flag (default `localhost:11020`) is a **client-side**
-setting: it tells the CLI where to reach a running RAVEN, but does not
-configure the server's bind address. To query a remote instance, pass
-`--address <host>:11020` on each command (see [Pointing the CLI at a Remote
-RAVEN Instance](#pointing-the-cli-at-a-remote-raven-instance) below).
+setting: it tells the CLI where to reach a running RAVEN and does not change
+the daemon's bind address. To query a remote instance, see
+[Pointing the CLI at a Remote RAVEN Instance](#pointing-the-cli-at-a-remote-raven-instance)
+below.
+
+At startup RAVEN logs one `listeners bound` line with the address each
+listener bound (`bmp`, `api`, `metrics` and, when enabled, `pprof`), so you
+can confirm what is exposed. If the API cannot bind, RAVEN logs the error and
+keeps running without it. If BMP cannot bind, RAVEN exits with a non-zero
+status.
 
 ## Multiple RTR Caches
 
@@ -278,18 +429,37 @@ basicConstraints=CA:false\n")
 
 ## Environment Variable Overrides
 
-Any config value can be overridden with an environment variable using the
-`RAVEN_` prefix and `_` as separator:
+You can override a config key with an environment variable. This is useful
+in containers and systemd units, where you want one `raven.yaml` and a
+per-host setting or two. To build the variable name, take the key's full
+path, prefix it with `RAVEN_`, upper-case it, and replace every dot and
+dash with an underscore:
+
+| Config key | Environment variable |
+|---|---|
+| `bmp.listen` | `RAVEN_BMP_LISTEN` |
+| `api.listen` | `RAVEN_API_LISTEN` |
+| `rtr.expire-interval` | `RAVEN_RTR_EXPIRE_INTERVAL` |
+| `validation.aspa-default-procedure` | `RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE` |
+| `logging.format` | `RAVEN_LOGGING_FORMAT` |
 
 ```bash
-RAVEN_BMP_LISTEN=":11019" raven serve
-RAVEN_LOGGING_LEVEL=debug raven serve
+RAVEN_API_LISTEN=192.0.2.10:11020 RAVEN_RTR_EXPIRE_INTERVAL=3600 raven serve --config /etc/raven/raven.yaml
 ```
+
+An environment variable wins over the same key in `raven.yaml`. Keys inside
+lists and maps have no fixed name, so you cannot set them from the
+environment: the entries of `rtr.caches`, `validation.aspa-peers` and
+`events.rules`, and maps such as webhook `headers` and
+`outputs.otel.resource_attributes`. Set those in `raven.yaml`.
+
+Earlier releases ignored these variables.
 
 ## Pointing the CLI at a Remote RAVEN Instance
 
 By default the CLI connects to `localhost:11020`. To query a remote instance,
-pass `--address` on each command:
+set `api.listen` on that instance to an address you can reach (see
+[API Section](#api-section)), then pass `--address` on each command:
 
 ```bash
 raven routes --address 192.0.2.10:11020 --posture origin-invalid

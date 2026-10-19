@@ -1,7 +1,10 @@
 # CLI Reference
 
 RAVEN is CLI-first. Every command connects to a running RAVEN daemon via the
-API (default: `localhost:11020`). Use `--address` to target a remote instance.
+API (default: `localhost:11020`). Use `--address` to target a remote
+instance; that instance must set
+[`api.listen`](configuration.md#api-section) to an address you can reach,
+because the API binds to loopback by default.
 
 ## Global Flags
 
@@ -15,9 +18,11 @@ These persistent flags are accepted by every command:
 | `--log-format` | `json` | Log format: `json` or `text` |
 
 !!! note
-    `--format` is **not** a global flag — it is a per-command flag (`table` or
-    `json`, and `markdown` on `raven audit`). Each command's flag table below
-    lists whether it accepts `--format`.
+    `--format` is **not** a global flag. It is a per-command flag: `table` or
+    `json` on most commands, `wide` as well on `raven routes`, and `markdown`
+    on `raven audit`. `raven status`, `raven peers` and `raven validate` have
+    no `--format`.
+    Each command's flag table below lists whether it accepts `--format`.
 
 ---
 
@@ -47,52 +52,145 @@ RAVEN runs in the foreground. Use systemd, screen, or tmux for production.
 
 ## raven status
 
-Show the health of all BMP peers and RTR caches.
+Show the route table summary, RPKI state and every BMP peer.
 
 ```bash
 raven status
-raven status --format json
+raven status --router edge1
+```
+
+**Flags:**
+
+| Flag | Description |
+|---|---|
+| `--router` | List only this monitored router's peers: its BMP source address or its BMP sysName. The route table and RPKI totals stay daemon-wide |
+
+`raven status` has no `--format` flag. For JSON, read the API directly on
+the monitoring host:
+
+```bash
+curl -s http://127.0.0.1:11020/api/v1/status
 ```
 
 **Example output:**
-BMP PEERS
-PEER           ASN     STATE  ROUTES   SINCE
-192.168.1.1    65001   UP     842341   5m ago
-192.168.1.2    65002   UP     839102   5m ago
-RTR CACHES
-CACHE                STATE  SERIAL  VRPS    ASPAS  LAST SYNC
-localhost:3323        UP     4821    542000  1407   23s ago
+
+```text
+RAVEN dev  uptime 2h14m5s
+
+Route Table: 5 routes received (Adj-RIB-In pre-policy)
+  path-suspect         2
+  path-only            1
+  secured              1
+  unverified           1
+By RIB:
+  adj-rib-in-pre       5
+  adj-rib-out-pre      41
+
+RPKI: 1 VRPs (serial 4821)
+
+BMP Peers: 4
+  ROUTER     PEER                      ASN    STATE  ROUTES  OUT
+  edge1      198.51.100.1              64500  up     2       41
+  edge1      198.51.100.2              64496  up     1       0
+  edge1      192.0.2.250               64510  up     1       0
+  192.0.2.2  2001:db8::2 rd 65000:100  64505  up     1       0
+```
+
+**Route Table** and its posture breakdown count Adj-RIB-In pre-policy
+routes only: what your routers received, before import policy, comparable
+to the received-routes count on the router itself. Earlier releases added
+every RIB together, so a router that also sent post-policy or Adj-RIB-Out
+data inflated the total. The posture lines appear in no fixed
+order. **By RIB** appears when the table holds more than one RIB type and
+lists each one separately.
+
+**BMP Peers** columns:
+
+| Column | Meaning |
+|---|---|
+| `ROUTER` | The monitored router: its BMP sysName, or its BMP source address when it sent none |
+| `PEER` | The BGP peer's address. A peer in a VRF shows the VRF's route distinguisher, as in `2001:db8::2 rd 65000:100` |
+| `ASN` | The peer's ASN |
+| `STATE` | `up` or `down` |
+| `ROUTES` | The peer's Adj-RIB-In pre-policy routes now in the table |
+| `OUT` | The peer's Adj-RIB-Out pre-policy routes: what your router sends that peer (RFC 8671). Shown only when some peer has Adj-RIB-Out routes |
+
+The same peer address on two routers, or in two VRFs of one router, is two
+rows, because RAVEN keys peers by router, peer distinguisher and address.
+`ROUTES` and `OUT` stay in separate columns so that received and sent routes
+are never added together.
 
 ---
 
 ## raven peers
 
-List all BMP peers with session metadata.
+List every BMP peer with session metadata.
 
 ```bash
 raven peers
-raven peers --format json
+raven peers --router edge1
 ```
 
+**Flags:**
+
+| Flag | Description |
+|---|---|
+| `--router` | List only this monitored router's peers: its BMP source address or its BMP sysName |
+
+`raven peers` has no `--format` flag; for JSON, read
+`http://127.0.0.1:11020/api/v1/peers` on the monitoring host.
+
 **Example output:**
-PEER          ASN     ROUTER-ID    STATE  ROUTES   AFI        SINCE
-192.168.1.1   65001   10.0.0.1     UP     842341   IPv4+IPv6  5m ago
-192.168.1.2   65002   10.0.0.2     UP     839102   IPv4       5m ago
+
+```text
+ROUTER     PEER                      ASN    ROUTER ID     STATE  ROUTES  OUT  UP SINCE
+edge1      198.51.100.1              64500  198.51.100.1  up     2       41   2026-10-18T09:12:44Z
+edge1      198.51.100.2              64496  198.51.100.2  up     1       0    2026-10-18T09:12:44Z
+edge1      192.0.2.250               64510  192.0.2.250   up     1       0    2026-10-18T09:12:45Z
+192.0.2.2  2001:db8::2 rd 65000:100  64505  203.0.113.5   up     1       0    2026-10-18T09:13:02Z
+```
+
+The `ROUTER`, `PEER`, `ROUTES` and `OUT` columns mean the same as in
+[`raven status`](#raven-status). `ROUTER ID` is the peer's BGP identifier and
+`UP SINCE` the time its session came up (RFC 3339, UTC).
+
+### The MALFORMED column
+
+When a peer has sent a malformed UPDATE that RFC 7606 answers with a
+session reset, `raven peers` adds a `MALFORMED` column. It shows the reason
+for that peer and `-` for every other peer:
+
+```text
+ROUTER  PEER          ASN    ROUTER ID     STATE  ROUTES  UP SINCE              MALFORMED
+edge1   198.51.100.1  64500  198.51.100.1  up     2       2026-10-18T09:12:44Z  mp_reach_next_hop
+edge1   198.51.100.2  64496  198.51.100.2  up     1       2026-10-18T09:12:44Z  -
+```
+
+A marked peer's routes in RAVEN may be incomplete: RAVEN withdrew what it
+could parse from the bad UPDATE and expects the router to reset the BGP
+session. The mark clears when the router reports the peer up again (BMP
+Peer Up). The reason is a `raven_bmp_malformed_updates_total` reason, and
+the API's `/api/v1/peers` output carries it as `malformed_input`,
+`malformed_reason` and `malformed_since`. See
+[Malformed BGP Input](../troubleshooting.md#malformed-bgp-input).
 
 ---
 
 ## raven routes
 
-Query the route table. Without filters, returns all routes. Use filters to
-narrow results.
+Query the route table. Without filters, RAVEN returns every Adj-RIB-In
+pre-policy route.
 
 ```bash
 raven routes
-raven routes --prefix 1.0.0.0/24
-raven routes --origin-asn 13335
-raven routes --peer 192.168.1.1
-raven routes --posture origin-invalid
+raven routes --prefix 203.0.113.0/24
+raven routes --origin-asn 64502
+raven routes --peer 198.51.100.1
+raven routes --router edge1
 raven routes --posture path-suspect
+raven routes --prefix 203.0.113.0/24 --peer 198.51.100.1
+raven routes --posture path-suspect --format wide
+raven routes --rib adj-rib-out-pre --posture origin-invalid
 raven routes --format json
 ```
 
@@ -102,78 +200,274 @@ raven routes --format json
 |---|---|
 | `--prefix` | Filter by prefix (exact match) |
 | `--origin-asn` | Filter by origin ASN |
-| `--peer` | Filter by BMP peer IP address |
+| `--peer` | Filter by BMP peer address. An IPv4 peer matches in plain or IPv4-mapped form |
+| `--router` | Filter by monitored router: its BMP source address or its BMP sysName |
 | `--posture` | Filter by security posture |
-| `--afi` | Filter by address family: `ipv4` or `ipv6` |
-| `--format` | Output format: `table` or `json` |
+| `--rib` | The RIB to list: `adj-rib-in-pre` (default), `adj-rib-in-post`, `adj-rib-out-pre` or `adj-rib-out-post` |
+| `--format` | Output format: `table` (default), `wide` or `json` |
+
+Every filter you give applies, so `--prefix 203.0.113.0/24 --peer
+198.51.100.1` returns that prefix from that one peer. Earlier releases
+honored only the first filter present and silently ignored the rest.
+`--router` with a sysName matches every router that reported that name.
+
+`raven routes` lists one RIB at a time, Adj-RIB-In pre-policy unless you
+pass `--rib`, and every other filter applies within it. Adj-RIB-In
+pre-policy is the default because it is what your peers actually sent,
+before your import policy changed or filtered it. Use `--rib
+adj-rib-in-post` to see what survived your import policy, and `--rib
+adj-rib-out-pre` to check what your router advertises, for example
+`origin-invalid` routes your network is sending to its peers. A RIB shows
+routes only if your routers export it over BMP.
+
+The API takes the same filter as the `rib` query parameter on
+`/api/v1/routes` and `/api/v1/watch`, with the same values. On
+`/api/v1/routes` it defaults to `adj-rib-in-pre`; on `/api/v1/watch`, a
+stream without `rib` includes every RIB. An unknown value returns HTTP 400.
 
 **Posture values for `--posture`:**
 
 `secured` `origin-only` `path-suspect` `path-only` `unverified` `origin-invalid`
 
 **Example output:**
-PREFIX           PEER          ORIGIN   ROV      ASPA     POSTURE
-1.0.0.0/24       192.168.1.1   AS13335  Valid    Valid    secured
-8.8.8.0/24       192.168.1.1   AS15169  Valid    Unknown  origin-only
-192.0.2.0/24     192.168.1.2   AS64666  Invalid  Unknown  origin-invalid
+
+```text
+PREFIX                    ROUTER     PEER                ORIGIN   ROV       ASPA     POSTURE
+203.0.113.0/24            edge1      198.51.100.1        AS64502  Valid     Invalid  path-suspect
+198.51.100.0/24           edge1      192.0.2.250         AS64503  NotFound  Valid    path-only
+2001:db8:2000::/36        edge1      198.51.100.1        AS64503  NotFound  Invalid  path-suspect
+203.0.113.0/24            edge1      198.51.100.2        AS64502  Valid     Valid    secured
+2001:db8:3000::/36        192.0.2.2  2001:db8::2 path 2  AS64504  NotFound  Unknown  unverified
+```
+
+`ROUTER` is the router's sysName, or its address when it sent none. When the
+peer uses ADD-PATH (RFC 7911), `PEER` adds the path ID, as in
+`2001:db8::2 path 2`, because the peer can send several paths for one
+prefix and RAVEN keeps each one.
+
+### --format wide
+
+`--format wide` adds three columns that explain each route's ASPA result:
+
+```text
+PREFIX                    ROUTER     PEER                ORIGIN   ROV       ASPA     POSTURE       ASPA PROCEDURE  PROCEDURE SOURCE  FAILING HOP
+203.0.113.0/24            edge1      198.51.100.1        AS64502  Valid     Invalid  path-suspect  upstream        config-asn        64501->64500
+198.51.100.0/24           edge1      192.0.2.250         AS64503  NotFound  Valid    path-only     upstream        config-address    -
+2001:db8:2000::/36        edge1      198.51.100.1        AS64503  NotFound  Invalid  path-suspect  upstream        config-asn        -
+203.0.113.0/24            edge1      198.51.100.2        AS64502  Valid     Valid    secured       downstream      config-address    -
+2001:db8:3000::/36        192.0.2.2  2001:db8::2 path 2  AS64504  NotFound  Unknown  unverified    upstream        default           -
+```
+
+| Column | Meaning |
+|---|---|
+| `ASPA PROCEDURE` | `upstream` or `downstream`: the verification procedure RAVEN used for this route |
+| `PROCEDURE SOURCE` | Where the procedure came from: `config-address` (an `aspa-peers` entry for the peer address), `config-asn` (an `aspa-peers` entry for the peer ASN) or `default` (`aspa-default-procedure`) |
+| `FAILING HOP` | For an ASPA `Invalid`, the hop that failed, as `customer->provider`: the customer AS's ASPA record does not list that provider. `-` when no hop failed |
+
+In the example, the first route is a leak: AS64501's ASPA record does not
+list AS64500, so the hop `64501->64500` fails. The third route is `Invalid`
+with no failing hop because it failed the neighbor-AS check; `--format json`
+shows the reason in `aspa_reason`. The route from the transit provider
+(`198.51.100.2`) is verified `downstream` because an `aspa-peers` entry maps
+that address to `neighbor-role: provider`. See
+[ASPA Path Verification](../getting-started/concepts.md#aspa-path-verification)
+and [`validation.aspa-peers`](configuration.md#validationaspa-peers).
+
+### --format json
+
+`--format json` prints the API's response unchanged: an array of route
+objects. This is the leaking route from the examples above:
+
+```json
+[
+  {
+    "prefix": "203.0.113.0/24",
+    "router": "192.0.2.1",
+    "router_name": "edge1",
+    "peer": "198.51.100.1",
+    "peer_asn": 64500,
+    "rib": "adj-rib-in-pre",
+    "origin_asn": 64502,
+    "as_path": [
+      64500,
+      64501,
+      64502
+    ],
+    "next_hop": "198.51.100.1",
+    "rov": "Valid",
+    "rov_reason": "matches VRP {203.0.113.0/24, AS64502, /24}",
+    "aspa": "Invalid",
+    "aspa_procedure": "upstream",
+    "aspa_procedure_source": "config-asn",
+    "aspa_failing_hop": {
+      "customer_asn": 64501,
+      "provider_asn": 64500
+    },
+    "posture": "path-suspect",
+    "timestamp": "2026-10-18T14:02:31Z"
+  }
+]
+```
+
+A route from a VRF peer with ADD-PATH carries `peer_distinguisher` and
+`path_id`; a route that failed the neighbor-AS check carries `aspa_reason`:
+
+```json
+{
+  "prefix": "2001:db8:3000::/36",
+  "router": "192.0.2.2",
+  "peer_distinguisher": "65000:100",
+  "peer": "2001:db8::2",
+  "peer_asn": 64505,
+  "path_id": 2,
+  "rib": "adj-rib-in-pre",
+  ...
+}
+```
+
+```json
+{
+  "prefix": "2001:db8:2000::/36",
+  ...
+  "aspa": "Invalid",
+  "aspa_procedure": "upstream",
+  "aspa_procedure_source": "config-asn",
+  "aspa_reason": "neighbor-AS check failed: first AS in AS_PATH is AS64511, peer is AS64500",
+  ...
+}
+```
+
+**Route fields:**
+
+| Field | Description |
+|---|---|
+| `prefix` | The route's prefix |
+| `router` | The monitored router: the source address of its BMP session |
+| `router_name` | The router's BMP Initiation sysName. Omitted when the router sent none |
+| `peer_distinguisher` | The peer's VRF route distinguisher, from the BMP per-peer header. Omitted for peers in the global instance |
+| `peer` | The BGP peer's address |
+| `peer_asn` | The BGP peer's ASN |
+| `path_id` | The ADD-PATH path identifier (RFC 7911). Omitted when ADD-PATH is not in effect for that peer and address family |
+| `rib` | The RIB the route is in: `adj-rib-in-pre`, `adj-rib-in-post`, `adj-rib-out-pre` or `adj-rib-out-post`. Every route in one response has the RIB you asked for with `--rib` |
+| `origin_asn` | The origin AS: the last AS of the AS_PATH's final AS_SEQUENCE (RFC 6811 §2). `0` when the route has no origin: an empty AS_PATH, a path ending in an AS_SET (origin NONE), or a path ending in a confederation segment. The table shows `-` |
+| `as_path` | The AS_PATH, neighbor first, origin last |
+| `next_hop` | The BGP next hop |
+| `rov` | `Valid`, `Invalid` or `NotFound` |
+| `rov_reason` | Why ROV reached its result |
+| `aspa` | `Valid`, `Invalid`, `Unknown` or `Unverifiable` |
+| `aspa_procedure` | `upstream` or `downstream` |
+| `aspa_procedure_source` | `config-address`, `config-asn` or `default` |
+| `aspa_reason` | Why ASPA reached its result when no hop explains it: the neighbor-AS check failed, the route is an Adj-RIB-Out route, or its AS_PATH has confederation segments. RAVEN does not ASPA-verify the last two. Omitted otherwise |
+| `aspa_failing_hop` | `{customer_asn, provider_asn}`: the hop that made ASPA `Invalid`. Omitted when no hop failed |
+| `posture` | The combined [security posture](security-postures.md) |
+| `timestamp` | When the monitored router received the route, from the BMP per-peer header, in RFC 3339 UTC. If the router sends a zero timestamp, RAVEN uses the time it received the BMP message instead |
+
+`timestamp` comes from the router, not from RAVEN's clock: it is when the
+monitored router received the route (RFC 7854 §4.2), not when RAVEN read
+it. When RAVEN restarts or a BMP session reconnects, the router resends its
+whole table, and a timestamp taken by RAVEN would make every route look
+seconds old. The router's timestamp keeps the route's age, so for an
+`origin-invalid` route it tells you how long the hijacked prefix has been in
+your router's table, which is what you need to judge impact. The router
+decides what it puts in this field, and a router that sends 0 gets RAVEN's
+receive time instead; compare a few routes against the router's own
+"received" time before you rely on it for route age.
 
 ---
 
 ## raven validate
 
-One-shot validation of a prefix and origin ASN against current RPKI state.
-Does not require a BMP session — useful for quick checks.
+Show how RAVEN validated the routes it holds for one prefix, with the reason
+for each ROV result. Use it to answer "why is this prefix `origin-invalid`?"
+from the daemon's live state.
 
 ```bash
-raven validate --prefix 1.0.0.0/24 --origin-asn 13335
-raven validate --prefix 192.0.2.0/24 --origin-asn 64666
-raven validate --prefix 1.0.0.0/24 --origin-asn 13335 --format json
+raven validate --prefix 203.0.113.0/24
 ```
+
+`raven validate` reads the route table of a running daemon, so it needs
+`raven serve` running and the prefix received over BMP. It does not validate
+a prefix the routers have not sent; for a prefix RAVEN has not seen, it
+prints `no routes found for prefix 203.0.113.0/24`.
 
 **Flags:**
 
 | Flag | Description |
 |---|---|
-| `--prefix` | Prefix to validate (required) |
-| `--origin-asn` | Origin ASN to validate against (required) |
-| `--format` | Output format: `table` or `json` |
+| `--prefix` | Prefix to look up, exact match (required) |
+| `--origin-asn` | Not supported yet: `raven validate` exits with an error if you pass it |
+| `--rtr` | Not supported yet: `raven validate` exits with an error if you pass it |
+
+Both flags are reserved for one-shot validation against an RTR cache, which
+does not exist yet. Earlier releases accepted them and silently ignored
+them; RAVEN now refuses them so that you never read a result for an origin
+you did not get. With either flag, `raven validate` prints, and exits with
+status 1:
+
+```text
+Error: --origin-asn is not supported yet; validate reads the running daemon's routes for --prefix
+```
+
+```text
+Error: --rtr is not supported yet; validate reads the running daemon's routes for --prefix
+```
+
+`raven validate` has no `--format` flag. For JSON, use
+`raven routes --prefix 203.0.113.0/24 --format json`.
 
 **Example output:**
-PREFIX         ORIGIN    ROV     MATCHED VRP
-1.0.0.0/24     AS13335   Valid   ROA{1.0.0.0/24, AS13335, maxLength=/24}
+
+```text
+PREFIX                    PEER          ORIGIN   ROV      POSTURE         REASON
+203.0.113.0/24            198.51.100.1  AS64502  Valid    secured         matches VRP {203.0.113.0/24, AS64502, /24}
+203.0.113.0/24            198.51.100.9  AS64511  Invalid  origin-invalid  origin AS64511 not authorized by any covering VRP
+```
+
+There is one row per route RAVEN holds for the prefix: one per peer, per
+router and per ADD-PATH path. `REASON` is the ROV reason: the VRP that
+matched, the origin AS that no covering VRP authorizes, or
+`no covering VRPs found`. Like `raven routes`, it lists Adj-RIB-In
+pre-policy routes.
 
 ---
 
 ## raven watch
 
-Stream live validation state changes to your terminal. Runs continuously until
-you press Ctrl+C.
+Stream route updates to your terminal as RAVEN validates them. Runs until you
+press Ctrl+C.
 
 ```bash
 raven watch
-raven watch --posture origin-invalid
 raven watch --posture path-suspect
-raven watch --peer 192.168.1.1
-raven watch --prefix 1.0.0.0/24
+raven watch --router edge1 --posture origin-invalid
+raven watch --peer 198.51.100.1
+raven watch --prefix 203.0.113.0/24 --origin-asn 64502
 ```
 
 **Flags:**
 
 | Flag | Description |
 |---|---|
-| `--posture` | Only stream routes matching this posture |
-| `--peer` | Only stream routes from this peer |
 | `--prefix` | Only stream routes for this prefix |
-| `--format` | Output format: `table` or `json` |
+| `--origin-asn` | Only stream routes with this origin ASN |
+| `--peer` | Only stream routes from this BMP peer |
+| `--router` | Only stream routes from this monitored router: its address or BMP sysName |
+| `--posture` | Only stream routes with this posture |
+
+Every filter you give applies, as with `raven routes`. Earlier releases sent
+only `--posture` to the daemon and ignored the other filters.
 
 **Example output:**
-[14:23:01] NEW    192.0.2.0/24  via 192.168.1.2  AS64666  ROV:Invalid  ASPA:Unknown  posture:origin-invalid
-[14:23:04] CHANGE 10.0.0.0/8    via 192.168.1.1  AS64501  ROV:Valid    ASPA:Invalid  posture:path-suspect
-AS_PATH: [64501 3356 7018]  failing hop: AS3356→AS7018 not in ASPA(AS3356)
+
+```text
+watching for route events... (Ctrl+C to stop)
+
+[path-suspect] 203.0.113.0/24 via 198.51.100.1 origin:AS64502 AS_PATH:[64500 64501 64502] rov:Valid posture:path-suspect
+```
 
 !!! tip
-    Run `raven watch --posture origin-invalid` in a terminal during a demo or
-    incident. It will catch hijacks and ROV state changes the moment they happen.
+    Run `raven watch --posture path-suspect` in a spare terminal during an
+    incident. It shows leaked routes the moment RAVEN validates them.
 
 ---
 

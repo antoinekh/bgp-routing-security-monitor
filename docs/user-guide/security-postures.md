@@ -65,18 +65,21 @@ failing AS. Will become more detectable as ASPA adoption grows.
     leaks are usually accidental misconfigurations, not malicious. Investigate
     before taking action.
 
-!!! note "New baseline behaviour on unauthorised direct sessions"
-    ASPA verification now checks the first hop of the AS_PATH — whether your
-    immediate peer's ASPA record lists your own AS as an authorised provider.
-    If it doesn't, **every** prefix received over that session shows
-    `path-suspect`, not just customer-originated leaks — including
-    connected-link and infrastructure prefixes that have nothing to do with
-    a misconfiguration on the other end. This is correct behaviour, not
-    noise: it means the session itself isn't in a customer-provider (or
-    otherwise ASPA-authorised) relationship with you. If you see
-    `path-suspect` across an entire peer's routes rather than on one or two
-    prefixes, check whether that peer's ASPA record includes your AS as a
-    provider before assuming a leak.
+!!! note "path-suspect across a whole peer"
+    If most of one peer's routes show `path-suspect` rather than one or two
+    prefixes, check how RAVEN verifies that peer before assuming a leak. Run
+    `raven routes --peer <address> --format wide` and read the `ASPA
+    PROCEDURE` and `FAILING HOP` columns:
+
+    - A transit provider verified with the `upstream` procedure makes
+      ordinary routes that came down to you look like leaks. Map the peer to
+      `neighbor-role: provider` in
+      [`validation.aspa-peers`](configuration.md#validationaspa-peers) so
+      RAVEN uses `downstream`.
+    - A `FAILING HOP` of `-` with `aspa_reason` set in `--format json` means
+      the neighbor-AS check failed. A route server mapped to any role other
+      than `rs` fails it on every route, because a route server does not put
+      its own AS in the AS_PATH.
 
 ---
 
