@@ -135,7 +135,8 @@ type BMPPeerUp struct {
 	AddPath AddPathState
 	// TableName is the VRF/Table Name information TLV (RFC 9069 §5.1,
 	// type 3) of a Loc-RIB instance's Peer Up, e.g. "global" or a VRF
-	// name; "" if none.
+	// name; the default Loc-RIB instance is "global" (RFC 9069 §5.2.1)
+	// when the TLV is absent. Empty for a VRF instance with no name.
 	TableName string
 }
 
@@ -196,7 +197,8 @@ type Peer struct {
 	LocalASN      uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN, or a Loc-RIB header's Peer AS); 0 if unknown
 	RouterID      netip.Addr
 	// TableName is a Loc-RIB instance's VRF/Table Name, from its Peer Up;
-	// "" if none was sent (a Loc-RIB registered without a Peer Up has none).
+	// the default instance is "global" (RFC 9069 §5.2.1). Empty if none
+	// was sent, or for a Loc-RIB registered without a Peer Up.
 	TableName string
 	SysName   string
 	SysDescr  string

@@ -111,6 +111,7 @@ All notable changes to RAVEN are recorded here.
   file (router, peer distinguisher, peer type, path ID, format version).
 
 ### Fixed
+- The default Loc-RIB instance (zero distinguisher) is named `global` in the peer data, as RFC 9069 §5.2.1 requires, when its Peer Up carries no VRF/Table Name TLV; `/api/v1/peers`, `raven peers` and the BMP registration log showed no table name.
 - ASPA is not verified without ASPA data. Until an RTR cache syncs at
   protocol version 2 (the first with ASPA), every route's ASPA is Unknown
   with reason `no ASPA data (no RTR v2 session)`; with `validation.aspa:

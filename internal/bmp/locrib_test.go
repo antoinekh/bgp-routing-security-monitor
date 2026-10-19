@@ -157,8 +157,9 @@ func TestLocRIBPerPeerHeader(t *testing.T) {
 }
 
 // The VRF/Table Name TLV (type 3) of a Loc-RIB Peer Up is read, after the
-// OPENs and any other information TLV; a Peer Up without one, or with a
-// truncated one, has none.
+// OPENs and any other information TLV. Without one, the default Loc-RIB
+// instance (zero distinguisher) has the RFC 9069 default name "global"; a
+// VRF instance has no name.
 func TestPeerUpTableName(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -166,9 +167,10 @@ func TestPeerUpTableName(t *testing.T) {
 		want string
 	}{
 		{"with table name", locRIBPeerUp(0, 0, 65000, "vrf-red"), "vrf-red"},
-		{"without TLVs", locRIBPeerUp(0, 0, 65000, ""), ""},
+		{"without TLVs, default instance", locRIBPeerUp(0, 0, 65000, ""), "global"},
+		{"without TLVs, VRF instance", locRIBPeerUp(1, 0, 65000, ""), ""},
 		{"truncated TLV", func() []byte {
-			m := locRIBPeerUp(0, 0, 65000, "vrf-red")
+			m := locRIBPeerUp(1, 0, 65000, "vrf-red")
 			m = m[:len(m)-3]
 			binary.BigEndian.PutUint32(m[1:5], uint32(len(m)))
 			return m
@@ -202,7 +204,9 @@ func TestLocRIBSession(t *testing.T) {
 	p := netip.MustParsePrefix("203.0.113.0/24")
 
 	send(t, client, initiationMsg("lr-session.test"),
-		locRIBPeerUp(0, 0, 65000, "global"),
+		// No VRF/Table Name TLV: the default Loc-RIB instance is named
+		// "global" (RFC 9069 §5.2.1) even when the TLV is absent.
+		locRIBPeerUp(0, 0, 65000, ""),
 		locRIBRouteMonitoring(0, PeerFlagLocRIBFiltered, 65000, updateBody(false, false, nil, []pathNLRI{{0, p}}, nil)))
 	ev := h.next(t)
 	r := ev.Route

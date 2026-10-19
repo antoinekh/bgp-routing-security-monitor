@@ -155,6 +155,11 @@ func ParsePeerUp(data []byte) (BMPPeerUp, error) {
 	}
 
 	pu := BMPPeerUp{PerPeer: pph}
+	if pph.IsLocRIB() && pph.Distinguisher() == 0 {
+		// RFC 9069 §5.2.1: the default Loc-RIB instance is named "global",
+		// whether or not its Peer Up carries the VRF/Table Name TLV.
+		pu.TableName = locRIBDefaultTableName
+	}
 
 	// Local address: 16 bytes
 	if pph.IsIPv6() {
@@ -196,7 +201,9 @@ func ParsePeerUp(data []byte) (BMPPeerUp, error) {
 	}
 	pu.AddPath = negotiateAddPath(sent.addPath, recv.addPath)
 	if end := 20 + sent.length + recv.length; end < len(body) {
-		pu.TableName = peerUpTableName(body[end:])
+		if name := peerUpTableName(body[end:]); name != "" {
+			pu.TableName = name
+		}
 	}
 	return pu, nil
 }
@@ -204,6 +211,10 @@ func ParsePeerUp(data []byte) (BMPPeerUp, error) {
 // peerUpInfoTableName is the Peer Up information TLV type of a Loc-RIB
 // instance's VRF/Table Name (RFC 9069 §5.1).
 const peerUpInfoTableName = 3
+
+// locRIBDefaultTableName is the RFC 9069 §5.2.1 name of the default Loc-RIB
+// instance, the one with a zero-filled peer distinguisher.
+const locRIBDefaultTableName = "global"
 
 // peerUpTableName returns the VRF/Table Name in a Peer Up's information
 // TLVs, or "" if there is none. A TLV running past the message ends the
