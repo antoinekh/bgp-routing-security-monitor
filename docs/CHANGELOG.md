@@ -4,7 +4,99 @@ All notable changes to RAVEN are recorded here.
 
 ## Unreleased
 
+### Breaking changes
+- ROV takes the origin AS as RFC 6811 §2 defines it. A route whose AS_PATH
+  ends in an AS_SET has origin NONE: `Invalid` if a VRP covers the prefix,
+  `NotFound` otherwise. Earlier releases used the set's last member, so
+  some aggregates change from `Valid` to `Invalid`. Confederation segments
+  never supply the origin.
+- `raven validate` exits with an error when given `--origin-asn` or
+  `--rtr`, which it used to accept and ignore. Remove them from scripts.
+- The HTTP API now binds to `127.0.0.1:11020` by default instead of port
+  11020 on every interface, and is configurable with the new `api.listen`
+  key. If you run the CLI from another host with `--address`, set
+  `api.listen` on the daemon to a reachable address and firewall it.
+- `raven status` and the API's `route_table.total_routes` and `by_posture`
+  now count Adj-RIB-In pre-policy routes only. Earlier releases added every
+  RIB the routers sent, so routers sending post-policy or
+  Adj-RIB-Out data inflated the totals. Dashboards built on those numbers
+  will show lower, correct values.
+- `raven_bmp_peer_state` gained the `router_addr` and `peer_distinguisher`
+  labels. The same peer address on two routers, or in two VRFs of one
+  router, is now two series.
+- ASPA verification follows draft-ietf-sidrops-aspa-verification-24. The
+  "first-hop" check of the neighbor-to-you edge, which required the
+  neighbor's ASPA record to list your AS, was removed because the draft does
+  not evaluate that edge. A route whose AS_PATH holds only the neighbor's AS
+  now verifies as `Valid`, and sessions that showed `path-suspect` on every
+  route because of that check no longer do.
+- Snapshots are written in `format_version` 2. A snapshot from an earlier
+  release is not restored; RAVEN starts with an empty route table and
+  rebuilds it from the routers' BMP table dumps.
+
 ### Added
+- RFC 7606 error handling for malformed BGP UPDATEs, mirroring the
+  monitored router: attribute discard, treat-as-withdraw and session reset.
+  Withdrawals apply even from malformed UPDATEs. Peers that send a
+  session-reset error show a `MALFORMED` column in `raven peers` and
+  `malformed_input`, `malformed_reason` and `malformed_since` in
+  `/api/v1/peers`. New metric
+  `raven_bmp_malformed_updates_total{action,reason}`; a WARN log line at
+  most once a minute per peer and reason.
+- `raven routes --rib` and the `rib` parameter on `/api/v1/routes` and
+  `/api/v1/watch`: list one RIB (default `adj-rib-in-pre`), with every
+  other filter applied within it.
+- `--router` on `raven status` and `raven peers`. On `raven status` it
+  limits the peer list; the totals stay daemon-wide.
+- Route JSON `timestamp`: when the monitored router received the route,
+  from the BMP per-peer header, in RFC 3339 UTC; RAVEN's receive time when
+  the router sends 0.
+- `rtr.expire-interval` now overrides every cache's Expire Interval,
+  clamped to 600–172800 seconds, and RAVEN logs the interval in effect at
+  startup. Earlier releases parsed the key and never used it.
+- ASPA: routes whose AS_PATH has confederation segments are `Unverifiable`
+  with an `aspa_reason` (draft-ietf-sidrops-aspa-verification-24 §6.2).
+- `validation.aspa-peers`: map a BMP peer, by address or ASN, to its
+  `neighbor-role` (`provider`, `customer`, `peer`, `rs`, `rs-client`).
+  `provider` selects downstream ASPA verification, every other role
+  upstream. Address entries take precedence over ASN entries; unmapped
+  peers use `validation.aspa-default-procedure`, which is now honored
+  (`auto` falls back to upstream until BGP Role parsing exists). Mapped
+  peers other than `rs` also get the draft's neighbor-AS check.
+- Route JSON gains `router`, `router_name`, `peer_distinguisher`,
+  `path_id`, `aspa_procedure`, `aspa_procedure_source`, `aspa_reason` and
+  `aspa_failing_hop`.
+- `raven routes --format wide`, adding the `ASPA PROCEDURE`,
+  `PROCEDURE SOURCE` and `FAILING HOP` columns. `raven routes` gains a
+  `ROUTER` column, and `raven routes` and `raven watch` gain `--router`
+  (router address or BMP sysName).
+- `raven status` and `raven peers` gain a `ROUTER` column and, when any
+  peer has Adj-RIB-Out routes, an `OUT` column.
+- Routes are keyed by router, peer distinguisher, peer address, prefix,
+  ADD-PATH path ID and RIB type. Two routers with the same peer address,
+  VRF peers with the same address, and ADD-PATH paths no longer overwrite
+  each other. ADD-PATH is negotiated per address family and direction from
+  the Peer Up OPENs.
+- `bmp.allowed-routers`: accept BMP only from listed addresses and
+  prefixes. Other sources are closed at accept, logged at WARN and counted.
+  With the list empty, RAVEN warns at startup when BMP listens on a
+  non-loopback address.
+- One `listeners bound` log line at startup with every listener's resolved
+  address. A BMP bind failure now exits non-zero.
+- BMP decoding: Adj-RIB-Out (RFC 8671), IPv4 unicast in
+  `MP_REACH_NLRI`/`MP_UNREACH_NLRI` including RFC 8950 IPv6 next hops,
+  per-family ADD-PATH, RFC 9072 extended optional parameters, and
+  `AS4_PATH` merging for two-octet AS_PATHs. `make fuzz` runs the
+  `FuzzBMPMessage`, `FuzzPeerUpOpen` and `FuzzDecodeUpdate` targets.
+- Incremental revalidation: an RTR sync revalidates only the routes its
+  VRP and ASPA changes can affect, instead of the whole table.
+- New Prometheus metrics: `raven_aspa_validations_total{procedure,source,state}`,
+  `raven_revalidation_duration_seconds{mode}`,
+  `raven_revalidation_routes_total{mode,result}`,
+  `raven_bmp_rejected_connections_total{reason}`,
+  `raven_adj_rib_out_routes_total{posture,afi}` and
+  `raven_bmp_unsupported_nlri_total{afi,safi}`. Counters and histograms
+  with fixed label sets are exported at 0 from startup.
 - On-demand global BGP visibility correlation via the RIPEstat Data API.
   RAVEN's ROV/ASPA validation is local-vantage-point only and cannot
   distinguish a globally propagated hijack from a purely local leak; this
@@ -57,6 +149,29 @@ All notable changes to RAVEN are recorded here.
   anomaly detection (bulk SLURM ROA injection, serial-based confirmation).
 
 ### Fixed
+- `RAVEN_*` environment variable overrides had no effect. They now work
+  for every non-list config key, with dots and dashes mapped to
+  underscores (`RAVEN_BMP_LISTEN`, `RAVEN_RTR_EXPIRE_INTERVAL`).
+- A Route Monitoring message with a BGP Length under 19 crashed the
+  daemon.
+- `--prefix` and `--origin-asn` on `raven routes` returned routes from
+  every RIB; every query now returns one RIB.
+- `raven routes` applied only the first of `--prefix`, `--origin-asn`,
+  `--peer` and `--posture`; every filter given now applies. `raven watch`
+  sent only `--posture` to the daemon; it now sends every filter.
+- Per-peer route counts counted every announced prefix in every UPDATE and
+  never decreased on withdrawal. They now reflect the route table.
+- VRP changes rebuilt the whole VRP index under a write lock for every
+  withdrawn VRP, stalling ROV lookups and BMP ingest (81 minutes for one
+  8,882-VRP withdrawal in production). VRP changes now publish once at
+  End of Data through an off-lock rebuild and atomic swap, and routes keep
+  validating against the previous VRP set during a full sync.
+- A post-policy withdrawal no longer removes the pre-policy route, and a
+  peer-down on one router no longer removes other routers' routes.
+- A Withdrawn Routes Length longer than the UPDATE crashed the daemon; BMP
+  messages are now capped at 1 MiB.
+- RTR Error Report code 2 ("No Data Available", sent by Routinator during
+  initial validation) is treated as cache-not-ready, not as an anomaly.
 - A `raven.yaml` that exists but does not parse is now fatal. RAVEN prints
   the error (naming the offending file) to stderr and exits 1. Previously a
   YAML syntax error printed one line and then started the daemon anyway on
@@ -102,6 +217,39 @@ All notable changes to RAVEN are recorded here.
   This is correct per draft-ietf-sidrops-aspa-verification, not a
   regression; see
   [Security Postures](user-guide/security-postures.md#path-suspect).
+
+### Documentation
+- Concepts: ASPA Path Verification rewritten for draft-24 (origin-to-
+  neighbor verification, upstream and downstream procedures, procedure
+  selection, the neighbor-AS check and route servers).
+- Attack Scenarios: Scenario 13 (first-hop route-leak detection) replaced by
+  an "under revision" note.
+- Configuration: `bmp.allowed-routers`, `api.listen`,
+  `validation.aspa-peers` and `validation.aspa-default-procedure`.
+- CLI Reference: `raven status`, `raven peers`, `raven routes` and
+  `raven watch` updated, with examples generated from the CLI's formatters.
+- Observability: new metrics, the `raven_bmp_peer_state` label change, and
+  the RTR cache metrics corrected to the ones RAVEN exports.
+- New pages: Deployment Hardening, Architecture: Data Model, Architecture:
+  Validation Engine.
+- Quick Start: `raven status` sample output re-captured from the current
+  formatter. CLI Reference: `raven validate` corrected to the flags and
+  columns it has.
+- Troubleshooting and Scaling: removed `raven status --format json`,
+  `raven_rtr_cache_stale` and the `staleness-threshold` key, none of which
+  exist; RTR checks now use `raven_rtr_data_expired`,
+  `raven_rtr_last_sync_seconds`, `raven_rtr_protocol_version` and
+  `raven_rtr_aspa_count`.
+- Configuration: `rtr.expire-interval` and environment variable overrides
+  documented as they work now.
+- Troubleshooting: new Malformed BGP Input section. Validation Engine: the
+  RFC 6811 origin rules and the routes RAVEN does not ASPA-verify. CLI
+  Reference: `--rib`, `--router` on `status` and `peers`, the `MALFORMED`
+  column, the route `timestamp`, and the `raven validate` errors.
+- Quick Start: Step 2 shows real startup log lines. Demo Lab overview:
+  the setup output now matches what `demo-master.sh` prints.
+- Attack Scenarios: note that sample output predates the `ROUTER` and ASPA
+  procedure columns.
 
 ## v0.3.3 (2026-07-02)
 

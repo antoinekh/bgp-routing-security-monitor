@@ -41,7 +41,11 @@ nav:
     - Attack Scenarios: lab/scenarios.md
   - Deployment:
     - Production Setup: deployment/production.md
+    - Deployment Hardening: deployment/hardening.md
     - Scaling: deployment/scaling.md
+  - Architecture:
+    - Data Model: architecture/data-model.md
+    - Validation Engine: architecture/validation-engine.md
   - Troubleshooting: troubleshooting.md
   - Changelog: CHANGELOG.md
 

@@ -48,6 +48,13 @@ The result is one of three states:
 | **Invalid** | A ROA exists but it does not authorise this origin ASN, or the prefix is too specific |
 | **NotFound** | No ROA covers this prefix — no RPKI data available |
 
+The origin ASN is the last AS of the AS_PATH. When the path ends in an
+AS_SET, as an aggregate's can, RFC 6811 says the origin is NONE, which no
+ROA authorises: RAVEN marks such a route `Invalid` if a ROA covers the
+prefix and `NotFound` otherwise. See
+[The origin AS](../architecture/validation-engine.md#the-origin-as) for
+every case.
+
 ROV catches **origin hijacks** — where an attacker announces your prefix from
 their own ASN. If you have a ROA, the attacker's announcement will be Invalid.
 
@@ -69,51 +76,114 @@ routing table via BMP.
 
 ## ASPA Path Verification
 
-ASPA path verification (draft-ietf-sidrops-aspa-verification-24) walks the
-AS_PATH of a received route and checks each hop, including the first one —
-the hop between the monitored router and its immediate BGP peer:
+RAVEN verifies AS_PATHs as specified in
+draft-ietf-sidrops-aspa-verification-24. A route leak occurs when an AS
+re-announces a route in the wrong direction, for example a customer passing
+one provider's routes to another provider. The leaked route's AS_PATH then
+contains a hop where an AS sends a route "up" to an AS that is not its
+provider, and ASPA records let RAVEN spot that hop.
 
-- Does AS_i have an ASPA record?
-- If yes, is AS_i-1 (the next hop toward you) listed as an authorised provider?
-- For the first hop, is the monitoring router's own AS listed as an
-  authorised provider in the immediate peer's ASPA record?
+### What gets checked
 
-That first-hop check matters because it's the only one that can catch a
-misconfiguration on the session directly attached to your router — without
-it, ASPA verification stops one hop short of you and a real leak over that
-session resolves as `Unknown` rather than `Invalid`. It's also why
-single-AS-path routes (a route whose AS_PATH is just the peer's own AS) are
-evaluated at all, instead of being short-circuited to `Unknown`.
+RAVEN collapses prepends, then walks the AS_PATH from the origin to the
+neighbor, the AS your router learned the route from. For each pair of
+adjacent ASes it asks the customer AS's ASPA record one question: is the
+next AS one of my providers? Each hop gets one of three answers:
 
-To run this check, RAVEN needs to know the monitored router's own AS. It
-learns this per BMP session (`LocalASN` on `Route`) from the Peer Up
-message's Sent OPEN — preferring the RFC 6793 four-octet AS capability when
-the peer advertises it, falling back to the two-octet AS field otherwise.
-This is discovered automatically; there's nothing to configure.
+| Hop answer | Meaning |
+|---|---|
+| **Provider+** | The customer has an ASPA record and it lists the next AS |
+| **Not Provider+** | The customer has an ASPA record and it does **not** list the next AS |
+| **No Attestation** | The customer has no ASPA record |
 
-A route leak occurs when an AS re-announces routes in the wrong direction —
-for example, a customer announcing a provider's routes to another provider.
-This creates an AS_PATH where a hop is not an authorised customer-provider
-relationship. ASPA catches this, including leaks that happen on the
-directly-connected peering session itself.
+The edge between the neighbor and your router is **not** checked. Your
+relationship with the neighbor is what selects the verification procedure
+(below), so checking that edge again against an ASPA record would test
+something you already told RAVEN. RAVEN does not need your router's own AS
+for verification.
 
-**Result states:**
+That does not leave your attached sessions blind. When a neighbor leaks, it
+passes on a route it learned from one of its own providers, and that
+provider-to-neighbor hop is already in the path. Suppose your customer
+AS64500 leaks a route it received from its provider AS64501:
+
+```text
+AS_PATH as your router receives it:  64500 64501 64502
+Walked from the origin:              64502 → 64501 → 64500
+                                                    ^ AS64501's ASPA does not list AS64500
+```
+
+If AS64501 has published an ASPA record, it does not list its own customer
+AS64500 as a provider, so that hop is Not Provider+ and the route is
+`Invalid`. A route whose AS_PATH holds only the neighbor's AS has no hops to
+walk and always verifies as `Valid`: an origin announcing its own prefix to
+you is not a leak.
+
+### Upstream and downstream verification
+
+The draft defines two procedures, and which one applies depends on where the
+route came from:
+
+- **Upstream** (§5.4) is for routes from a customer, a lateral peer, a route
+  server or a route-server client. Such a route must have travelled only
+  "up", customer to provider, from the origin to your neighbor. Any Not
+  Provider+ hop makes it `Invalid`.
+- **Downstream** (§5.5) is for routes from a provider. A legitimate route
+  from a provider may climb up to a top-tier AS and then come back down
+  toward you, so the path is allowed one up-ramp followed by one down-ramp.
+  It is `Invalid` only when no such up-then-down split fits the ASPA records.
+
+Using the wrong procedure gives the wrong answer. Verify a provider's routes
+with the upstream procedure and ordinary transit routes that came down to you
+look like leaks.
+
+### How RAVEN chooses the procedure
+
+RAVEN picks the procedure for each route from the BMP peer it was learned
+from, in this order:
+
+1. A [`validation.aspa-peers`](../user-guide/configuration.md#validationaspa-peers)
+   entry for the peer's address.
+2. A `validation.aspa-peers` entry for the peer's ASN.
+3. [`validation.aspa-default-procedure`](../user-guide/configuration.md#validationaspa-default-procedure).
+
+An `aspa-peers` entry names the neighbor's role: `provider` selects
+downstream; `customer`, `peer`, `rs` and `rs-client` select upstream. The
+default procedure `auto` falls back to upstream today, because RAVEN does not
+yet read the BGP Role capability (RFC 9234) that would tell it each
+neighbor's role. Every route reports the procedure it got and where it came
+from in `aspa_procedure` and `aspa_procedure_source`; see
+[`raven routes --format wide`](../user-guide/cli-reference.md#raven-routes).
+
+### The neighbor-AS check
+
+When a peer's role comes from an `aspa-peers` entry, RAVEN also runs the
+draft's neighbor-AS check (§5.4 and §5.5, step 2): the first AS in the
+AS_PATH must be the peer's own ASN. A route that fails it is `Invalid` with
+`aspa_reason` set, for example:
+
+```text
+neighbor-AS check failed: first AS in AS_PATH is AS64511, peer is AS64500
+```
+
+RAVEN skips the check for routes that use the default procedure, because
+nothing tells it what the neighbor is. It also skips it for `rs` peers. A
+route server is transparent: it passes on its clients' routes without adding
+its own AS to the AS_PATH (RFC 7947), so the first AS is the client that
+announced the route, never the route server's ASN. Running the check there
+would mark every route from the route server `Invalid`.
+
+### Result states
 
 | State | Meaning |
 |---|---|
-| **Valid** | Every hop in the AS_PATH is consistent with ASPA records |
-| **Invalid** | At least one hop violates a published ASPA record — possible route leak |
-| **Unknown** | Some ASes in the path have no ASPA records — cannot verify |
-| **Unverifiable** | AS_PATH contains AS_SETs or other constructs that prevent verification |
+| **Valid** | The ASPA records attest the whole path from the origin to your neighbor |
+| **Invalid** | A published ASPA record contradicts the path under the selected procedure, or the neighbor-AS check failed: a likely route leak |
+| **Unknown** | No record contradicts the path, but some ASes in it have no ASPA record, so RAVEN cannot confirm it. Routes with an empty AS_PATH are also `Unknown` |
+| **Unverifiable** | The AS_PATH contains an AS_SET, so it has no single order to verify, or confederation segments, meaning the route came from inside your own AS confederation, where the draft does not recommend verification (§6.2) |
 
-!!! note
-    Because the first hop is now checked, any direct BGP session where the
-    peer's ASPA record doesn't list your AS as a provider will show
-    `path-suspect` for **every** prefix received over that session — not
-    just customer route leaks, but connected-link and infrastructure
-    prefixes too. That's expected behaviour per the draft, not a false
-    positive. See [Security Postures](../user-guide/security-postures.md#path-suspect)
-    for how to read it.
+ASPA adoption is early, so expect most of your routes to show `Unknown`.
+That changes as more operators publish ASPA records.
 
 ## IPv6 Support
 
@@ -125,8 +195,8 @@ IPv4 — ROV looks up each IPv6 route against the IPv6 VRP store, and ASPA
 walks the AS_PATH regardless of the address family.
 
 The CLI exposes IPv6 routes through the same commands as IPv4
-(`raven routes --afi v6` to filter, `raven routes --prefix 2001:db8::/32`
-to query by IPv6 prefix), and Prometheus metrics carry an `afi="ipv6"`
+(`raven routes --prefix 2001:db8::/32` queries an IPv6 prefix), and
+Prometheus metrics carry an `afi="ipv6"`
 label so IPv4 and IPv6 postures can be charted side by side in Grafana.
 
 ## RTR — Router to Relying Party Protocol

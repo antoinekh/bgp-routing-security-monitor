@@ -119,34 +119,49 @@ If the primary cache goes down, RAVEN automatically fails over to the backup
 and logs a warning. The `raven_rtr_session_state` metric will show 0 for the
 failed cache — alert on this.
 
-## RTR Cache Staleness
+## RTR Data Freshness
 
-RAVEN tracks how long since the last successful RTR sync and exposes this
-via `raven_rtr_cache_stale`. Configure a Prometheus alert:
+RAVEN keeps validating with the last data a cache sent, even when that cache
+stops syncing. Stale RPKI data validates routes against ROAs and ASPA
+records that may since have changed, so alert on freshness rather than only
+on the session state. Three per-cache metrics cover it:
+
+| Metric | What it tells you |
+|---|---|
+| `raven_rtr_data_expired` | 1 when no sync with the cache has completed within its Expire Interval, the time the cache says its data stays usable. RAVEN takes it from the cache's End of Data PDU, or uses 7200 seconds when the cache sends none |
+| `raven_rtr_last_sync_seconds` | Unix time of the last completed sync (End of Data), whether or not the data changed |
+| `raven_rtr_last_serial_change_seconds` | Unix time of the last sync that changed the serial |
 
 ```yaml
-- alert: RAVENRTRCacheStale
-  expr: raven_rtr_cache_stale == 1
+- alert: RAVENRTRDataExpired
+  expr: raven_rtr_data_expired == 1
   for: 5m
   labels:
     severity: critical
   annotations:
-    summary: "RAVEN RTR cache stale — validation data may be outdated"
+    summary: "RAVEN RTR data has expired — validation data may be outdated"
+
+- alert: RAVENRTRNoRecentSync
+  expr: time() - raven_rtr_last_sync_seconds > 1800
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "No completed RTR sync with {{ $labels.cache }} in 30 minutes"
 ```
 
-The default staleness threshold is 10 minutes. Adjust in config:
-
-```yaml
-rtr:
-  caches:
-    - address: "routinator.example.com:3323"
-      preference: 1
-      staleness-threshold: 600    # seconds
-```
+`raven_rtr_data_expired` follows the cache's own Expire Interval, so it
+fires late by design. The second rule catches a cache that stopped syncing
+well before then; set its threshold to a few multiples of your cache's
+refresh interval.
 
 ## Querying a Remote RAVEN Instance
 
-The RAVEN CLI can query any RAVEN instance on your network:
+The RAVEN CLI can query any RAVEN instance whose API it can reach. The API
+binds to loopback by default, so either open an SSH tunnel to the instance
+or set [`api.listen`](../user-guide/configuration.md#api-section) on it to a
+management address and firewall that port (see
+[Deployment Hardening](hardening.md#keep-the-api-on-loopback)). Then:
 
 ```bash
 raven routes --address 192.0.2.10:11020 --posture origin-invalid

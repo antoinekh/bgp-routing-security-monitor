@@ -56,22 +56,165 @@ raven_routes_total{posture="origin-invalid", afi="ipv4"}
 
 Same metrics available with `afi="ipv6"`.
 
+`raven_routes_total` counts Adj-RIB-In pre-policy routes only: what your
+routers received, before import policy. Routes your routers send are counted
+separately (see [Adj-RIB-Out routes](#adj-rib-out-routes)), so a sum over
+`raven_routes_total` never mixes the two directions.
+
 **Total route table size:**
-raven_route_table_size                           # Total pre-policy routes in the table
+raven_route_table_size                           # Total Adj-RIB-In pre-policy routes in the table
 
 **BMP session health:**
-raven_bmp_session_state{router="192.168.1.1"}                     # 1=up, 0=down
-raven_bmp_messages_total{router="192.168.1.1", msg_type="route_monitoring"}
-raven_bmp_peer_state{router="192.168.1.1", peer="192.0.2.1"}      # 1=established, 0=down
+raven_bmp_session_state{router="edge1"}                                   # 1=up, 0=down
+raven_bmp_messages_total{router="edge1", msg_type="route_monitoring"}
+raven_bmp_peer_state{router="edge1", router_addr="192.0.2.1", peer="198.51.100.1", peer_distinguisher=""}   # 1=established, 0=down
+
+`router` is the router's BMP sysName, or its address when it sent none.
+
+!!! warning "Label change on raven_bmp_peer_state"
+    `raven_bmp_peer_state` gained two labels: `router_addr`, the source
+    address of the router's BMP session, and `peer_distinguisher`, the
+    peer's VRF route distinguisher (`""` for a peer in the global instance,
+    for example `65000:100` for one in a VRF). The same peer address on two
+    routers, or in two VRFs of one router, is now two series instead of one
+    series that both overwrote. Dashboards and alerts that aggregate this
+    metric with `by (router, peer)` keep working but merge VRFs; add
+    `peer_distinguisher` to the grouping to keep them apart. Recording rules
+    that match on the exact label set need updating.
 
 **RTR cache health:**
-raven_rtr_session_state{cache="localhost:3323"}      # 1=up, 0=down
-raven_rtr_vrp_count{cache="localhost:3323"}          # Total VRPs loaded
-raven_rtr_aspa_count{cache="localhost:3323"}         # Total ASPA records loaded
-raven_rtr_last_sync_seconds{cache="localhost:3323"}  # Unix timestamp of last sync
-raven_rtr_serial_number{cache="localhost:3323"}      # Current RTR serial
-raven_rtr_cache_stale{cache="localhost:3323"}        # 1=stale, 0=fresh
-raven_rtr_sync_duration_seconds{cache="localhost:3323"}   # Histogram of sync durations
+raven_rtr_session_state{cache="localhost:3323"}               # 1=connected, 0=disconnected
+raven_rtr_vrp_count{cache="localhost:3323"}                   # VRPs loaded
+raven_rtr_aspa_count{cache="localhost:3323"}                  # ASPA records loaded
+raven_rtr_last_sync_seconds{cache="localhost:3323"}           # Unix time of the last completed sync (End of Data)
+raven_rtr_last_serial_change_seconds{cache="localhost:3323"}  # Unix time of the last sync that changed the serial
+raven_rtr_data_expired{cache="localhost:3323"}                # 1 if no sync completed within the Expire Interval
+raven_rtr_protocol_version{cache="localhost:3323"}            # Negotiated RTR version (ASPA needs 2)
+
+#### ASPA verification
+
+raven_aspa_validations_total{procedure="upstream", source="config-asn", state="Invalid"}
+
+A counter of ASPA verifications, incremented each time RAVEN verifies a
+route: on ingest and again on every revalidation pass. Labels:
+
+| Label | Values |
+|---|---|
+| `procedure` | `upstream`, `downstream` |
+| `source` | `default`, `config-address`, `config-asn`: where the procedure came from (see [`validation.aspa-peers`](configuration.md#validationaspa-peers)) |
+| `state` | `Valid`, `Invalid`, `Unknown`, `Unverifiable` |
+
+Use it to confirm your `aspa-peers` mapping took effect, and to see which
+procedure produces your `Invalid` results. A jump in
+`procedure="upstream", source="default", state="Invalid"` after a new
+transit session comes up usually means a provider is missing from
+`aspa-peers` and is being verified with the wrong procedure. Adj-RIB-Out
+routes are not ASPA-verified and are not counted. Because revalidation
+counts too, read the rate, not the absolute value:
+
+```promql
+sum by (procedure, source, state) (rate(raven_aspa_validations_total[5m]))
+```
+
+#### Revalidation
+
+When an RTR sync changes VRPs or ASPA records, RAVEN revalidates the routes
+the change can affect (see
+[Validation Engine](../architecture/validation-engine.md#incremental-revalidation)).
+
+raven_revalidation_duration_seconds{mode="incremental"}            # Histogram: wall time of each pass
+raven_revalidation_routes_total{mode="incremental", result="checked"}
+raven_revalidation_routes_total{mode="incremental", result="changed"}
+
+`mode` is `incremental` for a pass driven by an RTR delta and `full` for a
+pass over the whole table, which happens after a Cache Reset, a new RTR
+session or a session-ID change. `result="checked"` counts routes
+revalidated; `result="changed"` counts those whose ROV, ASPA or posture
+result changed. The duration is wall time from start to finish, and the
+pass is interleaved with BMP ingest, so it is not time ingest was blocked.
+
+Watch these to catch revalidation falling behind. An incremental pass
+touches only the routes the delta can affect, so it should be far shorter
+than a full pass; a run of `full` passes means the cache keeps resetting the
+session. Each pass also logs `re-validation complete` with `mode`,
+`candidates`, `checked`, `changed` and `took`.
+
+```promql
+histogram_quantile(0.95, sum by (le, mode) (rate(raven_revalidation_duration_seconds_bucket[1h])))
+```
+
+#### BMP ingest health
+
+raven_bmp_rejected_connections_total{reason="not_allowed"}       # Source outside bmp.allowed-routers
+raven_bmp_rejected_connections_total{reason="bad_remote_addr"}   # Source address could not be read
+raven_bmp_unsupported_nlri_total{afi="25", safi="70"}            # MP_REACH/MP_UNREACH not decoded, by AFI/SAFI
+
+`raven_bmp_rejected_connections_total` counts BMP connections RAVEN closed
+at accept, before reading anything, because of
+[`bmp.allowed-routers`](configuration.md#bmp-section). Any increase means
+something other than your routers reached the BMP port; check the WARN log
+line `BMP connection rejected` for the source address. It stays at 0 when
+`allowed-routers` is empty, because nothing is rejected.
+
+`raven_bmp_unsupported_nlri_total` counts MP_REACH_NLRI and MP_UNREACH_NLRI
+attributes for address families RAVEN does not decode, anything other than
+IPv4 and IPv6 unicast (for example, L2VPN EVPN is AFI 25, SAFI 70). Those
+routes are not in the route table. A steady rate tells you a router is
+sending address families you may want to stop exporting over BMP; RAVEN
+counts them so they are not dropped silently. `afi` and `safi` are decimal.
+
+#### Malformed UPDATEs
+
+raven_bmp_malformed_updates_total{action="treat_as_withdraw", reason="origin"}
+
+A counter of malformed BGP UPDATEs received over BMP, which RAVEN handles
+under RFC 7606 the way your router does (see
+[Malformed BGP Input](../troubleshooting.md#malformed-bgp-input)). Labels:
+
+| Label | Values |
+|---|---|
+| `action` | The strongest RFC 7606 class the UPDATE's errors call for: `attribute_discard`, `treat_as_withdraw` or `session_reset` |
+| `reason` | The error that called for it: `as_path`, `attr_length`, `attr_flags`, `origin`, `next_hop`, `med`, `local_pref`, `communities`, `originator_id`, `cluster_list`, `large_communities`, `missing_mandatory`, `as4_path`, `as4_aggregator`, `duplicate_attr`, `nlri`, `mp_reach`, `mp_reach_next_hop`, `mp_unreach`, `duplicate_mp` or `update_length` |
+
+`attribute_discard` carries only `as4_path`, `as4_aggregator` and
+`duplicate_attr`. `session_reset` carries `nlri`, `mp_reach`,
+`mp_reach_next_hop`, `mp_unreach`, `duplicate_mp`, `update_length`, and any
+attribute reason found in an UPDATE that announces no prefixes. Each
+malformed UPDATE counts once, under its strongest error.
+
+On a healthy network this stays at 0. Alert on any `session_reset`: it
+means a peer sent something your router answers by resetting the BGP
+session, and RAVEN's view of that peer may be incomplete until the session
+comes back.
+
+```promql
+sum by (action, reason) (increase(raven_bmp_malformed_updates_total[1h]))
+```
+
+#### Adj-RIB-Out routes
+
+raven_adj_rib_out_routes_total{posture="origin-only", afi="ipv4"}
+
+The number of Adj-RIB-Out pre-policy routes (RFC 8671): what your routers
+send their peers, before outbound policy, by posture and address family.
+It is kept apart from `raven_routes_total` so that received and sent routes
+never add up into one number. Adj-RIB-Out routes get ROV only; their ASPA
+state is always `Unverifiable`, because ASPA verification applies to routes
+received from a neighbor. Use it to spot `origin-invalid` routes your
+network is advertising.
+
+#### Zero-valued series at startup
+
+These counters and histograms export every label combination at 0 from
+startup, so an alert can tell "none yet" from "not exported":
+`raven_bmp_rejected_connections_total`, `raven_revalidation_duration_seconds`,
+`raven_revalidation_routes_total`, `raven_aspa_validations_total`,
+`raven_bmp_malformed_updates_total` (every action and reason pair it can
+carry), the
+`raven_global_check_*` counters once a provider is enabled, and
+`raven_rtr_anomaly_total` per cache in `raven rtr monitor`.
+`raven_bmp_unsupported_nlri_total` appears only once an unsupported family
+arrives, because its label values are not known in advance.
 
 **RTR anomaly detection:**
 
@@ -94,8 +237,9 @@ raven_global_check_latency_seconds                                   # Histogram
 raven_global_check_cache_hits_total{source="ripestat"}               # Correlations served from the in-process cache
 raven_global_check_rate_limited_total{source="ripestat"}             # Lookups suppressed by the local rate limiter
 
-`raven_global_check_total` is a counter vector, so a given `result` series
-does not appear until that verdict has occurred at least once.
+When a provider is enabled, RAVEN exports every `result` series of
+`raven_global_check_total`, and the cache-hit and rate-limited counters, at
+0 from startup, so a series exists before the first correlation.
 
 `raven_global_check_latency_seconds` covers only correlations that actually
 went to the provider. Cache hits and rate-limited lookups make no network
@@ -155,13 +299,21 @@ groups:
         annotations:
           summary: "Path-suspect routes detected — possible route leak"
 
-      - alert: RAVENRTRCacheStale
-        expr: raven_rtr_cache_stale == 1
+      - alert: RAVENRTRDataExpired
+        expr: raven_rtr_data_expired == 1
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "RAVEN RTR cache is stale — RPKI validation may be outdated"
+          summary: "RAVEN RTR data has expired — RPKI validation may be outdated"
+
+      - alert: RAVENBMPRejectedConnection
+        expr: increase(raven_bmp_rejected_connections_total{reason="not_allowed"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A source outside bmp.allowed-routers tried to open a BMP session"
 
       - alert: RAVENBMPSessionDown
         expr: raven_bmp_session_state == 0

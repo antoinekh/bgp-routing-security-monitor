@@ -126,16 +126,28 @@ This command:
 6. Imports the Grafana dashboard
 7. Runs a baseline check
 
-When setup completes you will see:
-✓ Containerlab topology running
-✓ BGP sessions converged
-✓ Routinator ready (vrps=542000 aspas=1407)
-✓ RAVEN running
-✓ Prometheus running
-✓ Grafana running at http://localhost:3000
-✓ Baseline: 0 origin-invalid, 0 path-suspect
-Demo is ready.
-Grafana: http://localhost:3000  (admin/admin)
+The script reports each step as it goes; `✓ Routinator RTR ready` confirms
+that Routinator is serving validated data. It then prints the route table
+(`raven routes`) and finishes with these lines, which are fixed text in
+`demo-master.sh`:
+
+```text
+✓ Setup complete.
+
+  Grafana:    http://localhost:3000/d/raven-security-posture  (admin / raven123)
+  Prometheus: http://localhost:9090
+  RAVEN API:  http://localhost:11020
+  Metrics:    http://localhost:9595/metrics
+
+  Expected postures (baseline — 5 routes, path-suspect = 0):
+    origin-only    → 100.64.0.0/24, 198.51.100.0/24, 203.0.113.0/24, 10.10.0.0/24
+    unverified     → 10.99.99.0/24
+    path-suspect   → (none at baseline)
+```
+
+To see RAVEN's own view of the RPKI data, check the `RPKI:` line of
+`raven status`, or the `raven_rtr_vrp_count` and `raven_rtr_aspa_count`
+metrics.
 
 ## Demo Commands Reference
 
