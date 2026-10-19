@@ -7,6 +7,20 @@ import (
 	"text/tabwriter"
 )
 
+// peerLabel is a peer row's PEER cell: its address, with the VRF's RD for a
+// peer outside the global instance, and its router for a Loc-RIB row, whose
+// address is zero.
+func (p PeerAuditReport) peerLabel() string {
+	s := p.PeerAddr
+	if s == "0.0.0.0" || s == "::" {
+		s = "loc-rib of " + p.Router
+	}
+	if p.PeerDistinguisher != "" {
+		s += " rd " + p.PeerDistinguisher
+	}
+	return s
+}
+
 // FormatTable renders the report as a human-readable table using text/tabwriter.
 func FormatTable(r *RouterAuditReport) string {
 	var buf bytes.Buffer
@@ -14,6 +28,7 @@ func FormatTable(r *RouterAuditReport) string {
 	fmt.Fprintf(&buf, "\n  ROUTER AUDIT REPORT\n")
 	fmt.Fprintf(&buf, "  ─────────────────────────────────────────────────\n")
 	fmt.Fprintf(&buf, "  Router ID:     %s\n", r.RouterID)
+	fmt.Fprintf(&buf, "  RIB:           %s\n", r.RIB)
 	fmt.Fprintf(&buf, "  Generated At:  %s\n", r.GeneratedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	fmt.Fprintf(&buf, "  Total Routes:  %d\n", r.TotalRoutes)
 	fmt.Fprintf(&buf, "  ROV Coverage:  %.1f%%\n", r.ROVCoverage*100)
@@ -42,7 +57,7 @@ func FormatTable(r *RouterAuditReport) string {
 		fmt.Fprintln(tw, "  PEER\tASN\tROUTES\tROV\tASPA")
 		for _, p := range r.Peers {
 			fmt.Fprintf(tw, "  %s\tAS%d\t%d\t%.0f%%\t%.0f%%\n",
-				p.PeerAddr, p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
+				p.peerLabel(), p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
 		}
 		tw.Flush()
 		fmt.Fprintln(&buf)
@@ -94,6 +109,7 @@ func FormatMarkdown(r *RouterAuditReport) string {
 	fmt.Fprintf(&buf, "Generated: %s\n\n", r.GeneratedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	fmt.Fprintln(&buf, "| Metric | Value |")
 	fmt.Fprintln(&buf, "|---|---|")
+	fmt.Fprintf(&buf, "| RIB | %s |\n", r.RIB)
 	fmt.Fprintf(&buf, "| Total Routes | %d |\n", r.TotalRoutes)
 	fmt.Fprintf(&buf, "| ROV Coverage | %.1f%% |\n", r.ROVCoverage*100)
 	fmt.Fprintf(&buf, "| ASPA Coverage | %.1f%% |\n\n", r.ASPACoverage*100)
@@ -120,7 +136,7 @@ func FormatMarkdown(r *RouterAuditReport) string {
 		fmt.Fprintln(&buf, "|---|---|---|---|---|")
 		for _, p := range r.Peers {
 			fmt.Fprintf(&buf, "| %s | AS%d | %d | %.0f%% | %.0f%% |\n",
-				p.PeerAddr, p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
+				p.peerLabel(), p.PeerASN, p.TotalRoutes, p.ROVCoverage*100, p.ASPACoverage*100)
 		}
 		fmt.Fprintln(&buf)
 	}

@@ -117,7 +117,7 @@ func TestWithdrawAllFromPeer(t *testing.T) {
 		t.Fatalf("count = %d, want 3", tbl.Count())
 	}
 
-	removed := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: netip.MustParseAddr("192.0.2.1")}, 0)
+	removed := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: netip.MustParseAddr("192.0.2.1")}, 0, types.AdjRIBInPre)
 	if removed != 2 {
 		t.Errorf("removed = %d, want 2", removed)
 	}
@@ -159,7 +159,7 @@ func TestWithdrawAllFromPeerCleansAllIndexes(t *testing.T) {
 		t.Fatalf("count before peer down = %d, want %d", got, 2*n+2)
 	}
 
-	if removed := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: down}, 0); removed != 2*n {
+	if removed := tbl.WithdrawAllFromPeer(types.PeerRef{Addr: down}, 0, types.AdjRIBInPre); removed != 2*n {
 		t.Errorf("removed = %d, want %d", removed, 2*n)
 	}
 
@@ -316,8 +316,9 @@ func TestGetByPosture(t *testing.T) {
 	}
 }
 
-// The prefix and origin indexes hold every RIB; the lookups return the one
-// asked for, Adj-RIB-In pre-policy by default.
+// The prefix and origin indexes hold every RIB; the lookups return the ones
+// asked for, the default view (Adj-RIB-In pre-policy and Loc-RIB) by
+// default.
 func TestIndexLookupsByRIB(t *testing.T) {
 	tbl := New()
 	p := netip.MustParsePrefix("1.1.1.0/24")
@@ -327,8 +328,8 @@ func TestIndexLookupsByRIB(t *testing.T) {
 	}
 	for _, rib := range types.AllRIBTypes {
 		for name, got := range map[string][]*types.Route{
-			"prefix": tbl.GetByPrefixIn(p, rib),
-			"origin": tbl.GetByOriginASNIn(13335, rib),
+			"prefix": tbl.GetByPrefixIn(p, types.RIBSetOf(rib)),
+			"origin": tbl.GetByOriginASNIn(13335, types.RIBSetOf(rib)),
 		} {
 			if len(got) != 1 || got[0].RIBType != rib {
 				t.Errorf("%s lookup in %s: %d routes", name, rib, len(got))
@@ -339,9 +340,26 @@ func TestIndexLookupsByRIB(t *testing.T) {
 		"GetByPrefix":    tbl.GetByPrefix(p),
 		"GetByOriginASN": tbl.GetByOriginASN(13335),
 		"GetByPosture":   tbl.GetByPosture(types.PostureSecured),
+		"GetByPeer":      tbl.GetByPeer(netip.MustParseAddr("192.0.2.9")),
+		"AllDefaultView": tbl.AllDefaultView(),
 	} {
-		if len(got) != 1 || got[0].RIBType != types.AdjRIBInPre {
-			t.Errorf("%s: %d routes, want the one Adj-RIB-In pre-policy route", name, len(got))
+		var ribs types.RIBSet
+		for _, r := range got {
+			ribs |= types.RIBSetOf(r.RIBType)
 		}
+		if len(got) != 2 || ribs != types.DefaultView {
+			t.Errorf("%s: %d routes in %v, want one Adj-RIB-In pre-policy and one Loc-RIB route",
+				name, len(got), ribs.Names())
+		}
+	}
+	// The posture index holds the default view only.
+	if got := tbl.GetByPostureIn(types.PostureSecured, types.RIBSetOf(types.AdjRIBInPost)); len(got) != 0 {
+		t.Errorf("GetByPostureIn(adj-rib-in-post) = %d routes, want none: not indexed", len(got))
+	}
+	if PostureIndexed(types.RIBSetOf(types.AdjRIBInPost)) || !PostureIndexed(types.DefaultView) {
+		t.Error("PostureIndexed: want true for the default view only")
+	}
+	if got := tbl.CountByPosture()[types.PostureSecured]; got != 2 {
+		t.Errorf("CountByPosture()[secured] = %d, want 2: the default view's", got)
 	}
 }

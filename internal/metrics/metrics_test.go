@@ -65,3 +65,34 @@ func TestMalformedUpdateSeries(t *testing.T) {
 		}
 	}
 }
+
+// raven_routes_total has one series per rib, posture and address family, and
+// raven_adj_rib_out_routes_total one per posture and family, all at 0 before
+// the first count: a RIB a router has not sent yet shows 0, not nothing.
+func TestRouteGaugesExportedAtZero(t *testing.T) {
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := map[string]int{}
+	for _, mf := range mfs {
+		if mf.GetName() != "raven_routes_total" && mf.GetName() != "raven_adj_rib_out_routes_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if m.GetGauge().GetValue() != 0 {
+				t.Errorf("%s %v = %v at load, want 0", mf.GetName(), m.GetLabel(), m.GetGauge().GetValue())
+			}
+			count[mf.GetName()]++
+		}
+	}
+	if want := len(RouteRIBs) * len(Postures) * len(AFIs); count["raven_routes_total"] != want {
+		t.Errorf("raven_routes_total: %d series, want %d", count["raven_routes_total"], want)
+	}
+	if want := len(Postures) * len(AFIs); count["raven_adj_rib_out_routes_total"] != want {
+		t.Errorf("raven_adj_rib_out_routes_total: %d series, want %d", count["raven_adj_rib_out_routes_total"], want)
+	}
+	if len(RouteRIBs) != 3 || RouteRIBs[0] != "adj-rib-in-pre" || RouteRIBs[2] != "loc-rib" {
+		t.Errorf("RouteRIBs %v, want adj-rib-in-pre, adj-rib-in-post, loc-rib", RouteRIBs)
+	}
+}

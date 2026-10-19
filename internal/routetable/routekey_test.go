@@ -91,7 +91,7 @@ func TestDetachPeerStaysOnItsRouter(t *testing.T) {
 	for _, r := range []*types.Route{aOwned, aStale, bOwned, bStale} {
 		tbl.Insert(r)
 	}
-	if n := tbl.WithdrawAllFromPeer(aOwned.Peer(), 1); n != 2 {
+	if n := tbl.WithdrawAllFromPeer(aOwned.Peer(), 1, types.AdjRIBInPre); n != 2 {
 		t.Errorf("peer-down on router A removed %d routes, want 2 (A's owned and restored)", n)
 	}
 	if tbl.Get(bOwned.Key()) != bOwned || tbl.Get(bStale.Key()) != bStale {

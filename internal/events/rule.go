@@ -2,9 +2,12 @@ package events
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
 // Rule pairs a Trigger with one or more Actions and optional per-prefix rate-limiting.
@@ -18,8 +21,9 @@ type Rule struct {
 	// Enrichers annotate the event before Actions run. They are populated
 	// from the same YAML actions list; buildRule partitions them out.
 	Enrichers []Enricher
-	// Cooldown prevents the same rule from firing more than once per
-	// prefix+peer pair within this duration. Zero means no cooldown.
+	// Cooldown prevents the same rule from firing more than once per route
+	// (types.RouteKey: router, peer distinguisher, peer, prefix, path ID
+	// and RIB) within this duration. Zero means no cooldown.
 	Cooldown    time.Duration
 	log         *slog.Logger
 	cooldownMu  sync.Mutex
@@ -67,7 +71,7 @@ func (r *Rule) Evaluate(ctx context.Context, event Event) {
 }
 
 // checkCooldown returns false when the event falls within the active cooldown
-// window for its prefix+peer key. On a pass it records the current time.
+// window for its route key. On a pass it records the current time.
 func (r *Rule) checkCooldown(event Event) bool {
 	if r.Cooldown == 0 {
 		return true
@@ -90,5 +94,9 @@ func cooldownKey(event Event) string {
 	if event.Route == nil {
 		return string(event.Type)
 	}
-	return event.Route.Prefix.String() + "|" + event.Route.PeerAddr.String()
+	// The whole route key: a key of prefix and peer address alone let an
+	// event in one RIB, router or VRF suppress another's.
+	k := event.Route.Key()
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%s", k.Peer.Router, types.FormatRD(k.Peer.Distinguisher),
+		k.Peer.Addr, k.Prefix, k.PathID, k.RIBType)
 }

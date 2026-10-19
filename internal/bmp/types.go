@@ -16,20 +16,29 @@ const (
 	MsgTypeRouteMirroring   uint8 = 6
 )
 
-// BMP Peer Types (RFC 7854 §4.2)
+// BMP Peer Types (RFC 7854 §4.2, RFC 9069 §4.1)
 const (
 	PeerTypeGlobal  uint8 = 0
 	PeerTypeRDLocal uint8 = 1
 	PeerTypeLocal   uint8 = 2
+	// PeerTypeLocRIB is a Loc-RIB instance (RFC 9069): the routes the
+	// monitored router selected, not those of one BGP peer.
+	PeerTypeLocRIB uint8 = 3
 )
 
-// BMP Peer Flags (RFC 7854 §4.2)
+// BMP Peer Flags (RFC 7854 §4.2), for peer types 0 to 2.
 const (
 	PeerFlagIPv6       uint8 = 0x80 // Bit 0: 1 = IPv6, 0 = IPv4
 	PeerFlagPostPolicy uint8 = 0x40 // Bit 1: 1 = Post-Policy, 0 = Pre-Policy
 	PeerFlagAS2        uint8 = 0x20 // Bit 2: 1 = AS_PATH uses 2-byte ASNs
 	PeerFlagAdjRIBOut  uint8 = 0x10 // Bit 3: 1 = Adj-RIB-Out (RFC 8671)
 )
+
+// PeerFlagLocRIBFiltered is the only flag of a Loc-RIB per-peer header (RFC
+// 9069 §4.2), the F flag: the Loc-RIB sent is filtered, not complete. It is
+// the bit types 0 to 2 use for V (IPv6), and reading it as V took a filtered
+// Loc-RIB's zero peer address for IPv6.
+const PeerFlagLocRIBFiltered uint8 = 0x80
 
 // BMP Initiation TLV Types (RFC 7854 §4.3)
 const (
@@ -68,19 +77,39 @@ type BMPPerPeerHeader struct {
 	Timestamp         time.Time
 }
 
+// IsLocRIB reports whether the header describes the router's Loc-RIB (RFC
+// 9069) rather than one of its BGP peers. Its peer address is zero and its
+// Peer AS is the router's own AS (§4.1).
+func (h *BMPPerPeerHeader) IsLocRIB() bool {
+	return h.PeerType == PeerTypeLocRIB
+}
+
+// IsLocRIBFiltered reports a Loc-RIB header's F flag (RFC 9069 §4.2).
+func (h *BMPPerPeerHeader) IsLocRIBFiltered() bool {
+	return h.IsLocRIB() && h.Flags&PeerFlagLocRIBFiltered != 0
+}
+
+// The flag tests below are for peer types 0 to 2. A Loc-RIB header defines
+// only the F flag, so for it they all report false.
+
 // IsIPv6 returns true if the peer address is IPv6.
 func (h *BMPPerPeerHeader) IsIPv6() bool {
-	return h.Flags&PeerFlagIPv6 != 0
+	return !h.IsLocRIB() && h.Flags&PeerFlagIPv6 != 0
 }
 
 // IsPostPolicy returns true if this is Post-Policy Adj-RIB-In.
 func (h *BMPPerPeerHeader) IsPostPolicy() bool {
-	return h.Flags&PeerFlagPostPolicy != 0
+	return !h.IsLocRIB() && h.Flags&PeerFlagPostPolicy != 0
+}
+
+// IsAS2 returns true if the AS_PATH uses 2-byte ASNs.
+func (h *BMPPerPeerHeader) IsAS2() bool {
+	return !h.IsLocRIB() && h.Flags&PeerFlagAS2 != 0
 }
 
 // IsAdjRIBOut returns true if this is Adj-RIB-Out (RFC 8671).
 func (h *BMPPerPeerHeader) IsAdjRIBOut() bool {
-	return h.Flags&PeerFlagAdjRIBOut != 0
+	return !h.IsLocRIB() && h.Flags&PeerFlagAdjRIBOut != 0
 }
 
 // BMPInitiation represents a BMP Initiation message (Type 4).
@@ -104,6 +133,10 @@ type BMPPeerUp struct {
 	// AddPath is where ADD-PATH path identifiers are in use on this
 	// session, from the Sent and Received OPEN messages.
 	AddPath AddPathState
+	// TableName is the VRF/Table Name information TLV (RFC 9069 §5.1,
+	// type 3) of a Loc-RIB instance's Peer Up, e.g. "global" or a VRF
+	// name; "" if none.
+	TableName string
 }
 
 // AFIMask is a set of address families.
@@ -160,13 +193,16 @@ type Peer struct {
 	PeerType      uint8
 	Addr          netip.Addr
 	ASN           uint32
-	LocalASN      uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN); 0 if unknown
+	LocalASN      uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN, or a Loc-RIB header's Peer AS); 0 if unknown
 	RouterID      netip.Addr
-	SysName       string
-	SysDescr      string
-	State         string // "up" or "down"
-	UpSince       time.Time
-	LastMsg       time.Time
+	// TableName is a Loc-RIB instance's VRF/Table Name, from its Peer Up;
+	// "" if none was sent (a Loc-RIB registered without a Peer Up has none).
+	TableName string
+	SysName   string
+	SysDescr  string
+	State     string // "up" or "down"
+	UpSince   time.Time
+	LastMsg   time.Time
 
 	// MalformedInput is set when an UPDATE from the peer was malformed in
 	// a way RFC 7606 answers with a session reset (MalformedReason says

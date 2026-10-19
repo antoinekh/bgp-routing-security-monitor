@@ -119,8 +119,8 @@ func TestPeerDownRemovesPeerRoutes(t *testing.T) {
 	if got := gaugeValue(t, "raven_route_table_size", nil); got != n+1 {
 		t.Fatalf("raven_route_table_size = %v before peer down, want %d", got, n+1)
 	}
-	originOnly := map[string]string{"posture": "origin-only", "afi": "ipv4"}
-	originInvalid := map[string]string{"posture": "origin-invalid", "afi": "ipv4"}
+	originOnly := map[string]string{"posture": "origin-only", "afi": "ipv4", "rib": "adj-rib-in-pre"}
+	originInvalid := map[string]string{"posture": "origin-invalid", "afi": "ipv4", "rib": "adj-rib-in-pre"}
 	if got := gaugeValue(t, "raven_routes_total", originOnly); got != 30 {
 		t.Fatalf("raven_routes_total{origin-only} = %v before peer down, want 30", got)
 	}

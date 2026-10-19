@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/routetable"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
@@ -25,11 +26,10 @@ type routeFilter struct {
 	// the name given (none, if no router has it).
 	byRouter bool
 	routers  []netip.Addr
-	// rib is the RIB to list: Adj-RIB-In pre-policy unless the rib
-	// parameter names another. A watch is filtered by RIB only when the
-	// parameter is given (ribGiven).
-	rib      types.RIBType
-	ribGiven bool
+	// ribs are the RIBs to list: the rib parameter's, or the default view
+	// (types.DefaultView: adj-rib-in-pre and loc-rib) when it is absent,
+	// for routes and watch alike.
+	ribs types.RIBSet
 }
 
 // parseRouter reads the router query parameter, as routes, watch, peers and
@@ -50,14 +50,22 @@ func parseRouter(q url.Values, named func(string) []netip.Addr) (given bool, rou
 	return true, routers
 }
 
-// parseRIB returns the RIB type a name (types.RIBType.String) gives.
-func parseRIB(name string) (types.RIBType, bool) {
-	for _, r := range types.AllRIBTypes {
-		if r.String() == name {
-			return r, true
+// parseRIBs reads the rib query parameter: RIB names (types.ParseRIBType,
+// so pre-policy and post-policy are accepted too), comma-separated or
+// repeated. Absent, it is the default view.
+func parseRIBs(q url.Values) (types.RIBSet, error) {
+	var names []string
+	for _, v := range q["rib"] {
+		for _, n := range strings.Split(v, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
 		}
 	}
-	return 0, false
+	if len(names) == 0 {
+		return types.DefaultView, nil
+	}
+	return types.ParseRIBSet(names)
 }
 
 // parseRouteFilter reads the prefix, origin-asn, peer, posture, router and
@@ -88,51 +96,51 @@ func parseRouteFilter(q url.Values, named func(string) []netip.Addr) (routeFilte
 		f.peer = a.Unmap()
 	}
 	f.posture = types.SecurityPosture(q.Get("posture"))
-	if v := q.Get("rib"); v != "" {
-		rib, ok := parseRIB(v)
-		if !ok {
-			return f, fmt.Errorf("invalid rib %q: want adj-rib-in-pre, adj-rib-in-post, loc-rib, adj-rib-out-pre or adj-rib-out-post", v)
-		}
-		f.rib, f.ribGiven = rib, true
+	ribs, err := parseRIBs(q)
+	if err != nil {
+		return f, fmt.Errorf("invalid rib: %w", err)
 	}
+	f.ribs = ribs
 	return f, nil
 }
 
 // match reports whether r passes every filter. A peer matches in either its
 // plain IPv4 or its IPv4-mapped IPv6 form.
 func (f *routeFilter) match(r *types.Route) bool {
+	ribs := f.ribs
+	if ribs == 0 {
+		ribs = types.DefaultView // a filter not from parseRouteFilter
+	}
 	return (!f.prefix.IsValid() || r.Prefix == f.prefix) &&
 		(f.origin == 0 || r.OriginASN() == f.origin) &&
 		(!f.peer.IsValid() || r.PeerAddr.Unmap() == f.peer) &&
 		(f.posture == "" || r.SecurityPosture == f.posture) &&
 		(!f.byRouter || slices.Contains(f.routers, r.Router.Unmap())) &&
-		(!f.ribGiven || r.RIBType == f.rib)
+		ribs.Has(r.RIBType)
 }
 
-// routes returns the table's routes of the filter's RIB (Adj-RIB-In
-// pre-policy by default) that pass the filter, starting from the most
-// selective index the filter allows. The prefix and origin indexes hold
-// every RIB and are looked up for the filter's; the posture index holds only
-// Adj-RIB-In pre-policy, so for another RIB a posture, peer or router filter
-// scans that RIB.
+// routes returns the table's routes of the filter's RIBs (the default view
+// unless the rib parameter names others) that pass the filter, starting from
+// the most selective index the filter allows. The prefix and origin indexes
+// hold every RIB and are looked up for the filter's; the posture index holds
+// the default view only, so for RIBs outside it a posture filter scans them.
 func (f *routeFilter) routes(t *routetable.Table) []*types.Route {
 	var candidates []*types.Route
-	pre := f.rib == types.AdjRIBInPre
 	switch {
 	case f.prefix.IsValid():
-		candidates = t.GetByPrefixIn(f.prefix, f.rib)
+		candidates = t.GetByPrefixIn(f.prefix, f.ribs)
 	case f.origin != 0:
-		candidates = t.GetByOriginASNIn(f.origin, f.rib)
-	case pre && f.peer.IsValid():
-		candidates = t.GetByPeer(f.peer)
-	case pre && f.posture != "":
-		candidates = t.GetByPosture(f.posture)
-	case f.peer.IsValid() || f.posture != "" || f.byRouter:
-		candidates = t.AllOfRIB(f.rib)
+		candidates = t.GetByOriginASNIn(f.origin, f.ribs)
+	case f.peer.IsValid():
+		candidates = t.GetByPeerIn(f.peer, f.ribs)
+	case f.posture != "" && routetable.PostureIndexed(f.ribs):
+		candidates = t.GetByPostureIn(f.posture, f.ribs)
+	case f.posture != "" || f.byRouter:
+		candidates = t.AllIn(f.ribs)
 	default:
-		return t.AllOfRIB(f.rib)
+		return t.AllIn(f.ribs)
 	}
-	// Every candidate source above is of the filter's RIB alone.
+	// Every candidate source above is of the filter's RIBs alone.
 	out := candidates[:0]
 	for _, r := range candidates {
 		if f.match(r) {

@@ -46,6 +46,7 @@ func counterValue(t testing.TB, name string, labels map[string]string) float64 {
 // and counted with its mode.
 func TestDeltaRequestsMakeOneIncrementalPass(t *testing.T) {
 	s := newTestServer(t)
+	s.engine.SetASPAUnavailable("") // as after an RTR version 2 sync: ASPA data to verify against
 	var logs syncBuffer
 	s.log = slog.New(slog.NewTextHandler(&logs, nil))
 	peer := netip.MustParseAddr("192.0.2.1")

@@ -25,9 +25,13 @@ type RouteResponse struct {
 	Router            string `json:"router"`
 	RouterName        string `json:"router_name,omitempty"`
 	PeerDistinguisher string `json:"peer_distinguisher,omitempty"` // the peer's VRF RD; omitted for global peers
-	PeerAddr          string `json:"peer"`
-	PeerASN           uint32 `json:"peer_asn"`
-	PathID            uint32 `json:"path_id,omitempty"` // ADD-PATH path identifier
+	// PeerType is the BMP peer type: global, rd, local or loc-rib. A
+	// loc-rib route is the router's selected best path; its peer is the
+	// zero address and its peer_asn the router's own AS (RFC 9069).
+	PeerType string `json:"peer_type"`
+	PeerAddr string `json:"peer"`
+	PeerASN  uint32 `json:"peer_asn"`
+	PathID   uint32 `json:"path_id,omitempty"` // ADD-PATH path identifier
 	// RIB is the route's RIB: adj-rib-in-pre, adj-rib-in-post, loc-rib,
 	// adj-rib-out-pre or adj-rib-out-post.
 	RIB       string   `json:"rib"`
@@ -63,13 +67,20 @@ type PeerResponse struct {
 	Router            string `json:"router"`
 	RouterName        string `json:"router_name,omitempty"`
 	PeerDistinguisher string `json:"peer_distinguisher,omitempty"`
-	Addr              string `json:"addr"`
-	ASN               uint32 `json:"asn"`
-	RouterID          string `json:"router_id"`
-	State             string `json:"state"`
-	// RouteCount is the peer's Adj-RIB-In pre-policy routes, comparable to
-	// what the router reports as received; RoutesByRIB breaks every RIB
-	// down, inbound and outbound apart.
+	// PeerType is the BMP peer type: global, rd, local or loc-rib. A
+	// loc-rib peer is the router's Loc-RIB instance (RFC 9069), with the
+	// zero address; TableName is its VRF/Table Name, when its Peer Up
+	// gave one.
+	PeerType  string `json:"peer_type"`
+	TableName string `json:"table_name,omitempty"`
+	Addr      string `json:"addr"`
+	ASN       uint32 `json:"asn"`
+	RouterID  string `json:"router_id"`
+	State     string `json:"state"`
+	// RouteCount is the peer's routes in the default view: Adj-RIB-In
+	// pre-policy for a BGP peer, comparable to what the router reports as
+	// received, Loc-RIB for a Loc-RIB instance. RoutesByRIB breaks every
+	// RIB down, inbound and outbound apart.
 	RouteCount  uint64            `json:"route_count"`
 	RoutesByRIB map[string]uint64 `json:"routes_by_rib,omitempty"`
 	UpSince     string            `json:"up_since"`
@@ -101,10 +112,12 @@ type RTRStatusResponse struct {
 
 // RouteTableStatusResponse is route table summary.
 type RouteTableStatusResponse struct {
-	// TotalRoutes and ByPosture count Adj-RIB-In pre-policy routes, what
-	// the routers received, as raven_routes_total does. ByRIB counts every
-	// RIB that has routes, inbound and outbound apart.
+	// TotalRoutes and ByPosture count the default view's routes, the RIBs
+	// DefaultView names (adj-rib-in-pre and loc-rib), as route queries
+	// list them. ByRIB counts every RIB that has routes, inbound and
+	// outbound apart.
 	TotalRoutes uint64            `json:"total_routes"`
+	DefaultView []string          `json:"default_view"`
 	ByPosture   map[string]uint64 `json:"by_posture"`
 	ByRIB       map[string]uint64 `json:"by_rib"`
 }
@@ -260,16 +273,19 @@ func (s *Server) peerResponses(byRouter bool, routers []netip.Addr) []PeerRespon
 		if p.MalformedInput {
 			malformedSince = p.MalformedAt.Format(time.RFC3339)
 		}
+		c := counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)]
 		resp = append(resp, PeerResponse{
 			Router:            p.Router.String(),
 			RouterName:        s.routerName(p.Router),
 			PeerDistinguisher: FormatRD(p.Distinguisher),
+			PeerType:          types.PeerTypeName(p.PeerType),
+			TableName:         p.TableName,
 			Addr:              p.Addr.String(),
 			ASN:               p.ASN,
 			RouterID:          p.RouterID.String(),
 			State:             p.State,
-			RouteCount:        counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)][types.AdjRIBInPre],
-			RoutesByRIB:       ribCounts(counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)]),
+			RouteCount:        defaultViewCount(c),
+			RoutesByRIB:       ribCounts(c),
 			UpSince:           p.UpSince.Format(time.RFC3339),
 			LastMsg:           p.LastMsg.Format(time.RFC3339),
 			MalformedInput:    p.MalformedInput,
@@ -302,6 +318,15 @@ func (s *Server) routersNamed(name string) []netip.Addr {
 	return s.routers.RoutersNamed(name)
 }
 
+// defaultViewCount adds up the counts of the default view's RIBs.
+func defaultViewCount(c types.RIBCounts) uint64 {
+	var n uint64
+	for _, r := range types.DefaultView.RIBs() {
+		n += c[r]
+	}
+	return n
+}
+
 // ribCounts names the non-zero RIB counts.
 func ribCounts(c types.RIBCounts) map[string]uint64 {
 	out := map[string]uint64{}
@@ -332,12 +357,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			Serial:    s.vrpStore.Serial(),
 			SessionID: s.vrpStore.SessionID(),
 		},
-		RouteTable: RouteTableStatusResponse{
-			ByPosture: byPosture,
-			ByRIB:     ribCounts(s.table.CountByRIB()),
-		},
 	}
-	resp.RouteTable.TotalRoutes = resp.RouteTable.ByRIB[types.AdjRIBInPre.String()]
+	byRIB := s.table.CountByRIB()
+	resp.RouteTable = RouteTableStatusResponse{
+		TotalRoutes: defaultViewCount(byRIB),
+		DefaultView: types.DefaultView.Names(),
+		ByPosture:   byPosture,
+		ByRIB:       ribCounts(byRIB),
+	}
 
 	resp.BMP = s.peerResponses(parseRouter(r.URL.Query(), s.routersNamed))
 
@@ -399,6 +426,7 @@ func routeToResponse(r *types.Route, routerName string) RouteResponse {
 		Router:            r.Router.String(),
 		RouterName:        routerName,
 		PeerDistinguisher: FormatRD(r.PeerDistinguisher),
+		PeerType:          types.PeerTypeName(r.PeerType),
 		PeerAddr:          r.PeerAddr.String(),
 		PeerASN:           r.PeerASN,
 		PathID:            r.PathID,

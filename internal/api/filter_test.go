@@ -199,29 +199,52 @@ func TestRoutesRIB(t *testing.T) {
 			for k, v := range filter {
 				q[k] = v
 			}
-			want := rib
+			// Without rib, the default view: Adj-RIB-In pre-policy and
+			// Loc-RIB, both of them.
+			want := []string{"adj-rib-in-pre", "loc-rib"}
 			if rib != "" {
 				q.Set("rib", rib)
-			} else {
-				want = "adj-rib-in-pre"
+				want = []string{rib}
 			}
 			code, routes := getRoutes(t, s, q)
 			if code != http.StatusOK || len(routes) == 0 {
 				t.Fatalf("%v: status %d, %d routes", q, code, len(routes))
 			}
+			seen := map[string]bool{}
 			for _, r := range routes {
-				if r.RIB != want {
-					t.Errorf("%v: got a %s route, want only %s", q, r.RIB, want)
+				seen[r.RIB] = true
+				if !slices.Contains(want, r.RIB) {
+					t.Errorf("%v: got a %s route, want only %v", q, r.RIB, want)
 				}
+			}
+			if len(seen) != len(want) {
+				t.Errorf("%v: routes of %v, want of each of %v", q, seen, want)
 			}
 		}
 	}
 	if code, _ := getRoutes(t, s, url.Values{"rib": {"adj-rib-in"}}); code != http.StatusBadRequest {
 		t.Errorf("unknown rib: status %d, want 400", code)
 	}
+	// pre-policy and post-policy are aliases; several RIBs can be named.
+	for rib, want := range map[string][]string{
+		"pre-policy":                  {"adj-rib-in-pre"},
+		"post-policy":                 {"adj-rib-in-post"},
+		"post-policy,loc-rib":         {"adj-rib-in-post", "loc-rib"},
+		"adj-rib-out-pre, pre-policy": {"adj-rib-in-pre", "adj-rib-out-pre"},
+	} {
+		code, routes := getRoutes(t, s, url.Values{"rib": {rib}, "prefix": {"1.1.1.0/24"}})
+		var got []string
+		for _, r := range routes {
+			got = append(got, r.RIB)
+		}
+		slices.Sort(got)
+		if code != http.StatusOK || !slices.Equal(got, want) {
+			t.Errorf("rib=%s: status %d, RIBs %v, want %v", rib, code, got, want)
+		}
+	}
 
-	// A watch is filtered by RIB only when rib is given.
-	all, err := parseRouteFilter(url.Values{}, nil)
+	// A watch without rib streams the default view, as routes lists it.
+	def, err := parseRouteFilter(url.Values{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,10 +252,15 @@ func TestRoutesRIB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pre := &types.Route{RIBType: types.AdjRIBInPre}
+	loc := &types.Route{RIBType: types.LocRIB}
 	post := &types.Route{RIBType: types.AdjRIBInPost}
 	outbound := &types.Route{RIBType: types.AdjRIBOutPre}
-	if !all.match(post) || !all.match(outbound) || out.match(post) || !out.match(outbound) {
-		t.Error("watch RIB filtering wrong")
+	if !def.match(pre) || !def.match(loc) || def.match(post) || def.match(outbound) {
+		t.Error("watch without rib: want the default view, adj-rib-in-pre and loc-rib only")
+	}
+	if out.match(post) || !out.match(outbound) {
+		t.Error("watch rib=adj-rib-out-pre: RIB filtering wrong")
 	}
 }
 

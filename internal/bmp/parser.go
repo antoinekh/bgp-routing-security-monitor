@@ -195,7 +195,32 @@ func ParsePeerUp(data []byte) (BMPPeerUp, error) {
 		return pu, nil
 	}
 	pu.AddPath = negotiateAddPath(sent.addPath, recv.addPath)
+	if end := 20 + sent.length + recv.length; end < len(body) {
+		pu.TableName = peerUpTableName(body[end:])
+	}
 	return pu, nil
+}
+
+// peerUpInfoTableName is the Peer Up information TLV type of a Loc-RIB
+// instance's VRF/Table Name (RFC 9069 §5.1).
+const peerUpInfoTableName = 3
+
+// peerUpTableName returns the VRF/Table Name in a Peer Up's information
+// TLVs, or "" if there is none. A TLV running past the message ends the
+// search: the rest of the Peer Up has been used already.
+func peerUpTableName(tlvs []byte) string {
+	for len(tlvs) >= 4 {
+		typ := binary.BigEndian.Uint16(tlvs[0:2])
+		n := int(binary.BigEndian.Uint16(tlvs[2:4]))
+		if 4+n > len(tlvs) {
+			return ""
+		}
+		if typ == peerUpInfoTableName {
+			return string(tlvs[4 : 4+n])
+		}
+		tlvs = tlvs[4+n:]
+	}
+	return ""
 }
 
 // negotiateAddPath works out, from the ADD-PATH capabilities in the OPEN the

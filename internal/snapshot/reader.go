@@ -138,7 +138,13 @@ func recordToRoute(rec snapshotv1.RouteRecord) (*types.Route, error) {
 	routerID, _ := parseAddr(rec.RouterID)
 	nextHop, _ := parseAddr(rec.NextHop)
 
-	rib := parseRIBType(rec.RIBType)
+	// An unknown RIB is an error, not a silent Adj-RIB-In pre-policy
+	// route. Snapshots written before the RIB names were unified say
+	// pre-policy and post-policy, which ParseRIBType still reads.
+	rib, err := types.ParseRIBType(rec.RIBType)
+	if err != nil {
+		return nil, err
+	}
 	rovState := parseROVState(rec.ROVState)
 	aspaState := parseASPAState(rec.ASPAState)
 
@@ -167,21 +173,6 @@ func parseAddr(s string) (netip.Addr, error) {
 		return netip.Addr{}, nil
 	}
 	return netip.ParseAddr(s)
-}
-
-func parseRIBType(s string) types.RIBType {
-	switch s {
-	case "post-policy":
-		return types.AdjRIBInPost
-	case "loc-rib":
-		return types.LocRIB
-	case "adj-rib-out-pre":
-		return types.AdjRIBOutPre
-	case "adj-rib-out-post":
-		return types.AdjRIBOutPost
-	default:
-		return types.AdjRIBInPre
-	}
 }
 
 func parseROVState(s string) types.ROVState {

@@ -105,7 +105,7 @@ func TestPeerRouteCountsInvariant(t *testing.T) {
 				tbl.WithdrawFromSession(rt.Key(), session[p.Router])
 			case r < 14:
 				op = "peer down"
-				apply(tbl.DetachPeer(p, session[p.Router]))
+				apply(tbl.DetachPeer(p, session[p.Router], types.AdjRIBInPre))
 			case r < 16:
 				// A new BMP session from the router supersedes the old one,
 				// re-announces some routes, then the old one ends.

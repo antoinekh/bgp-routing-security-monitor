@@ -4,10 +4,10 @@ package otel
 // It is implemented by internal/server.Server and defined here so that
 // internal/otel never imports internal/server (which would be circular).
 type StateReader interface {
-	// RouteCountsByPosture returns the current route count broken down by
-	// security posture and address family.
-	// map[posture]map[afi]count — e.g. map["secured"]["ipv4"]42
-	RouteCountsByPosture() map[string]map[string]int64
+	// RouteCounts returns the current route counts by RIB, security
+	// posture and address family: the RIBs raven_routes_total counts
+	// (adj-rib-in-pre, adj-rib-in-post, loc-rib), each apart.
+	RouteCounts() []RouteCount
 
 	// PeerRouteCounts returns per-peer route counts.
 	PeerRouteCounts() []PeerRouteCount
@@ -24,6 +24,15 @@ type StateReader interface {
 
 	// RTRCacheCounts returns VRP/ASPA counts and last-sync time per cache.
 	RTRCacheCounts() []RTRCacheCount
+}
+
+// RouteCount is the number of routes of one RIB with one posture and
+// address family.
+type RouteCount struct {
+	RIB     string // adj-rib-in-pre, adj-rib-in-post or loc-rib
+	Posture string
+	AFI     string // ipv4 or ipv6
+	Count   int64
 }
 
 // PeerRouteCount holds the route count for a single BGP peer on one

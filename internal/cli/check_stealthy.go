@@ -38,6 +38,8 @@ type stealthyRoute struct {
 	Prefix    string   `json:"prefix"`
 	PeerAddr  string   `json:"peer"`
 	PeerASN   uint32   `json:"peer_asn"`
+	PeerType  string   `json:"peer_type"`
+	RIB       string   `json:"rib"`
 	OriginASN uint32   `json:"origin_asn"`
 	ASPath    []uint32 `json:"as_path"`
 	NextHop   string   `json:"next_hop"`
@@ -47,9 +49,27 @@ type stealthyRoute struct {
 	Posture   string   `json:"posture"`
 }
 
+// neighborASN returns the AS the router learned the route from. A Loc-RIB
+// route's peer is the router itself (RFC 9069: peer_asn is the router's
+// own AS), so it is the first AS of the path, after any leading copies of
+// the router's own AS, which some routers (FRR 10.2) put there. 0 if the
+// path has none.
+func (r stealthyRoute) neighborASN() uint32 {
+	if r.RIB != "loc-rib" {
+		return r.PeerASN
+	}
+	for _, asn := range r.ASPath {
+		if asn != r.PeerASN {
+			return asn
+		}
+	}
+	return 0
+}
+
 // stealthyPeer mirrors api.PeerResponse for CLI decoding.
 type stealthyPeer struct {
 	Addr       string `json:"addr"`
+	PeerType   string `json:"peer_type"`
 	ASN        uint32 `json:"asn"`
 	State      string `json:"state"`
 	RouteCount uint64 `json:"route_count"`
@@ -196,7 +216,7 @@ func runCheckStealthy(cmd *cobra.Command, args []string) error {
 		ProbeIP:           probeIP.String(),
 		ExpectedOriginASN: best.OriginASN,
 		ExpectedPeer:      best.PeerAddr,
-		ExpectedPeerASN:   best.PeerASN,
+		ExpectedPeerASN:   best.neighborASN(),
 		RIBPosture:        best.Posture,
 		Probes:            results,
 		UsedTCPFallback:   usedTCP,
@@ -494,9 +514,11 @@ func annotateProbes(probes []probeResult, peers []stealthyPeer, best stealthyRou
 	}
 }
 
+// lookupPeer finds the BGP peer with address ip. Loc-RIB instances are the
+// monitored routers themselves, not BGP neighbors, and are skipped.
 func lookupPeer(peers []stealthyPeer, ip string) *stealthyPeer {
 	for i, p := range peers {
-		if p.Addr == ip {
+		if p.Addr == ip && p.PeerType != "loc-rib" {
 			return &peers[i]
 		}
 	}
@@ -507,7 +529,7 @@ func labelFor(asn uint32, best stealthyRoute) string {
 	switch asn {
 	case best.OriginASN:
 		return "expected origin"
-	case best.PeerASN:
+	case best.neighborASN():
 		return "expected peer"
 	default:
 		return "ATTACKER"
@@ -537,7 +559,7 @@ func computeVerdict(probes []probeResult, best stealthyRoute, peers []stealthyPe
 		if p.TimedOut {
 			continue
 		}
-		if p.RespondedASN != 0 && (p.RespondedASN == best.OriginASN || p.RespondedASN == best.PeerASN) {
+		if p.RespondedASN != 0 && (p.RespondedASN == best.OriginASN || p.RespondedASN == best.neighborASN()) {
 			return verdictClean, p.RespondedASN, "Data-plane first hop matches BMP RIB"
 		}
 	}

@@ -35,6 +35,9 @@ rtr:
 
 validation:
   rov: true
+  # ASPA is verified once an RTR cache has synced at protocol version 2 (the
+  # first with ASPA); until then, or with aspa: false, every route's ASPA is
+  # Unknown, with the reason.
   aspa: true
   aspa-default-procedure: upstream  # upstream | downstream | auto (auto = upstream until BGP Role is read)
   # Per-peer ASPA procedure from the neighbor's role (what the BMP peer is to
@@ -43,6 +46,15 @@ validation:
   # (BMP peer address) or asn; an address entry wins over an asn entry.
   # Entries other than rs also enforce the neighbor-AS check (first AS in the
   # AS_PATH must be the peer's ASN). Unlisted peers use aspa-default-procedure.
+  #
+  # Loc-RIB routes (BMP peer type 3, RFC 9069) have no neighbor address: their
+  # procedure comes from an asn entry matching the neighbor AS, the first AS
+  # of the AS_PATH, then aspa-default-procedure; address entries never match
+  # them and the neighbor-AS check does not apply. A leading copy of the
+  # router's own AS (FRR 10.2 puts it there) is removed first. Limitation: for
+  # a best path learned over iBGP, the first AS is the neighbor of the border
+  # router that learned it, not of the monitored router, and the procedure is
+  # chosen for that AS all the same.
   # aspa-peers:
   #   - address: 192.0.2.1
   #     neighbor-role: provider
@@ -122,6 +134,25 @@ events:
           url: "http://localhost:9999"
           max_attempts: 2
           timeout: 3s
+
+    # A router that sends several RIBs (adj-rib-in-pre, adj-rib-in-post,
+    # loc-rib) fires a rule once per RIB, and the cooldown applies per route
+    # and RIB. A compound trigger with a rib trigger keeps the rule to some
+    # RIBs (pre-policy and post-policy are accepted as RIB names too).
+    #
+    # - name: "alert-origin-invalid-loc-rib"
+    #   trigger:
+    #     type: compound
+    #     operator: and
+    #     triggers:
+    #       - type: posture
+    #         postures: ["origin-invalid"]
+    #       - type: rib
+    #         ribs: ["loc-rib"]
+    #   cooldown: 60s
+    #   actions:
+    #     - type: log
+    #       level: warn
 
     # Global visibility correlation. Requires external.ripestat.enabled: true
     # above; RAVEN refuses to start otherwise rather than silently doing

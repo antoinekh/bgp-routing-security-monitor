@@ -1,6 +1,8 @@
 package server
 
 import (
+	"slices"
+
 	"github.com/nokia/bgp-routing-security-monitor/internal/api"
 	ravenotel "github.com/nokia/bgp-routing-security-monitor/internal/otel"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
@@ -9,24 +11,15 @@ import (
 // Verify at compile time that *Server implements ravenotel.StateReader.
 var _ ravenotel.StateReader = (*Server)(nil)
 
-// RouteCountsByPosture returns the current pre-policy route count broken down
-// by security posture and address family.
-func (s *Server) RouteCountsByPosture() map[string]map[string]int64 {
-	routes := s.table.AllPrePolicy()
-	result := make(map[string]map[string]int64)
-	for _, r := range routes {
-		posture := string(r.SecurityPosture)
-		if posture == "" {
-			posture = "unverified"
+// RouteCounts returns the current route counts of the RIBs
+// raven_routes_total counts, by RIB, security posture and address family.
+func (s *Server) RouteCounts() []ravenotel.RouteCount {
+	var result []ravenotel.RouteCount
+	for k, n := range s.routeCounts() {
+		if !slices.Contains(metricRIBs, k.rib) {
+			continue
 		}
-		afi := "ipv4"
-		if r.Prefix.Addr().Is6() {
-			afi = "ipv6"
-		}
-		if result[posture] == nil {
-			result[posture] = make(map[string]int64)
-		}
-		result[posture][afi]++
+		result = append(result, ravenotel.RouteCount{RIB: k.rib.String(), Posture: k.posture, AFI: k.afi, Count: n})
 	}
 	return result
 }

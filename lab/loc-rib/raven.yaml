@@ -1,0 +1,26 @@
+bmp:
+  listen: "0.0.0.0:11019"
+  # rr1 and rr2 connect from the lab's management network.
+  allowed-routers: ["172.31.90.0/24"]
+rtr:
+  # rtr-version is left at auto: StayRTR speaks version 1 only, and RAVEN
+  # falls back to it on the cache's Error Report, then re-probes version 2
+  # hourly on a separate connection.
+  caches:
+    - address: "172.31.90.11:8282"
+      preference: 1
+      transport: tcp
+validation:
+  rov: true
+  aspa: false
+  aspa-default-procedure: upstream
+outputs:
+  prometheus:
+    listen: ":9595"
+    path: "/metrics"
+api:
+  # run.sh queries the API from the host.
+  listen: "0.0.0.0:11020"
+logging:
+  level: info
+  format: json

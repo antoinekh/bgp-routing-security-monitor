@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -115,6 +116,7 @@ var statusCmd = &cobra.Command{
 			} `json:"rtr"`
 			RouteTable struct {
 				TotalRoutes uint64            `json:"total_routes"`
+				DefaultView []string          `json:"default_view"`
 				ByPosture   map[string]uint64 `json:"by_posture"`
 				ByRIB       map[string]uint64 `json:"by_rib"`
 			} `json:"route_table"`
@@ -124,32 +126,66 @@ var statusCmd = &cobra.Command{
 		}
 
 		fmt.Printf("RAVEN %s  uptime %s\n\n", status.Version, status.Uptime)
-
-		fmt.Printf("Route Table: %d routes received (Adj-RIB-In pre-policy)\n", status.RouteTable.TotalRoutes)
-		for posture, count := range status.RouteTable.ByPosture {
-			fmt.Printf("  %-20s %d\n", posture, count)
-		}
-		if len(status.RouteTable.ByRIB) > 1 {
-			fmt.Printf("By RIB:\n")
-			for _, rib := range []string{"adj-rib-in-pre", "adj-rib-in-post", "loc-rib", "adj-rib-out-pre", "adj-rib-out-post"} {
-				if n, ok := status.RouteTable.ByRIB[rib]; ok {
-					fmt.Printf("  %-20s %d\n", rib, n)
-				}
-			}
-		}
+		printRouteTable(os.Stdout, status.RouteTable.TotalRoutes, status.RouteTable.DefaultView,
+			status.RouteTable.ByPosture, status.RouteTable.ByRIB)
 
 		fmt.Printf("\nRPKI: %d VRPs (serial %d)\n", status.RTR.VRPCount, status.RTR.Serial)
 
 		fmt.Printf("\nBMP Peers: %d\n", len(status.BMP))
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		out := anyOutbound(status.BMP)
-		fmt.Fprintf(tw, "  ROUTER\tPEER\tASN\tSTATE\tROUTES%s\n", outHeader(out))
+		fmt.Fprintf(tw, "  ROUTER\tPEER\tTYPE\tASN\tSTATE\tROUTES%s\n", outHeader(out))
 		for _, p := range status.BMP {
-			fmt.Fprintf(tw, "  %s\t%s\t%d\t%s\t%d%s\n", p.router(), p.peer(), p.ASN, p.State, p.RouteCount, p.outCell(out))
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%d\t%s\t%d%s\n", p.router(), p.peer(), p.PeerType, p.ASN, p.State, p.RouteCount, p.outCell(out))
 		}
 		tw.Flush()
 		return nil
 	},
+}
+
+// postureOrder is the order raven status lists postures in, best first. It
+// listed them in map order, which changed from one run to the next.
+var postureOrder = []string{"secured", "path-only", "origin-only", "unverified", "path-suspect", "origin-invalid"}
+
+// ribOrder is the order raven status lists RIBs in.
+var ribOrder = []string{"adj-rib-in-pre", "adj-rib-in-post", "loc-rib", "adj-rib-out-pre", "adj-rib-out-post"}
+
+// printRouteTable prints raven status's route table summary: the default
+// view's total and postures, then every RIB's total. A posture or RIB the
+// daemon reports that is not in the fixed order is listed after it.
+func printRouteTable(w io.Writer, total uint64, view []string, byPosture, byRIB map[string]uint64) {
+	viewText := strings.Join(view, " + ")
+	if viewText == "" {
+		viewText = "adj-rib-in-pre" // a daemon from before the default view
+	}
+	fmt.Fprintf(w, "Route Table: %d routes in the default view (%s)\n", total, viewText)
+	for _, posture := range inOrder(postureOrder, byPosture) {
+		fmt.Fprintf(w, "  %-20s %d\n", posture, byPosture[posture])
+	}
+	if len(byRIB) > 0 {
+		fmt.Fprintf(w, "By RIB:\n")
+		for _, rib := range inOrder(ribOrder, byRIB) {
+			fmt.Fprintf(w, "  %-20s %d\n", rib, byRIB[rib])
+		}
+	}
+}
+
+// inOrder returns the keys of m: those in order first, in that order, then
+// the others sorted.
+func inOrder(order []string, m map[string]uint64) []string {
+	var out, rest []string
+	for _, k := range order {
+		if _, ok := m[k]; ok {
+			out = append(out, k)
+		}
+	}
+	for k := range m {
+		if !slices.Contains(order, k) {
+			rest = append(rest, k)
+		}
+	}
+	slices.Sort(rest)
+	return append(out, rest...)
 }
 
 // ─── peers ───
@@ -160,11 +196,13 @@ type peerRow struct {
 	Router            string            `json:"router"`
 	RouterName        string            `json:"router_name"`
 	PeerDistinguisher string            `json:"peer_distinguisher"`
+	PeerType          string            `json:"peer_type"`
+	TableName         string            `json:"table_name"`
 	Addr              string            `json:"addr"`
 	ASN               uint32            `json:"asn"`
 	RouterID          string            `json:"router_id"`
 	State             string            `json:"state"`
-	RouteCount        uint64            `json:"route_count"` // Adj-RIB-In pre-policy
+	RouteCount        uint64            `json:"route_count"` // default view: Adj-RIB-In pre-policy, or Loc-RIB
 	RoutesByRIB       map[string]uint64 `json:"routes_by_rib"`
 	UpSince           string            `json:"up_since"`
 	MalformedInput    bool              `json:"malformed_input"`
@@ -229,12 +267,18 @@ func (p peerRow) outCell(show bool) string {
 func (p peerRow) router() string { return routerLabel(p.Router, p.RouterName) }
 
 // peer is the PEER column: the address, with the VRF's RD for a peer that
-// is not in the global instance.
+// is not in the global instance. A Loc-RIB instance has the zero address;
+// it shows as loc-rib, with the RD for a VRF instance (its VRF/Table Name is
+// in the API's table_name).
 func (p peerRow) peer() string {
-	if p.PeerDistinguisher != "" {
-		return p.Addr + " rd " + p.PeerDistinguisher
+	s := p.Addr
+	if p.PeerType == "loc-rib" {
+		s = "loc-rib"
 	}
-	return p.Addr
+	if p.PeerDistinguisher != "" {
+		return s + " rd " + p.PeerDistinguisher
+	}
+	return s
 }
 
 func routerLabel(addr, name string) string {
@@ -271,10 +315,10 @@ var peersCmd = &cobra.Command{
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		out := anyOutbound(peers)
 		bad := anyMalformed(peers)
-		fmt.Fprintf(tw, "ROUTER\tPEER\tASN\tROUTER ID\tSTATE\tROUTES%s\tUP SINCE%s\n", outHeader(out), malformedHeader(bad))
+		fmt.Fprintf(tw, "ROUTER\tPEER\tTYPE\tASN\tROUTER ID\tSTATE\tROUTES%s\tUP SINCE%s\n", outHeader(out), malformedHeader(bad))
 		for _, p := range peers {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d%s\t%s%s\n",
-				p.router(), p.peer(), p.ASN, p.RouterID, p.State, p.RouteCount, p.outCell(out), p.UpSince,
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%d%s\t%s%s\n",
+				p.router(), p.peer(), p.PeerType, p.ASN, p.RouterID, p.State, p.RouteCount, p.outCell(out), p.UpSince,
 				p.malformedCell(bad))
 		}
 		tw.Flush()
@@ -323,16 +367,18 @@ var routesCmd = &cobra.Command{
 		}
 
 		var routes []struct {
-			Prefix     string   `json:"prefix"`
-			Router     string   `json:"router"`
-			RouterName string   `json:"router_name"`
-			PeerAddr   string   `json:"peer"`
-			PathID     uint32   `json:"path_id"`
-			OriginASN  uint32   `json:"origin_asn"`
-			ASPath     []uint32 `json:"as_path"`
-			ROV        string   `json:"rov"`
-			ASPA       string   `json:"aspa"`
-			Posture    string   `json:"posture"`
+			Prefix            string `json:"prefix"`
+			Router            string `json:"router"`
+			RouterName        string `json:"router_name"`
+			PeerAddr          string `json:"peer"`
+			PeerDistinguisher string `json:"peer_distinguisher"`
+			PeerType          string `json:"peer_type"`
+			PathID            uint32 `json:"path_id"`
+			RIB               string `json:"rib"`
+			OriginASN         uint32 `json:"origin_asn"`
+			ROV               string `json:"rov"`
+			ASPA              string `json:"aspa"`
+			Posture           string `json:"posture"`
 
 			ASPAProcedure       string `json:"aspa_procedure"`
 			ASPAProcedureSource string `json:"aspa_procedure_source"`
@@ -352,23 +398,29 @@ var routesCmd = &cobra.Command{
 			prefixes[i] = r.Prefix
 		}
 		pw := prefixColWidth(prefixes)
-		fmt.Fprintf(tw, "%-*s\tROUTER\tPEER\tORIGIN\tROV\tASPA\tPOSTURE", pw, "PREFIX")
+		fmt.Fprintf(tw, "%-*s\tROUTER\tPEER\tRIB\tORIGIN\tROV\tASPA\tPOSTURE", pw, "PREFIX")
 		if wide {
 			fmt.Fprint(tw, "\tASPA PROCEDURE\tPROCEDURE SOURCE\tFAILING HOP")
 		}
 		fmt.Fprintln(tw)
 		for _, r := range routes {
-			asPathStr := formatASPath(r.ASPath)
 			origin := fmt.Sprintf("AS%d", r.OriginASN)
 			if r.OriginASN == 0 {
 				origin = "-"
 			}
+			// A Loc-RIB route has no peer: it is the router's own best path.
 			peer := r.PeerAddr
+			if r.PeerType == "loc-rib" {
+				peer = "-"
+			}
+			if r.PeerDistinguisher != "" {
+				peer += " rd " + r.PeerDistinguisher
+			}
 			if r.PathID != 0 {
 				peer = fmt.Sprintf("%s path %d", peer, r.PathID)
 			}
-			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s\t%s",
-				pw, r.Prefix, routerLabel(r.Router, r.RouterName), peer, origin, r.ROV, r.ASPA, r.Posture)
+			fmt.Fprintf(tw, "%-*s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+				pw, r.Prefix, routerLabel(r.Router, r.RouterName), peer, r.RIB, origin, r.ROV, r.ASPA, r.Posture)
 			if wide {
 				hop := "-"
 				if h := r.ASPAFailingHop; h != nil {
@@ -377,7 +429,6 @@ var routesCmd = &cobra.Command{
 				fmt.Fprintf(tw, "\t%s\t%s\t%s", r.ASPAProcedure, r.ASPAProcedureSource, hop)
 			}
 			fmt.Fprintln(tw)
-			_ = asPathStr
 		}
 		tw.Flush()
 		return nil
@@ -485,6 +536,9 @@ var watchCmd = &cobra.Command{
 		if v, _ := cmd.Flags().GetString("router"); v != "" {
 			params.Set("router", v)
 		}
+		if v, _ := cmd.Flags().GetString("rib"); v != "" {
+			params.Set("rib", v)
+		}
 
 		u := fmt.Sprintf("http://%s/api/v1/watch", addr)
 		if len(params) > 0 {
@@ -511,6 +565,8 @@ var watchCmd = &cobra.Command{
 			var r struct {
 				Prefix    string   `json:"prefix"`
 				PeerAddr  string   `json:"peer"`
+				PeerType  string   `json:"peer_type"`
+				RIB       string   `json:"rib"`
 				OriginASN uint32   `json:"origin_asn"`
 				ASPath    []uint32 `json:"as_path"`
 				ROV       string   `json:"rov"`
@@ -524,8 +580,12 @@ var watchCmd = &cobra.Command{
 			if r.OriginASN == 0 {
 				origin = "-"
 			}
-			fmt.Printf("[%s] %s via %s origin:%s AS_PATH:%v rov:%s posture:%s\n",
-				r.Posture, r.Prefix, r.PeerAddr, origin,
+			via := r.PeerAddr
+			if r.PeerType == "loc-rib" {
+				via = "loc-rib"
+			}
+			fmt.Printf("[%s] %s via %s rib:%s origin:%s AS_PATH:%v rov:%s posture:%s\n",
+				r.Posture, r.Prefix, via, r.RIB, origin,
 				r.ASPath, r.ROV, r.Posture)
 		}
 		return scanner.Err()
@@ -555,17 +615,6 @@ func apiPost(addr string, path string) (*http.Response, error) {
 	return resp, nil
 }
 
-func formatASPath(path []uint32) string {
-	if len(path) == 0 {
-		return "-"
-	}
-	parts := make([]string, len(path))
-	for i, asn := range path {
-		parts[i] = fmt.Sprintf("%d", asn)
-	}
-	return strings.Join(parts, " ")
-}
-
 func init() {
 	// serve flags
 	serveCmd.Flags().Bool("demo", false, "use test VRPs instead of live RTR connection")
@@ -581,8 +630,7 @@ func init() {
 	routesCmd.Flags().String("peer", "", "filter by BMP peer address")
 	routesCmd.Flags().String("posture", "", "filter by security posture")
 	routesCmd.Flags().String("router", "", "filter by monitored router: its address or BMP sysName")
-	routesCmd.Flags().String("rib", "adj-rib-in-pre",
-		"RIB to list: adj-rib-in-pre, adj-rib-in-post, adj-rib-out-pre, adj-rib-out-post or loc-rib")
+	routesCmd.Flags().String("rib", "", ribFlagHelp)
 	routesCmd.Flags().String("format", "table", "output format: table, wide, json")
 
 	// validate flags
@@ -596,4 +644,9 @@ func init() {
 	watchCmd.Flags().String("peer", "", "filter by peer")
 	watchCmd.Flags().String("posture", "", "filter by posture")
 	watchCmd.Flags().String("router", "", "filter by monitored router: its address or BMP sysName")
+	watchCmd.Flags().String("rib", "", ribFlagHelp)
 }
+
+// ribFlagHelp is the help of routes and watch --rib.
+const ribFlagHelp = "RIBs to list, comma-separated: adj-rib-in-pre (or pre-policy), adj-rib-in-post (or post-policy), " +
+	"loc-rib, adj-rib-out-pre, adj-rib-out-post (default: the default view, adj-rib-in-pre and loc-rib)"

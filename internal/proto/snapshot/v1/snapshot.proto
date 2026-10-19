@@ -7,6 +7,7 @@ message RouteSnapshot {
   int64  snapshot_time_unix = 1;  // unix nano
   string raven_version      = 2;
   repeated RouteRecord routes = 3;
+  int32  format_version     = 4;  // routes.snap format, see snapshotv1.RouteFormatVersion
 }
 
 message RouteRecord {
@@ -18,11 +19,15 @@ message RouteRecord {
   uint32   origin_asn    = 6;
   string   next_hop      = 7;
   int64    timestamp_unix = 8;  // unix nano
-  string   rib_type      = 9;   // "pre-policy" | "post-policy" | "loc-rib"
+  string   rib_type      = 9;   // "adj-rib-in-pre" | "adj-rib-in-post" | "loc-rib" | "adj-rib-out-pre" | "adj-rib-out-post" ("pre-policy", "post-policy" in older files)
   string   rov_state     = 10;
   string   aspa_state    = 11;
   string   posture       = 12;
   bool     stale         = 13;
+  string   router        = 14;  // the monitored router: its BMP session address
+  uint64   peer_distinguisher = 15; // BMP Peer Distinguisher as a big-endian integer, 0 for a global peer
+  uint32   peer_type     = 16;  // BMP peer type: 0 global, 1 RD, 2 local, 3 Loc-RIB
+  uint32   path_id       = 17;  // ADD-PATH path identifier, 0 without ADD-PATH
 }
 
 // RPKISnapshot is the VRP + ASPA store snapshot.

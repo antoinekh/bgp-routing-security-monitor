@@ -47,7 +47,7 @@ Router (BMP) → BMP Listener → routeCh channel → Validation Engine → Rout
 - `aspa/` — ASPA validation: checks AS path direction and legitimacy, detects route leaks. Procedure is configurable (upstream/downstream/auto).
 - Combines results into a `SecurityPosture` on each `types.Route`.
 
-**`internal/routetable/`** — Thread-safe in-memory route table. Hybrid design: 256-shard flat map (keyed by prefix+peer) + BART prefix trie index. Supports queries by prefix, origin ASN, and security posture. Stores pre-policy Adj-RIB-In.
+**`internal/routetable/`** — Thread-safe in-memory route table. Hybrid design: 256-shard flat map (keyed by prefix+peer) + BART prefix trie index. Supports queries by prefix, origin ASN, and security posture. Stores every RIB a router reports (Adj-RIB-In pre/post-policy, Loc-RIB, Adj-RIB-Out); queries default to the default view, `types.DefaultView` (Adj-RIB-In pre-policy and Loc-RIB).
 
 **`internal/server/`** — Orchestrates all goroutines (BMP listener, RTR clients, validation, metrics, API). Manages graceful shutdown on SIGTERM/SIGINT.
 

@@ -4,7 +4,9 @@ import "time"
 
 // RouterAuditReport is the top-level result of a security posture audit for one router.
 type RouterAuditReport struct {
-	RouterID        string            `json:"router_id"`
+	RouterID string `json:"router_id"`
+	// RIB is the one RIB audited: adj-rib-in-pre unless another was asked for.
+	RIB             string            `json:"rib"`
 	GeneratedAt     time.Time         `json:"generated_at"`
 	TotalRoutes     int               `json:"total_routes"`
 	ROVCoverage     float64           `json:"rov_coverage"`    // fraction 0–1
@@ -15,14 +17,19 @@ type RouterAuditReport struct {
 	Recommendations []string          `json:"recommendations"`
 }
 
-// PeerAuditReport summarises a single BGP peer's contribution to the router's route table.
+// PeerAuditReport summarises a single BGP peer's contribution to the router's
+// route table: one peer on one monitored router (Router, its BMP session
+// address), in one instance (PeerDistinguisher, always present, "" for a
+// global-instance peer).
 type PeerAuditReport struct {
-	PeerAddr       string         `json:"peer_addr"`
-	PeerASN        uint32         `json:"peer_asn"`
-	TotalRoutes    int            `json:"total_routes"`
-	PostureSummary map[string]int `json:"posture_summary"`
-	ROVCoverage    float64        `json:"rov_coverage"`
-	ASPACoverage   float64        `json:"aspa_coverage"`
+	Router            string         `json:"router"`
+	PeerAddr          string         `json:"peer_addr"`
+	PeerDistinguisher string         `json:"peer_distinguisher"`
+	PeerASN           uint32         `json:"peer_asn"`
+	TotalRoutes       int            `json:"total_routes"`
+	PostureSummary    map[string]int `json:"posture_summary"`
+	ROVCoverage       float64        `json:"rov_coverage"`
+	ASPACoverage      float64        `json:"aspa_coverage"`
 }
 
 // OffenderEntry describes an origin ASN contributing origin-invalid or path-suspect routes.

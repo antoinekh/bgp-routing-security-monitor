@@ -14,11 +14,59 @@ All notable changes to RAVEN are recorded here.
 - **Breaking for dashboards:** `raven_bmp_peer_state` gains `router_addr` and
   `peer_distinguisher` labels, so the same peer address on two routers or
   in two VRFs no longer shares one series.
+- **Breaking for dashboards and alerts:** `raven_routes_total` gains a `rib`
+  label: `adj-rib-in-pre`, `adj-rib-in-post` and `loc-rib` are counted
+  apart (every rib/posture/afi series exists, at 0 when empty). It counted
+  Adj-RIB-In pre-policy only, unlabelled; a query without a `rib` matcher
+  now adds up RIBs, counting a route once per RIB it is reported in. Add
+  `rib="adj-rib-in-pre"` to keep the old values (`lab/grafana-dashboard.json`
+  does). Adj-RIB-Out stays in `raven_adj_rib_out_routes_total`;
+  `raven_route_table_size` is unchanged (Adj-RIB-In pre-policy). The OTel
+  `raven.routes.total` gets the same `rib` attribute, and the OTel
+  `StateReader` method `RouteCountsByPosture` becomes `RouteCounts`.
+- Route queries default to the default view, Adj-RIB-In pre-policy **and**
+  Loc-RIB: `/api/v1/routes`, `/api/v1/watch`, `raven routes`, `raven watch`
+  and every filter with them (`prefix`, `origin-asn`, `peer`, `posture`,
+  `router`), as do the what-if simulator and the ASPA recommender. A router
+  that sends only its Loc-RIB no longer shows an empty table. `rib` (one or
+  more RIBs, comma-separated) still selects others. `/api/v1/watch` without
+  `rib` used to stream every RIB, Adj-RIB-Out included; `raven routes`
+  without `--rib` listed Adj-RIB-In pre-policy only.
 - Status totals (`raven status`, `/api/v1/status` `total_routes` and
-  `by_posture`) and per-peer `route_count` now count Adj-RIB-In pre-policy
-  routes only, as `raven_routes_total` always did; they used to add up every
-  RIB, counting a route twice when a router sent pre- and post-policy. The
-  other RIBs are reported apart (`by_rib`, `routes_by_rib`).
+  `by_posture`) count the default view, named in the new `default_view`
+  field and in `raven status`'s header; per-peer `route_count` counts a BGP
+  peer's Adj-RIB-In pre-policy routes and a Loc-RIB instance's Loc-RIB
+  routes. Adding up every RIB, as they did before, counted a route twice
+  when a router sent pre- and post-policy. Every RIB is reported apart
+  (`by_rib`, `routes_by_rib`).
+- RIB names are the same everywhere: `adj-rib-in-pre`, `adj-rib-in-post`,
+  `loc-rib`, `adj-rib-out-pre`, `adj-rib-out-post`. `pre-policy` and
+  `post-policy` are accepted as aliases of the Adj-RIB-In ones in the CLI,
+  the API, the audit and the `rib` event trigger. Route snapshots are
+  written with these names; older ones, with `pre-policy`/`post-policy`,
+  still load, and a snapshot with an unknown RIB is an error (it was loaded
+  as Adj-RIB-In pre-policy).
+- A type 2 route distinguisher has an `L` after its AS number (`65000L:1`),
+  in the API, metric labels, audit rows and event fields, so it is no
+  longer written like the type 0 RD `65000:1`.
+- `raven audit` (`/api/v1/audit`) audits one RIB, `adj-rib-in-pre` unless
+  `--rib` (`rib`) names another, instead of adding up RIBs; the report has a
+  `rib` field and one peer row per router, instance and address, with
+  `router` and an always-present `peer_distinguisher`. With `--rib loc-rib`,
+  `--router` matches the monitored router's address (a Loc-RIB has no peer
+  address). An unknown RIB is a 400, which `raven audit` reports.
+- An event rule's cooldown is kept per route (router, peer distinguisher,
+  peer, prefix, path ID and RIB). It was kept per prefix and peer address,
+  so an event in one RIB, on one router or in one VRF suppressed the same
+  prefix's event elsewhere. A rule fires once per route and RIB: a router
+  sending pre-policy and Loc-RIB can fire one action per RIB.
+- Webhook payloads gain `rib` and `peer_distinguisher` (always present, ""
+  for a global-instance peer); log actions log `peer`, `peer_distinguisher`
+  and `rib`.
+- `raven status` lists postures in a fixed order (secured, path-only,
+  origin-only, unverified, path-suspect, origin-invalid), then RIBs; the
+  order changed from run to run. `raven status` and `raven peers` show each
+  peer's TYPE; `raven routes` shows each route's RIB.
 - Route and withdrawal events carry the monitored router in `router_id`
   (they had the peer's BGP identifier, or the peer's address).
 - The daemon reports the build's version (`raven status`), from the same
@@ -44,6 +92,17 @@ All notable changes to RAVEN are recorded here.
   used to be treated as hops.
 
 ### Fixed
+- ASPA is not verified without ASPA data. Until an RTR cache syncs at
+  protocol version 2 (the first with ASPA), every route's ASPA is Unknown
+  with reason `no ASPA data (no RTR v2 session)`; with `validation.aspa:
+  false`, Unknown with reason `ASPA disabled` (the setting was ignored). A
+  path of one AS used to verify as Valid with no ASPA data at all, so behind
+  a version 1 cache postures were `path-only` or `secured` instead of
+  `unverified` or `origin-only`. The first version 2 sync, and a fall back
+  to version 1 by the last version 2 cache, revalidate the whole table.
+- `raven_bmp_peer_state` goes to 0 for every peer of a BMP session that
+  ends; it stayed at 1 for peers without a Peer Down before the end, until
+  RAVEN restarted.
 - ROV follows RFC 6811 §2 for a route whose AS_PATH ends in an AS_SET: its
   origin is NONE, so it is Invalid under any covering VRP and NotFound
   otherwise, each with a reason. The set's last member used to be taken as
@@ -93,10 +152,46 @@ All notable changes to RAVEN are recorded here.
   UPDATEs by RFC 7606 action and reason (all series exported at 0), with a
   WARN per peer and reason at most once a minute (router, peer, reason,
   action, and how many were suppressed).
-- `raven routes --rib` (API `rib` parameter): adj-rib-in-pre (default),
-  adj-rib-in-post, adj-rib-out-pre, adj-rib-out-post or loc-rib, so
-  outbound routes can be listed. `/api/v1/watch` streams are filtered by RIB
-  only when `rib` is given.
+- `raven routes --rib` and `raven watch --rib` (API `rib` parameter):
+  adj-rib-in-pre, adj-rib-in-post, adj-rib-out-pre, adj-rib-out-post or
+  loc-rib, one or more, so outbound routes can be listed; without it, the
+  default view (see Changed).
+- BMP Loc-RIB monitoring (RFC 9069, peer type 3). Loc-RIB routes are stored
+  as `loc-rib`, keyed like any route by router, peer distinguisher (VRF
+  Loc-RIBs stay apart), the zero peer address, path ID and RIB. The 0x80
+  flag of a Loc-RIB header is its F (filtered) flag, not V: a filtered
+  Loc-RIB was read as an IPv6 peer; no other Adj-RIB flag (L, A, O) applies
+  to it. The router's own AS is the Loc-RIB header's Peer AS, with or
+  without a Peer Up. A Loc-RIB instance that sends routes or withdrawals
+  without a Peer Up (FRR 10.2), or after its Peer Down, is registered as a
+  peer; an End-of-RIB alone does not register it. A Loc-RIB Peer Down
+  clears that Loc-RIB only, and a BGP peer's Peer Down its Adj-RIBs only.
+  The Peer Up's VRF/Table Name TLV is shown (`table_name` in
+  `/api/v1/peers` and `/api/v1/status`); `raven peers` shows a Loc-RIB
+  instance as `loc-rib`, with the RD of a VRF instance. Its registration is
+  logged at INFO (`BMP Loc-RIB registered`, `peer_up` true or false). Routes and peers in the API have a `peer_type` (`global`, `rd`,
+  `local`, `loc-rib`).
+- ASPA verification of Loc-RIB routes, which have no neighbor address: the
+  procedure comes from an `aspa-peers` `asn` entry for the neighbor AS, the
+  first AS of the path, then `aspa-default-procedure` (source `config-asn`
+  or `default`); `address` entries never match them, and the neighbor-AS
+  check does not apply. A leading copy of the router's own AS (FRR 10.2
+  puts it first in Loc-RIB paths) is removed before choosing the procedure
+  and verifying. Limitation: for a best path learned over iBGP, the first
+  AS is the neighbor of the border router that learned it, not of the
+  monitored router, and the procedure is chosen for that AS all the same.
+- `rib` event trigger (`ribs: ["loc-rib"]`), for a `compound` trigger that
+  keeps a rule to some RIBs; example in `raven.yaml`.
+- `raven check stealthy` and `raven check global` take a Loc-RIB route's
+  expected neighbor AS from its path (after any leading copy of the
+  router's own AS), and never take a Loc-RIB instance for a BGP neighbor.
+- `lab/loc-rib/`: a Containerlab lab that checks Loc-RIB monitoring live
+  (`lab/loc-rib/run.sh all`, needs root).
+- `proto/raven/v1/raven.proto`: `rib`, `peer_type` and `peer_distinguisher`
+  on routes, `peer_type`, `peer_distinguisher` and `table_name` on peers,
+  the default view and per-RIB counts in the route table stats, `rib` in
+  the route filter and the audit; the snapshot schema matches the snapshot
+  file (router, peer distinguisher, peer type, path ID, format version).
 - `make fuzz`: native Go fuzzing of the BMP message, Peer Up/OPEN and UPDATE
   decoders (not part of `make check`).
 - `bmp.allowed-routers`: IP addresses and prefixes BMP connections are
