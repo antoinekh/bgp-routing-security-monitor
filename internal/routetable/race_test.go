@@ -51,7 +51,9 @@ func TestIndexQueriesConcurrentWithWithdrawals(t *testing.T) {
 	}
 	// Each reader reports whether to keep going.
 	readers := []func() bool{
-		func() bool { return noDuplicates("GetByPrefixIn", tbl.GetByPrefixIn(prefix, types.AdjRIBInPre)) },
+		func() bool {
+			return noDuplicates("GetByPrefixIn", tbl.GetByPrefixIn(prefix, types.RIBSetOf(types.AdjRIBInPre)))
+		},
 		func() bool { return noDuplicates("GetByOriginASN", tbl.GetByOriginASN(origin)) },
 		func() bool { return noDuplicates("GetByPosture", tbl.GetByPosture(types.PostureOriginOnly)) },
 		func() bool {
@@ -98,7 +100,7 @@ func TestIndexQueriesConcurrentWithWithdrawals(t *testing.T) {
 			if p%2 == 0 {
 				tbl.Withdraw(r.Key())
 			} else {
-				tbl.WithdrawAllFromPeer(r.Peer(), 1)
+				tbl.WithdrawAllFromPeer(r.Peer(), 1, types.AdjRIBInPre)
 			}
 		}
 	}
