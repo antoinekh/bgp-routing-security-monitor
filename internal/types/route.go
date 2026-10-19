@@ -31,8 +31,16 @@ type Route struct {
 	// LocalASN is the monitoring router's own AS on the BMP session this
 	// route was learned over (from the Peer Up message's Sent OPEN). Zero
 	// if unknown. Not used by ASPA verification: the draft never checks the
-	// neighbor-to-verifier edge.
+	// neighbor-to-verifier edge. It is the origin AS of a route with an
+	// empty AS_PATH (see OriginAS). Whatever learns the route may set it;
+	// BMP sets it from Peer Up.
 	LocalASN uint32
+	// ConfedID is the monitored router's AS confederation identifier
+	// (RFC 5065), the AS its confederation is known by outside it, when
+	// known; zero otherwise, including for a router not in a confederation.
+	// When set, it is the origin AS of an empty AS_PATH or one ending in a
+	// confederation segment (see OriginAS).
+	ConfedID uint32
 
 	RouterID         netip.Addr
 	Prefix           netip.Prefix
@@ -101,29 +109,73 @@ type IngestEvent struct {
 	Superseded bool
 }
 
-// OriginASN returns the route's origin AS (RFC 6811 §2): the rightmost AS
-// in the AS_PATH's final segment. Confederation segments never supply it:
-// a final AS_CONFED_SEQUENCE or AS_CONFED_SET means the route originated
-// inside the monitored router's own confederation, whose origin RFC 6811
-// makes the router's own AS. RAVEN does not know the confederation's AS
-// (the session's OPEN carries the member AS), so the result is 0, as for
-// an empty AS_PATH: no origin.
+// OriginSource says where a route's origin AS comes from (see OriginAS).
+type OriginSource uint8
+
+const (
+	// OriginFromPath: the rightmost AS of the final AS_SEQUENCE.
+	OriginFromPath OriginSource = iota
+	// OriginNone: the final segment is an AS_SET, so the origin is NONE.
+	OriginNone
+	// OriginLocalAS: the AS_PATH is empty, so the origin is the router's
+	// own AS (LocalASN).
+	OriginLocalAS
+	// OriginLocalConfedID: as OriginLocalAS, but the router is in a
+	// confederation whose identifier (ConfedID) is known, and that is the
+	// origin.
+	OriginLocalConfedID
+	// OriginConfedID: the final segment is a confederation segment, so the
+	// origin is the router's own AS, taken as its confederation identifier
+	// (ConfedID).
+	OriginConfedID
+	// OriginConfedMember: as OriginConfedID, but with the identifier
+	// unknown the origin is the router's member AS (LocalASN). ROAs are
+	// registered under the confederation identifier, so a VRP may not match.
+	OriginConfedMember
+)
+
+// OriginAS returns the route's origin AS per RFC 6811 §2, and where it came
+// from. It is the rightmost AS of the AS_PATH's final segment if that is an
+// AS_SEQUENCE. If the AS_PATH is empty or its final segment is an
+// AS_CONFED_SEQUENCE or AS_CONFED_SET, it is the BGP speaker's own AS: here
+// the monitored router's confederation identifier (ConfedID) if known,
+// since ROAs for a confederation name the AS it is known by, else its own
+// AS on the session (LocalASN), the member AS inside a confederation.
+// After a final AS_SET the origin is NONE (see OriginIsNone) and the AS 0.
 //
-// After a final AS_SET the origin is NONE (RFC 6811 §2; see OriginIsNone),
-// and the result is 0 too. A route with no ASPathRaw (one built without
-// segments) uses the last AS of ASPath.
-func (r *Route) OriginASN() uint32 {
+// The AS is 0 when the router's own AS is needed but not known. A route
+// with no ASPathRaw (one built without segments) uses the last AS of ASPath,
+// or the local AS if that is empty too.
+func (r *Route) OriginAS() (uint32, OriginSource) {
 	if n := len(r.ASPathRaw); n > 0 {
 		last := r.ASPathRaw[n-1]
-		if last.Type != ASSegmentSequence || len(last.ASNs) == 0 {
-			return 0
+		switch {
+		case last.Type.IsConfed():
+			if r.ConfedID != 0 {
+				return r.ConfedID, OriginConfedID
+			}
+			return r.LocalASN, OriginConfedMember
+		case last.Type != ASSegmentSequence:
+			return 0, OriginNone
+		case len(last.ASNs) == 0:
+			return 0, OriginFromPath
 		}
-		return last.ASNs[len(last.ASNs)-1]
+		return last.ASNs[len(last.ASNs)-1], OriginFromPath
 	}
 	if len(r.ASPath) == 0 {
-		return 0
+		if r.ConfedID != 0 {
+			return r.ConfedID, OriginLocalConfedID
+		}
+		return r.LocalASN, OriginLocalAS
 	}
-	return r.ASPath[len(r.ASPath)-1]
+	return r.ASPath[len(r.ASPath)-1], OriginFromPath
+}
+
+// OriginASN returns the route's origin AS (see OriginAS), 0 if it is NONE
+// or not known.
+func (r *Route) OriginASN() uint32 {
+	asn, _ := r.OriginAS()
+	return asn
 }
 
 // OriginIsNone reports whether the route's origin is RFC 6811's NONE: the

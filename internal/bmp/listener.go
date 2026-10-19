@@ -30,9 +30,19 @@ type Listener struct {
 	ingestCh chan<- types.IngestEvent
 	peerMu   sync.RWMutex
 	peers    map[PeerKey]*Peer
-	routerMu sync.RWMutex
-	routers  map[netip.Addr]routerInfo
-	listener net.Listener
+	// peersGen counts changes to peers that confedIDs depend on (Peer Up,
+	// Peer Down, session cleanup); confedIDs caches, per router instance,
+	// the confederation identifier inferred from its peers (see confedID).
+	// An entry from an older generation is stale. confedMembers records,
+	// per instance, the member AS of the sessions it has sent routes with
+	// confederation segments on: proof it is in a confederation. All are
+	// guarded by peerMu.
+	peersGen      uint64
+	confedIDs     map[instanceKey]confedIDEntry
+	confedMembers map[instanceKey]uint32
+	routerMu      sync.RWMutex
+	routers       map[netip.Addr]routerInfo
+	listener      net.Listener
 
 	// allowed lists the source prefixes BMP connections are accepted from
 	// (IPv4 sources in plain form); empty accepts any.
@@ -99,13 +109,15 @@ func (s *bmpSession) isRetired() bool {
 // If tlsCfg is non-nil, the listener accepts TLS connections; otherwise plain TCP.
 func NewListener(addr string, tlsCfg *tls.Config, ingestCh chan<- types.IngestEvent, log *slog.Logger) *Listener {
 	return &Listener{
-		addr:     addr,
-		tlsCfg:   tlsCfg,
-		log:      log.With("subsystem", "bmp"),
-		ingestCh: ingestCh,
-		peers:    make(map[PeerKey]*Peer),
-		routers:  make(map[netip.Addr]routerInfo),
-		sessions: make(map[netip.Addr]*bmpSession),
+		addr:          addr,
+		tlsCfg:        tlsCfg,
+		log:           log.With("subsystem", "bmp"),
+		ingestCh:      ingestCh,
+		peers:         make(map[PeerKey]*Peer),
+		confedIDs:     make(map[instanceKey]confedIDEntry),
+		confedMembers: make(map[instanceKey]uint32),
+		routers:       make(map[netip.Addr]routerInfo),
+		sessions:      make(map[netip.Addr]*bmpSession),
 	}
 }
 
@@ -414,6 +426,17 @@ func (l *Listener) handleSession(ctx context.Context, sess, old *bmpSession) {
 				delete(l.peers, key)
 			}
 		}
+		for inst := range l.confedIDs {
+			if inst.router == sess.router {
+				delete(l.confedIDs, inst)
+			}
+		}
+		for inst := range l.confedMembers {
+			if inst.router == sess.router {
+				delete(l.confedMembers, inst)
+			}
+		}
+		l.peersGen++
 		l.peerMu.Unlock()
 
 		// Clean up router state, unless a newer session owns it now.
@@ -527,6 +550,7 @@ func (l *Listener) processMessage(
 			session:       sess.id,
 			addPath:       pu.AddPath,
 		}
+		l.peersGen++
 		l.peerMu.Unlock()
 		metrics.BMPPeerState.WithLabelValues(sysName, routerAddr.String(), pu.PerPeer.PeerAddr.String(),
 			types.FormatRD(key.Distinguisher)).Set(1)
@@ -558,6 +582,7 @@ func (l *Listener) processMessage(
 			p.State = "down"
 			p.LastMsg = time.Now()
 		}
+		l.peersGen++
 		l.peerMu.Unlock()
 		metrics.BMPPeerState.WithLabelValues(sysName, routerAddr.String(), pd.PerPeer.PeerAddr.String(),
 			types.FormatRD(key.Distinguisher)).Set(0)
@@ -672,7 +697,99 @@ func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]
 	}
 	l.peerMu.RUnlock()
 
-	return decodeRouteMonitoring(rm, routerAddr, localASN, addPath.For(rm.PerPeer.IsAdjRIBOut()))
+	routes, withdrawals, bad := decodeRouteMonitoring(rm, routerAddr, localASN, addPath.For(rm.PerPeer.IsAdjRIBOut()))
+	// The routes of one UPDATE share its AS_PATH. The confederation
+	// identifier is the origin of an empty one or one with confederation
+	// segments (types.Route.OriginAS).
+	if len(routes) == 0 {
+		return routes, withdrawals, bad
+	}
+	confed := routes[0].HasConfedSegment()
+	if !confed && (len(routes[0].ASPathRaw) > 0 || len(routes[0].ASPath) > 0) {
+		return routes, withdrawals, bad
+	}
+	if id := l.confedID(key, localASN, confed); id != 0 {
+		for i := range routes {
+			routes[i].ConfedID = id
+		}
+	}
+	return routes, withdrawals, bad
+}
+
+// instanceKey is one BGP instance (Peer Distinguisher) on a monitored router.
+type instanceKey struct {
+	router        netip.Addr
+	distinguisher uint64
+}
+
+// confedIDEntry is a cached confedID result, for memberAS, as of generation
+// gen of the peers map.
+type confedIDEntry struct {
+	gen      uint64
+	memberAS uint32
+	id       uint32
+}
+
+// confedID returns the confederation identifier of the router instance of
+// peer key, whose session to that peer has memberAS as its local AS; 0 if
+// it cannot be told (inferConfedID). confed says the session just carried
+// confederation segments, which proves the instance is in a confederation
+// as memberAS. Without that proof, now or from an earlier UPDATE, the
+// result is 0: inferConfedID would take a local AS override on a router
+// outside any confederation for an identifier. The result is cached until
+// the instance's peers change.
+func (l *Listener) confedID(key PeerKey, memberAS uint32, confed bool) uint32 {
+	if memberAS == 0 {
+		return 0
+	}
+	inst := instanceKey{router: key.RouterAddr, distinguisher: key.Distinguisher}
+	if !confed {
+		// Most empty AS_PATHs are on routers outside any confederation:
+		// tell that under the read lock.
+		l.peerMu.RLock()
+		member := l.confedMembers[inst]
+		l.peerMu.RUnlock()
+		if member != memberAS {
+			return 0
+		}
+	}
+	l.peerMu.Lock()
+	defer l.peerMu.Unlock()
+	if confed {
+		l.confedMembers[inst] = memberAS
+	} else if l.confedMembers[inst] != memberAS {
+		return 0
+	}
+	if e, ok := l.confedIDs[inst]; ok && e.gen == l.peersGen && e.memberAS == memberAS {
+		return e.id
+	}
+	id := inferConfedID(l.peers, inst, memberAS)
+	l.confedIDs[inst] = confedIDEntry{gen: l.peersGen, memberAS: memberAS, id: id}
+	return id
+}
+
+// inferConfedID infers, from the OPENs a router instance sent its peers,
+// the instance's AS confederation identifier, given that it is in a
+// confederation as member AS memberAS. Inside the confederation a router's
+// OPENs carry its member AS; to a peer outside it, the confederation
+// identifier (RFC 5065). So if the local ASes of the instance's up eBGP
+// sessions (peer AS other than local AS) take exactly one value other than
+// memberAS, that is the identifier. None (a router with no session leaving
+// the confederation) or more than one (local AS overrides on some sessions)
+// gives 0: unknown.
+func inferConfedID(peers map[PeerKey]*Peer, inst instanceKey, memberAS uint32) uint32 {
+	var id uint32
+	for key, p := range peers {
+		if key.RouterAddr != inst.router || key.Distinguisher != inst.distinguisher || p.State != "up" ||
+			p.LocalASN == 0 || p.LocalASN == memberAS || p.ASN == p.LocalASN {
+			continue
+		}
+		if id != 0 && id != p.LocalASN {
+			return 0
+		}
+		id = p.LocalASN
+	}
+	return id
 }
 
 // BGP message type UPDATE.

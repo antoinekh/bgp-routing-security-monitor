@@ -36,9 +36,20 @@ All notable changes to RAVEN are recorded here.
   `malformed_input` in `/api/v1/peers` and `raven peers` until its next
   Peer Up; the BMP session stays up. Such routes used to be stored with
   partial attributes, and a truncated AS_PATH gave a false ROV origin.
-- ROV takes no origin from confederation segments (RFC 6811 §2): a route
-  whose AS_PATH ends in AS_CONFED_SEQUENCE/AS_CONFED_SET is NotFound with a
-  reason; it used to be checked against a confederation member AS. ASPA
+- ROV takes no origin from confederation member ASes in the AS_PATH; it
+  used to check a route against the last one. Per RFC 6811 §2, a route
+  whose AS_PATH is empty or ends in AS_CONFED_SEQUENCE/AS_CONFED_SET has the
+  monitored router's own AS as origin and is validated normally: inside a
+  confederation, the confederation identifier when RAVEN can infer it (the
+  single other local AS the router uses towards external peers; for an
+  empty path, only once a route with confederation segments has shown the
+  router is in one), since its ROAs are registered under that AS; else the
+  local AS from Peer Up's Sent OPEN (the member AS in a confederation),
+  which the reason says. `origin_asn` shows that AS. With no local AS known the route
+  is NotFound ("origin unknown: local AS not known"). Such routes used to
+  get origin 0 and NotFound, the confederation reason wrongly citing §2.
+  ASPA still does not verify an empty AS_PATH (Unknown), now with a reason.
+  ASPA
   does not verify routes with confederation segments (Unverifiable, with
   the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
   used to be treated as hops.
