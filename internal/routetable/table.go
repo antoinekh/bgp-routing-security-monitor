@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"github.com/gaissmai/bart"
@@ -27,6 +28,11 @@ type Table struct {
 	// it, so it stays short and a linear scan is cheap; a map per prefix
 	// would roughly triple the index's memory when most prefixes have a
 	// single route.
+	//
+	// A withdrawal shortens a list in place, and an insert may append into
+	// its spare capacity, so a list must not be read once prefixMu is
+	// released: readers copy what they need under the lock. Copying on
+	// removal instead would put an allocation on every withdrawal.
 	prefixMu  sync.RWMutex
 	prefixIdx bart.Table[[]types.RouteKey]
 
@@ -658,7 +664,8 @@ func (t *Table) GetByPrefix(prefix netip.Prefix) []*types.Route {
 // GetByPrefixIn returns the routes of one RIB to exactly prefix.
 func (t *Table) GetByPrefixIn(prefix netip.Prefix, rib types.RIBType) []*types.Route {
 	t.prefixMu.RLock()
-	keys, _ := t.prefixIdx.Get(prefix)
+	idx, _ := t.prefixIdx.Get(prefix)
+	keys := slices.Clone(idx) // the list is changed in place; see prefixMu
 	t.prefixMu.RUnlock()
 	return t.resolveKeys(keys, rib)
 }
