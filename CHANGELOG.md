@@ -20,8 +20,13 @@ All notable changes to RAVEN are recorded here.
   Adj-RIB-In pre-policy only, unlabelled; a query without a `rib` matcher
   now adds up RIBs, counting a route once per RIB it is reported in. Add
   `rib="adj-rib-in-pre"` to keep the old values (`lab/grafana-dashboard.json`
-  does). Adj-RIB-Out stays in `raven_adj_rib_out_routes_total`;
-  `raven_route_table_size` is unchanged (Adj-RIB-In pre-policy). The OTel
+  does). Adj-RIB-Out stays in `raven_adj_rib_out_routes_total`.
+  `raven_route_table_size` gains the same `rib` label, every series created
+  at 0; it counted Adj-RIB-In pre-policy only, so a router sending only its
+  Loc-RIB showed 0 routes. Use `rib="adj-rib-in-pre"` for the old value, or
+  `sum(raven_route_table_size{rib=~"adj-rib-in-pre|loc-rib"})` for the
+  default view, as `lab/grafana-dashboard.json`'s Total Routes panel now
+  does. The OTel
   `raven.routes.total` gets the same `rib` attribute, and the OTel
   `StateReader` method `RouteCountsByPosture` becomes `RouteCounts`.
 - Route queries default to the default view, Adj-RIB-In pre-policy **and**
@@ -84,9 +89,20 @@ All notable changes to RAVEN are recorded here.
   `malformed_input` in `/api/v1/peers` and `raven peers` until its next
   Peer Up; the BMP session stays up. Such routes used to be stored with
   partial attributes, and a truncated AS_PATH gave a false ROV origin.
-- ROV takes no origin from confederation segments (RFC 6811 §2): a route
-  whose AS_PATH ends in AS_CONFED_SEQUENCE/AS_CONFED_SET is NotFound with a
-  reason; it used to be checked against a confederation member AS. ASPA
+- ROV takes no origin from confederation member ASes in the AS_PATH; it
+  used to check a route against the last one. Per RFC 6811 §2, a route
+  whose AS_PATH is empty or ends in AS_CONFED_SEQUENCE/AS_CONFED_SET has the
+  monitored router's own AS as origin and is validated normally: inside a
+  confederation, the confederation identifier when RAVEN can infer it (the
+  single other local AS the router uses towards external peers; for an
+  empty path, only once a route with confederation segments has shown the
+  router is in one), since its ROAs are registered under that AS; else the
+  local AS from Peer Up's Sent OPEN (the member AS in a confederation),
+  which the reason says. `origin_asn` shows that AS. With no local AS known the route
+  is NotFound ("origin unknown: local AS not known"). Such routes used to
+  get origin 0 and NotFound, the confederation reason wrongly citing §2.
+  ASPA still does not verify an empty AS_PATH (Unknown), now with a reason.
+  ASPA
   does not verify routes with confederation segments (Unverifiable, with
   the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
   used to be treated as hops.
@@ -162,7 +178,11 @@ All notable changes to RAVEN are recorded here.
   flag of a Loc-RIB header is its F (filtered) flag, not V: a filtered
   Loc-RIB was read as an IPv6 peer; no other Adj-RIB flag (L, A, O) applies
   to it. The router's own AS is the Loc-RIB header's Peer AS, with or
-  without a Peer Up. A Loc-RIB instance that sends routes or withdrawals
+  without a Peer Up, and after a restart from a snapshot; it is the RFC
+  6811 §2 origin of an empty Loc-RIB AS_PATH and of one holding only that
+  AS (a locally originated route as FRR 10.2 sends it, its own AS first),
+  or the confederation identifier when known, in ROV, `origin_asn` and the
+  origin index alike. A Loc-RIB instance that sends routes or withdrawals
   without a Peer Up (FRR 10.2), or after its Peer Down, is registered as a
   peer; an End-of-RIB alone does not register it. A Loc-RIB Peer Down
   clears that Loc-RIB only, and a BGP peer's Peer Down its Adj-RIBs only.
@@ -186,7 +206,8 @@ All notable changes to RAVEN are recorded here.
   expected neighbor AS from its path (after any leading copy of the
   router's own AS), and never take a Loc-RIB instance for a BGP neighbor.
 - `lab/loc-rib/`: a Containerlab lab that checks Loc-RIB monitoring live
-  (`lab/loc-rib/run.sh all`, needs root).
+  (`lab/loc-rib/run.sh all`, needs root), including a prefix rr1 originates
+  itself, Valid under a ROA for its own AS.
 - `proto/raven/v1/raven.proto`: `rib`, `peer_type` and `peer_distinguisher`
   on routes, `peer_type`, `peer_distinguisher` and `table_name` on peers,
   the default view and per-RIB counts in the route table stats, `rib` in

@@ -352,3 +352,53 @@ func TestVRFLocRIBsKeptApart(t *testing.T) {
 		t.Errorf("peers' tables %v, want global and red", tables)
 	}
 }
+
+// A Loc-RIB route's local AS is its header's Peer AS (RFC 9069 §4.1), with
+// no Peer Up, and is the RFC 6811 origin of an empty AS_PATH and of one
+// holding only that AS, as FRR 10.2 sends a locally originated route. Inside
+// a confederation such a path, like an empty one, has the confederation
+// identifier as origin.
+func TestLocRIBOriginLocalAS(t *testing.T) {
+	h := newSessionHarness(t, make(chan types.IngestEvent, 64))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client, _ := h.connect(ctx, t)
+
+	update := func(segs ...types.ASSegment) []byte {
+		return rawUpdate(nil, cat(attrOriginIGP, asPathAttr(attrASPath, 4, segs...), attrNH), nlri1111...)
+	}
+	check := func(what string, wantOrigin uint32, wantSrc types.OriginSource) {
+		t.Helper()
+		r := h.nextRoute(t)
+		if got, src := r.OriginAS(); r.RIBType != types.LocRIB || r.LocalASN != 65001 || got != wantOrigin || src != wantSrc {
+			t.Errorf("%s: %s route, LocalASN %d, origin AS%d (source %d); want loc-rib, 65001, AS%d (source %d)",
+				what, r.RIBType, r.LocalASN, got, src, wantOrigin, wantSrc)
+		}
+	}
+
+	send(t, client,
+		locRIBRouteMonitoring(0, 0, 65001, emptyPathUpdate),
+		locRIBRouteMonitoring(0, 0, 65001, update(seq(65001))),
+		locRIBRouteMonitoring(0, 0, 65001, update(seq(65001, 65001))),
+		locRIBRouteMonitoring(0, 0, 65001, update(seq(65001, 64510, 64500))),
+	)
+	check("empty path", 65001, types.OriginLocalAS)
+	check("[local AS]", 65001, types.OriginLocalAS)
+	check("[local AS, prepended]", 65001, types.OriginLocalAS)
+	check("leading local AS", 64500, types.OriginFromPath)
+
+	// The router turns out to be confederation member AS65001 of AS64500.
+	inside, outside := netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2")
+	send(t, client,
+		peerUpWithOpens(inside, 0, openMsg(65001), openMsg(65002)),
+		peerUpWithOpens(outside, 0, openMsg(64500), openMsg(64999)),
+		routeMonitoringRD(inside, 0, update(confed(65002))),
+		locRIBRouteMonitoring(0, 0, 65001, update(seq(65001))),
+		locRIBRouteMonitoring(0, 0, 65001, emptyPathUpdate),
+	)
+	if r := h.nextRoute(t); r.ConfedID != 64500 {
+		t.Fatalf("confederation route: ConfedID %d, want 64500", r.ConfedID)
+	}
+	check("[local AS] inside the confederation", 64500, types.OriginLocalConfedID)
+	check("empty path inside the confederation", 64500, types.OriginLocalConfedID)
+}

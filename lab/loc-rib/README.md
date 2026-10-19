@@ -17,10 +17,10 @@ A small Containerlab topology that checks BMP Loc-RIB monitoring (RFC 9069) live
 |------|------|
 | `ext1` | Announces `203.0.113.0/24`, `198.51.100.0/24`, `192.0.2.0/24` and `10.99.0.0/24` |
 | `ext2` | Announces `203.0.113.0/24` with a longer path (`64520 64510`) |
-| `rr1` | Rejects `10.99.0.0/24` on import, exports its Loc-RIB to RAVEN (BMP from `172.31.90.21`) |
+| `rr1` | Rejects `10.99.0.0/24` on import, originates `10.65.0.0/24` itself, exports its Loc-RIB to RAVEN (BMP from `172.31.90.21`) |
 | `rr2` | iBGP to rr1 on `10.0.12.1`, exports the pre-policy Adj-RIB-In of that session to RAVEN (BMP from `172.31.90.22`) |
 | `raven` | The RAVEN binary built from this repository |
-| `rtr` | StayRTR with three ROAs: `203.0.113.0/24` valid, `198.51.100.0/24` invalid, `192.0.2.0/24` not found |
+| `rtr` | StayRTR with four ROAs: `203.0.113.0/24` valid, `198.51.100.0/24` invalid, `192.0.2.0/24` not found; `10.65.0.0/24` for AS65000, rr1's own prefix |
 
 RAVEN keys a route by its router (the BMP session's source address), the peer's distinguisher and address, the path ID and the RIB. A Loc-RIB has the zero peer address (RFC 9069), so rr1's Loc-RIB is the peer `0.0.0.0` (type `loc-rib`) on router `172.31.90.21`, and rr2's view of rr1 is the peer `10.0.12.1` (type `global`) on router `172.31.90.22`. rr1's router-id `10.0.12.1` is also the address rr2 peers with; the two views stay apart.
 
@@ -56,7 +56,7 @@ Without `rib`, route queries (`/api/v1/routes`, `/api/v1/watch`, `raven routes`,
 | Step | Expected |
 |------|----------|
 | Preflight | rr1 has its BMP target, rr2 its target and an active session to rr1 (else: `./run.sh reset`) |
-| Initial state | rr1's Loc-RIB (`loc-rib 0.0.0.0`) has its 3 routes, and any other rr1 peer (FRR 10.7.1 sends their Peer Up) has none; rr2 has one peer, `global 10.0.12.1`. The Loc-RIB holds one route per prefix, without the prefix rr1 rejects. rr2's pre-policy routes are stored apart. The default view lists both; `raven status` names its RIBs |
+| Initial state | rr1's Loc-RIB (`loc-rib 0.0.0.0`) has its 4 routes, and any other rr1 peer (FRR 10.7.1 sends their Peer Up) has none; rr2 has one peer, `global 10.0.12.1`. The Loc-RIB holds one route per prefix, without the prefix rr1 rejects. rr2's pre-policy routes are stored apart. The default view lists both; `raven status` names its RIBs. rr1's own `10.65.0.0/24` is Valid with origin AS65000: the origin of a locally originated route is the router's own AS (RFC 6811 §2), for a Loc-RIB route the Loc-RIB header's Peer AS. The other checks leave that prefix out; its AS_PATH is not checked |
 | ext1 withdraws two prefixes | The Loc-RIB drops `192.0.2.0/24`, and `203.0.113.0/24` moves to the ext2 path |
 | rr2 shuts its session to rr1 | rr2's pre-policy routes are withdrawn, rr1's Loc-RIB routes stay |
 | rr1 removes its BMP target | rr1's Loc-RIB routes are withdrawn and its `raven_bmp_peer_state` goes to 0; rr2's pre-policy routes stay. The target is put back and checked in rr1's running-config; rr1 reconnects and both come back |
@@ -76,7 +76,7 @@ rr1 runs `quay.io/frrouting/frr:10.7.1`. The checks depend on how FRR's BMP code
 
 ### Other routers
 
-- rr2, ext1 and ext2 run FRR 10.2.5. FRR 10.2.5 as a Loc-RIB exporter sends no Loc-RIB Peer Up, puts its own AS first in the Loc-RIB AS_PATH, and sends no Loc-RIB message after a best path change. RAVEN registers a Loc-RIB from its first Route Monitoring message with routes or withdrawals, logs it at INFO (`BMP Loc-RIB registered`, `peer_up=false`), and removes a leading copy of the router's own AS before ASPA verification.
+- rr2, ext1 and ext2 run FRR 10.2.5. FRR 10.2.5 as a Loc-RIB exporter sends no Loc-RIB Peer Up, puts its own AS first in the Loc-RIB AS_PATH, and sends no Loc-RIB message after a best path change. RAVEN registers a Loc-RIB from its first Route Monitoring message with routes or withdrawals, logs it at INFO (`BMP Loc-RIB registered`, `peer_up=false`), and removes a leading copy of the router's own AS before ASPA verification. A Loc-RIB AS_PATH of only the router's own AS, a locally originated route as FRR 10.2.5 sends it, has that AS as RFC 6811 origin, as an empty one does.
 - rr2 needs `soft-reconfiguration inbound`: without it, FRR sends only End-of-RIB markers to a new BMP session in pre-policy mode.
 
 ### RTR and ASPA

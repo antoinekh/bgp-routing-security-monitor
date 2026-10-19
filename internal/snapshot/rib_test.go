@@ -37,6 +37,18 @@ func TestSnapshotRIBs(t *testing.T) {
 				rt.RIBType, rt.PeerType, rt.PeerDistinguisher, rt.PeerAddr,
 				routes[i].RIBType, routes[i].PeerType, routes[i].PeerDistinguisher, routes[i].PeerAddr)
 		}
+		// A Loc-RIB route's Peer AS is the router's own AS, the origin of
+		// an empty AS_PATH; no other RIB's local AS is in the snapshot.
+		want := uint32(0)
+		if rt.RIBType == types.LocRIB {
+			want = routes[i].PeerASN
+		}
+		if rt.LocalASN != want {
+			t.Errorf("route %d (%s): LocalASN %d, want %d", i, rt.RIBType, rt.LocalASN, want)
+		}
+	}
+	if routes[types.LocRIB].PeerASN == 0 {
+		t.Fatal("syntheticRoute has no peer AS: the Loc-RIB LocalASN check proves nothing")
 	}
 
 	path := filepath.Join(dir, "routes.snap")

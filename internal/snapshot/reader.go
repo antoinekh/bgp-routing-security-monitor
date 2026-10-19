@@ -147,6 +147,13 @@ func recordToRoute(rec snapshotv1.RouteRecord) (*types.Route, error) {
 	}
 	rovState := parseROVState(rec.ROVState)
 	aspaState := parseASPAState(rec.ASPAState)
+	// A Loc-RIB route's Peer AS is the router's own AS (RFC 9069 §4.1),
+	// the origin of an empty AS_PATH (types.Route.OriginAS); revalidation
+	// would otherwise find it not known.
+	var localASN uint32
+	if rib == types.LocRIB {
+		localASN = rec.PeerASN
+	}
 
 	return &types.Route{
 		Prefix:            prefix,
@@ -156,6 +163,7 @@ func recordToRoute(rec snapshotv1.RouteRecord) (*types.Route, error) {
 		PathID:            rec.PathID,
 		PeerAddr:          peerAddr,
 		PeerASN:           rec.PeerASN,
+		LocalASN:          localASN,
 		RouterID:          routerID,
 		ASPath:            rec.ASPath,
 		NextHop:           nextHop,

@@ -116,8 +116,8 @@ func TestPeerDownRemovesPeerRoutes(t *testing.T) {
 	drain(t, s)
 
 	s.updateRouteMetrics()
-	if got := gaugeValue(t, "raven_route_table_size", nil); got != n+1 {
-		t.Fatalf("raven_route_table_size = %v before peer down, want %d", got, n+1)
+	if got := gaugeValue(t, "raven_route_table_size", map[string]string{"rib": "adj-rib-in-pre"}); got != n+1 {
+		t.Fatalf("raven_route_table_size{rib=adj-rib-in-pre} = %v before peer down, want %d", got, n+1)
 	}
 	originOnly := map[string]string{"posture": "origin-only", "afi": "ipv4", "rib": "adj-rib-in-pre"}
 	originInvalid := map[string]string{"posture": "origin-invalid", "afi": "ipv4", "rib": "adj-rib-in-pre"}
@@ -135,8 +135,8 @@ func TestPeerDownRemovesPeerRoutes(t *testing.T) {
 		t.Errorf("table count after peer down = %d, want 1 (the other peer's route)", got)
 	}
 	s.updateRouteMetrics()
-	if got := gaugeValue(t, "raven_route_table_size", nil); got != 1 {
-		t.Errorf("raven_route_table_size = %v after peer down, want 1", got)
+	if got := gaugeValue(t, "raven_route_table_size", map[string]string{"rib": "adj-rib-in-pre"}); got != 1 {
+		t.Errorf("raven_route_table_size{rib=adj-rib-in-pre} = %v after peer down, want 1", got)
 	}
 	if got := gaugeValue(t, "raven_routes_total", originOnly); got != 0 {
 		t.Errorf("raven_routes_total{origin-only} = %v after peer down, want 0", got)

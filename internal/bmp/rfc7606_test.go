@@ -466,7 +466,7 @@ func TestRFC7606StrongestActionWins(t *testing.T) {
 
 // RFC 5065 confederation segments are parsed and kept: a route from a peer
 // inside the router's confederation is well-formed. Its origin AS comes
-// from the final AS_SEQUENCE (RFC 6811 §2), never a member AS.
+// from the final AS_SEQUENCE (RFC 6811 §2), never a member AS in the path.
 func TestDecodeConfederationPath(t *testing.T) {
 	path := asPathAttr(attrASPath, 4, confed(65001, 65002), seq(64500, 13335))
 	rs, _, m := decode7606(rawUpdate(nil, cat(attrOriginIGP, path, attrNH), nlri1111...), 0)
@@ -476,12 +476,13 @@ func TestDecodeConfederationPath(t *testing.T) {
 	if len(rs[0].ASPathRaw) != 2 || rs[0].ASPathRaw[0].Type != types.ASSegmentConfedSequence || rs[0].OriginASN() != 13335 {
 		t.Errorf("segments %+v origin AS%d, want a confederation segment kept and origin AS13335", rs[0].ASPathRaw, rs[0].OriginASN())
 	}
-	// Only confederation segments: originated inside the confederation, no
-	// origin AS RAVEN can name.
+	// Only confederation segments: originated inside the confederation, so
+	// the origin is the router's own AS (RFC 6811 §2), here the session's
+	// local AS64500 with no confederation identifier known.
 	path = asPathAttr(attrASPath, 4, confed(65001, 65002))
 	rs, _, _ = decode7606(rawUpdate(nil, cat(attrOriginIGP, path, attrNH), nlri1111...), 0)
-	if len(rs) != 1 || rs[0].OriginASN() != 0 {
-		t.Errorf("confederation-only path: routes %+v, want origin 0 (not AS65002)", rs)
+	if len(rs) != 1 || rs[0].OriginASN() != 64500 {
+		t.Errorf("confederation-only path: routes %+v, want origin AS64500, the local AS (not AS65002)", rs)
 	}
 }
 

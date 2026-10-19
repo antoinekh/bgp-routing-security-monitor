@@ -14,6 +14,8 @@ RR1="172.31.90.21"
 RR2="172.31.90.22"
 # rr1's router-id, and the address rr2 peers with.
 RR1_ID="10.0.12.1"
+# The prefix rr1 originates itself, under a ROA for its own AS65000.
+LOCAL_PREFIX="10.65.0.0/24"
 TIMEOUT="${TIMEOUT:-60}"
 # rr1's BMP target, exactly as FRR shows it in its running-config (the
 # commands are the same; the block is entered under "router bgp 65000").
@@ -168,12 +170,23 @@ api() {
 }
 
 # routes <router> [rib]: a router's routes as "prefix as_path posture" lines,
-# sorted. Without rib, the API's default view (adj-rib-in-pre and loc-rib).
+# sorted, without rr1's own LOCAL_PREFIX (local_route checks it). Without rib,
+# the API's default view (adj-rib-in-pre and loc-rib). An empty AS_PATH is
+# null in the API.
 routes() {
   local router=$1 rib=${2:-}
   local q="router=$router"
   [[ -n $rib ]] && q+="&rib=$rib"
-  api "routes?$q" | jq -r '.[] | "\(.prefix) \(.as_path | map(tostring) | join(",")) \(.posture)"' | sort
+  api "routes?$q" | jq -r --arg local "$LOCAL_PREFIX" '.[] | select(.prefix != $local) |
+    "\(.prefix) \(.as_path // [] | map(tostring) | join(",")) \(.posture)"' | sort
+}
+
+# local_route: LOCAL_PREFIX in rr1's Loc-RIB, as "prefix rov origin posture"
+# and the ROV reason. Its AS_PATH is not shown: an empty one, or one of just
+# rr1's AS (FRR 10.2 puts its own AS first), both give rr1's AS as origin.
+local_route() {
+  api "routes?router=$RR1&rib=loc-rib&prefix=$LOCAL_PREFIX" |
+    jq -r '.[] | "\(.prefix) rov=\(.rov) origin=\(.origin_asn) \(.posture)", .rov_reason'
 }
 
 # default_view <prefix>: the RIB and router of each route to prefix that the
@@ -273,7 +286,7 @@ cmd_test() {
   trap 'exit 130' INT TERM
 
   step "Preflight: the routers have their initial config"
-  if ! config_has rr1 present "${RR1_BMP[@]}" ||
+  if ! config_has rr1 present "${RR1_BMP[@]}" "network $LOCAL_PREFIX" ||
     ! config_has rr2 present "bmp targets raven" "neighbor $RR1_ID remote-as 65000" ||
     ! config_has rr2 absent "neighbor $RR1_ID shutdown"; then
     fail "the lab is not in its initial state" "hint: $(basename "$0") reset"
@@ -283,7 +296,7 @@ cmd_test() {
 
   step "Initial state"
   expect "rr1's Loc-RIB has its routes; rr1's other peers (FRR 10.7.1 sends their Peer Up) have none" \
-    "loc-rib 0.0.0.0 routes=3
+    "loc-rib 0.0.0.0 routes=4
 other peers with routes: 0" "$HINT_RR1_BMP" rr1_peers || failed=1
   expect "rr2 has one peer, rr1 at $RR1_ID" "global $RR1_ID" "$HINT_RR2" peers "$RR2" || failed=1
   expect "Loc-RIB: one best route per prefix, 10.99.0.0/24 rejected by rr1's import policy" \
@@ -299,6 +312,8 @@ loc-rib $RR1" "$HINT_RR1_BMP" default_view 198.51.100.0/24 || failed=1
   expect "raven status names the RIBs of its default view" \
     "routes in the default view (adj-rib-in-pre + loc-rib)" "docker logs clab-loc-rib-raven" status_header || failed=1
   expect "raven_bmp_peer_state of rr1's Loc-RIB is 1" "1" "curl -s $METRICS | grep raven_bmp_peer_state" loc_rib_state || failed=1
+  expect "Loc-RIB: rr1's own $LOCAL_PREFIX is Valid, origin rr1's AS65000 (the Loc-RIB Peer AS)"     "$LOCAL_PREFIX rov=Valid origin=65000 origin-only
+matches VRP {$LOCAL_PREFIX, AS65000, /24}; origin is the router's own AS: empty AS_PATH (RFC 6811 §2)"     "docker exec clab-loc-rib-rr1 vtysh -c 'show bgp ipv4 unicast $LOCAL_PREFIX'; docker exec clab-loc-rib-rtr cat /vrps.json"     local_route || failed=1
 
   step "ext1 withdraws 192.0.2.0/24 and 203.0.113.0/24"
   DIRTY_EXT1=1

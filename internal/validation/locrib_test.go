@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
@@ -157,6 +158,51 @@ func TestWithoutLeadingAS(t *testing.T) {
 			}
 			if !slices.Equal(r.ASPath, before) {
 				t.Errorf("the route itself changed: %v, was %v", r.ASPath, before)
+			}
+		})
+	}
+}
+
+// A locally originated Loc-RIB route, sent as [local AS] (FRR 10.2) or with
+// an empty AS_PATH, has the router's own AS, the Loc-RIB header's Peer AS, as
+// origin (RFC 6811 §2): Valid under a ROA for it, with the reason saying
+// where the origin came from, and Invalid under a ROA for another AS. Its
+// ASPA is Unknown, as for any empty path.
+func TestLocRIBLocallyOriginatedROV(t *testing.T) {
+	vrps := store.NewVRPStore()
+	vrps.ReplaceAll([]types.VRP{
+		{Prefix: netip.MustParsePrefix("203.0.113.0/24"), ASN: locL, MaxLength: 24},
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), ASN: locO, MaxLength: 24},
+	}, 1, 1)
+	e := NewEngine(vrps, store.NewASPAStore(), aspa.NewSelector("upstream", nil), routetable.New(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const note = "origin is the router's own AS: empty AS_PATH (RFC 6811 §2)"
+	for _, tc := range []struct {
+		name   string
+		path   []uint32
+		prefix string
+		state  types.ROVState
+	}{
+		{"[local AS], ROA for it", []uint32{locL}, "203.0.113.0/24", types.ROVValid},
+		{"[local AS] prepended, ROA for it", []uint32{locL, locL}, "203.0.113.0/24", types.ROVValid},
+		{"empty, ROA for it", nil, "203.0.113.0/24", types.ROVValid},
+		{"[local AS], ROA for another AS", []uint32{locL}, "198.51.100.0/24", types.ROVInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := locRIBTestRoute(tc.path...)
+			if tc.path == nil {
+				r.ASPathRaw = nil
+			}
+			r.Prefix = netip.MustParsePrefix(tc.prefix)
+			e.ValidateRoute(r)
+			if r.ROV.State != tc.state || !strings.HasSuffix(r.ROV.Reason, note) {
+				t.Errorf("ROV %s (%q), want %s with a reason ending %q", r.ROV.State, r.ROV.Reason, tc.state, note)
+			}
+			if r.OriginASN() != locL {
+				t.Errorf("origin AS%d, want the local AS%d", r.OriginASN(), locL)
+			}
+			if r.ASPA.State != types.ASPAUnknown || r.ASPA.Reason != aspa.EmptyPathReason {
+				t.Errorf("ASPA %s (%q), want Unknown (%q)", r.ASPA.State, r.ASPA.Reason, aspa.EmptyPathReason)
 			}
 		})
 	}

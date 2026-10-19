@@ -170,9 +170,9 @@ func gaugeExists(t *testing.T, name string, labels map[string]string) bool {
 	return false
 }
 
-// raven_routes_total counts adj-rib-in-pre, adj-rib-in-post and loc-rib apart
-// under a rib label, every rib/posture/afi set existing at 0; Adj-RIB-Out
-// routes stay in their own gauge.
+// raven_routes_total and raven_route_table_size count adj-rib-in-pre,
+// adj-rib-in-post and loc-rib apart under a rib label, every label set
+// existing at 0; Adj-RIB-Out routes stay in their own gauge.
 func TestRoutesTotalRIBLabel(t *testing.T) {
 	for _, rib := range metrics.RouteRIBs {
 		for _, posture := range metrics.Postures {
@@ -181,6 +181,9 @@ func TestRoutesTotalRIBLabel(t *testing.T) {
 					t.Errorf("raven_routes_total{posture=%q,afi=%q,rib=%q} not created at 0", posture, afi, rib)
 				}
 			}
+		}
+		if !gaugeExists(t, "raven_route_table_size", map[string]string{"rib": rib}) {
+			t.Errorf("raven_route_table_size{rib=%q} not created at 0", rib)
 		}
 	}
 	var names []string
@@ -214,8 +217,16 @@ func TestRoutesTotalRIBLabel(t *testing.T) {
 	if got := gaugeValue(t, "raven_adj_rib_out_routes_total", map[string]string{"posture": "unverified", "afi": "ipv4"}); got != 1 {
 		t.Errorf("raven_adj_rib_out_routes_total = %v, want 1", got)
 	}
-	if got := gaugeValue(t, "raven_route_table_size", nil); got != 1 {
-		t.Errorf("raven_route_table_size = %v, want 1 (Adj-RIB-In pre-policy, unchanged)", got)
+	for rib, want := range map[string]float64{"loc-rib": 2, "adj-rib-in-pre": 1, "adj-rib-in-post": 1} {
+		if got := gaugeValue(t, "raven_route_table_size", map[string]string{"rib": rib}); got != want {
+			t.Errorf("raven_route_table_size{rib=%q} = %v, want %v", rib, got, want)
+		}
+	}
+	if gaugeExists(t, "raven_route_table_size", map[string]string{"rib": "adj-rib-out-pre"}) {
+		t.Error("raven_route_table_size has an adj-rib-out-pre series")
+	}
+	if gaugeExists(t, "raven_route_table_size", nil) {
+		t.Error("raven_route_table_size has an unlabelled series")
 	}
 
 	// The OTel view of the same counts.

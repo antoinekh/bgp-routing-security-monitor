@@ -215,7 +215,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "raven_route_table_size",
+          "expr": "sum(raven_route_table_size{rib=~\"adj-rib-in-pre|loc-rib\"})",
           "legendFormat": "Routes",
           "refId": "A"
         }

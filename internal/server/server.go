@@ -923,21 +923,21 @@ func (s *Server) routeCounts() map[routeCountKey]int64 {
 // their last value.
 func (s *Server) updateRouteMetrics() {
 	counts := s.routeCounts()
-	var pre int64
+	var size types.RIBCounts
 	for _, posture := range metrics.Postures {
 		for _, afi := range metrics.AFIs {
 			for _, rib := range metricRIBs {
 				n := counts[routeCountKey{rib, posture, afi}]
 				metrics.RoutesTotal.WithLabelValues(posture, afi, rib.String()).Set(float64(n))
-				if rib == types.AdjRIBInPre {
-					pre += n
-				}
+				size[rib] += uint64(n)
 			}
 			metrics.AdjRIBOutRoutesTotal.WithLabelValues(posture, afi).Set(
 				float64(counts[routeCountKey{types.AdjRIBOutPre, posture, afi}]))
 		}
 	}
-	metrics.RouteTableSize.Set(float64(pre))
+	for _, rib := range metricRIBs {
+		metrics.RouteTableSize.WithLabelValues(rib.String()).Set(float64(size[rib]))
+	}
 }
 
 // restoreSnapshots warm-starts the route table and the RPKI stores from the

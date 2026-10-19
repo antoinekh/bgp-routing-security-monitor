@@ -151,11 +151,13 @@ var (
 		Help: "Number of Adj-RIB-Out pre-policy routes by security posture and address family.",
 	}, []string{"posture", "afi"})
 
-	// Total pre-policy routes in the route table.
-	RouteTableSize = promauto.NewGauge(prometheus.GaugeOpts{
+	// Routes in the route table by RIB, the RIBs raven_routes_total counts,
+	// each apart: sum over the RIBs of the default view (adj-rib-in-pre and
+	// loc-rib) for what route queries return. Label: rib (RouteRIBs).
+	RouteTableSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_route_table_size",
-		Help: "Total number of pre-policy routes in the route table.",
-	})
+		Help: "Number of routes in the route table by RIB (adj-rib-in-pre, adj-rib-in-post, loc-rib).",
+	}, []string{"rib"})
 
 	// External global-visibility correlations. Labels: source (e.g.
 	// "ripestat"), result (match, divergent, local_only, inconclusive).
@@ -205,7 +207,8 @@ var (
 // the package loads, so a scrape shows 0 rather than nothing before the first
 // increment and an alert can tell "none yet" from "not exported".
 var (
-	// RouteRIBs are the rib label values of raven_routes_total.
+	// RouteRIBs are the rib label values of raven_routes_total and
+	// raven_route_table_size.
 	RouteRIBs = []string{"adj-rib-in-pre", "adj-rib-in-post", "loc-rib"}
 	// Postures and AFIs are the posture and afi label values of
 	// raven_routes_total and raven_adj_rib_out_routes_total.
@@ -283,6 +286,9 @@ func init() {
 		for _, result := range []string{RevalidationResultChecked, RevalidationResultChanged} {
 			RevalidationRoutesTotal.WithLabelValues(mode, result)
 		}
+	}
+	for _, rib := range RouteRIBs {
+		RouteTableSize.WithLabelValues(rib)
 	}
 	for _, posture := range Postures {
 		for _, afi := range AFIs {

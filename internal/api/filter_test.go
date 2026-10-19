@@ -174,6 +174,29 @@ func TestRouteJSONFailingHop(t *testing.T) {
 	}
 }
 
+// origin_asn is the origin ROV validated (RFC 6811 §2): for an empty
+// AS_PATH, or one ending in a confederation segment, the router's own AS,
+// not 0.
+func TestRouteJSONLocalOrigin(t *testing.T) {
+	confed := []types.ASSegment{{Type: types.ASSegmentConfedSequence, ASNs: []uint32{65002}}}
+	for _, tc := range []struct {
+		name  string
+		route types.Route
+		want  uint32
+	}{
+		{"empty AS_PATH", types.Route{LocalASN: 64500}, 64500},
+		{"empty AS_PATH inside a confederation", types.Route{LocalASN: 65001, ConfedID: 64500}, 64500},
+		{"confederation, identifier known", types.Route{ASPath: []uint32{65002}, ASPathRaw: confed, LocalASN: 65001, ConfedID: 64500}, 64500},
+		{"confederation, member AS", types.Route{ASPath: []uint32{65002}, ASPathRaw: confed, LocalASN: 65001}, 65001},
+		{"local AS not known", types.Route{}, 0},
+	} {
+		tc.route.Prefix = netip.MustParsePrefix("198.51.100.0/24")
+		if got := routeToResponse(&tc.route, "").OriginASN; got != tc.want {
+			t.Errorf("%s: origin_asn %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 // The routes listing shows one RIB, Adj-RIB-In pre-policy unless rib names
 // another, with or without other filters. Outbound routes could not be
 // listed at all before.
