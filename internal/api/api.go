@@ -71,6 +71,13 @@ type PeerResponse struct {
 	RoutesByRIB map[string]uint64 `json:"routes_by_rib,omitempty"`
 	UpSince     string            `json:"up_since"`
 	LastMsg     string            `json:"last_msg"`
+	// MalformedInput says an UPDATE from the peer was malformed in a way
+	// RFC 7606 answers with a session reset: RAVEN withdrew what it could
+	// parse and expects the router's Peer Down. MalformedReason is the
+	// raven_bmp_malformed_updates_total reason, MalformedSince when.
+	MalformedInput  bool   `json:"malformed_input,omitempty"`
+	MalformedReason string `json:"malformed_reason,omitempty"`
+	MalformedSince  string `json:"malformed_since,omitempty"`
 }
 
 // StatusResponse is the system health API output.
@@ -233,6 +240,10 @@ func (s *Server) peerResponses() []PeerResponse {
 	counts := s.table.PeerRouteCounts()
 	resp := make([]PeerResponse, 0, len(peers))
 	for _, p := range peers {
+		var malformedSince string
+		if p.MalformedInput {
+			malformedSince = p.MalformedAt.Format(time.RFC3339)
+		}
 		resp = append(resp, PeerResponse{
 			Router:            p.Router.String(),
 			RouterName:        s.routerName(p.Router),
@@ -245,6 +256,9 @@ func (s *Server) peerResponses() []PeerResponse {
 			RoutesByRIB:       ribCounts(counts[types.NewPeerRef(p.Router, p.Distinguisher, p.Addr)]),
 			UpSince:           p.UpSince.Format(time.RFC3339),
 			LastMsg:           p.LastMsg.Format(time.RFC3339),
+			MalformedInput:    p.MalformedInput,
+			MalformedReason:   p.MalformedReason,
+			MalformedSince:    malformedSince,
 		})
 	}
 	return resp

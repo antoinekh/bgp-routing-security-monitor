@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,6 +41,9 @@ type Listener struct {
 	lastSession atomic.Uint64 // last session ID handed out; IDs start at 1
 	sessMu      sync.Mutex
 	sessions    map[netip.Addr]*bmpSession // the current session per router address
+
+	// malformedWarn rate-limits the WARN for malformed UPDATEs.
+	malformedWarn warnLimiter
 
 	// testBeforeSend, nil in production, runs in emitFrom with the
 	// session's send lock held, just before the send.
@@ -582,10 +586,22 @@ func (l *Listener) processMessage(
 			log.Debug("failed to parse route monitoring", "error", err)
 			return
 		}
-		routes, withdrawals, err := l.parseRoutes(rm, routerAddr)
-		if err != nil {
-			log.Debug("failed to parse BGP UPDATE", "error", err)
-			return
+		key := peerKey(routerAddr, rm.PerPeer)
+		routes, withdrawals, bad := l.parseRoutes(rm, routerAddr)
+		if bad.action != actNone {
+			l.reportMalformed(log, sysName, key, rm.PerPeer, bad, len(withdrawals), rm.BGPUpdateData)
+		}
+		if bad.action == actSessionReset {
+			// The router resets the peer's session (RFC 7606); its Peer
+			// Down will withdraw the rest. Until then, show that RAVEN's
+			// view of this peer may be incomplete.
+			l.peerMu.Lock()
+			if p, ok := l.peers[key]; ok && !p.MalformedInput {
+				p.MalformedInput = true
+				p.MalformedReason = bad.reason
+				p.MalformedAt = time.Now()
+			}
+			l.peerMu.Unlock()
 		}
 		for i := range routes {
 			if !l.emitFrom(ctx, sess, types.IngestEvent{Route: &routes[i]}) {
@@ -601,7 +617,6 @@ func (l *Listener) processMessage(
 		// Update peer last-message time. Its route count is the route
 		// table's (routetable.Table.PeerRouteCounts), not counted here: an
 		// UPDATE re-announcing a route adds nothing, and withdrawals remove.
-		key := peerKey(routerAddr, rm.PerPeer)
 		l.peerMu.Lock()
 		if p, ok := l.peers[key]; ok {
 			p.LastMsg = time.Now()
@@ -630,31 +645,9 @@ func peerKey(router netip.Addr, pph BMPPerPeerHeader) PeerKey {
 	return PeerKey{RouterAddr: router, Distinguisher: pph.Distinguisher(), PeerAddr: pph.PeerAddr}
 }
 
-// parseRoutes converts a BMP Route Monitoring message into internal Route
-// objects with RAVEN's own BGP UPDATE decoder (parseBGPUpdate).
-func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]types.Route, []types.Withdrawal, error) {
-	bgpData := rm.BGPUpdateData
-
-	// BGP message: 16-byte marker + 2-byte length + 1-byte type + body
-	if len(bgpData) < 19 {
-		return nil, nil, fmt.Errorf("BGP message too short: %d", len(bgpData))
-	}
-
-	// Verify BGP message type is UPDATE (type 2)
-	bgpMsgType := bgpData[18]
-	if bgpMsgType != 2 {
-		// Not an UPDATE — could be KEEPALIVE, NOTIFICATION, etc. in BMP Route Monitoring
-		return nil, nil, nil
-	}
-
-	bgpLength := binary.BigEndian.Uint16(bgpData[16:18])
-	if int(bgpLength) > len(bgpData) {
-		return nil, nil, fmt.Errorf("BGP length %d exceeds data %d", bgpLength, len(bgpData))
-	}
-
-	// Parse the BGP UPDATE body (after the 19-byte header)
-	updateBody := bgpData[19:bgpLength]
-
+// parseRoutes decodes a BMP Route Monitoring message's BGP UPDATE with
+// RAVEN's own decoder (decodeRouteMonitoring).
+func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]types.Route, []types.Withdrawal, malformation) {
 	// Look up, from the peer's Peer Up, the monitoring router's own AS on
 	// this session (recorded on each route) and where ADD-PATH is in effect
 	// (the decoder must know: path identifiers change the NLRI layout). A
@@ -668,76 +661,135 @@ func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]
 	}
 	l.peerMu.RUnlock()
 
-	routes, withdrawals, err := parseBGPUpdate(updateBody, rm.PerPeer, routerAddr, localASN,
-		addPath.For(rm.PerPeer.IsAdjRIBOut()))
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse BGP UPDATE: %w", err)
-	}
-	return routes, withdrawals, nil
+	return decodeRouteMonitoring(rm, routerAddr, localASN, addPath.For(rm.PerPeer.IsAdjRIBOut()))
 }
 
-// parseBGPUpdate extracts routes from a BGP UPDATE message body.
+// BGP message type UPDATE.
+const bgpMsgTypeUpdate = 2
+
+// decodeRouteMonitoring decodes the BGP message a Route Monitoring carries.
+// Anything other than an UPDATE (a KEEPALIVE, NOTIFICATION, ...) yields
+// nothing. A BGP Length below the header size or past the message is a
+// session-reset error (RFC 7606 §3 (b)); the bytes present are decoded
+// anyway, and everything that parses is withdrawn.
+func decodeRouteMonitoring(rm BMPRouteMonitoring, router netip.Addr, localASN uint32, addPath AFIMask) ([]types.Route, []types.Withdrawal, malformation) {
+	bgpData := rm.BGPUpdateData
+	if len(bgpData) < bgpHeaderLen || bgpData[18] != bgpMsgTypeUpdate {
+		return nil, nil, malformation{}
+	}
+	bgpLength := int(binary.BigEndian.Uint16(bgpData[16:18]))
+	if bgpLength >= bgpHeaderLen && bgpLength <= len(bgpData) {
+		return parseBGPUpdate(bgpData[bgpHeaderLen:bgpLength], rm.PerPeer, router, localASN, addPath)
+	}
+	// A Length below the header size used to be sliced as given, which
+	// panicked the session's goroutine and with it the whole process.
+	routes, withdrawals, _ := parseBGPUpdate(bgpData[bgpHeaderLen:], rm.PerPeer, router, localASN, addPath)
+	return nil, append(withdrawals, asWithdrawals(routes)...), malformation{
+		action: actSessionReset,
+		reason: metrics.MalformedReasonUpdateLength,
+		detail: fmt.Sprintf("BGP message length %d with %d bytes present", bgpLength, len(bgpData)),
+	}
+}
+
+// reachable is an announced NLRI entry and its next hop.
+type reachable struct {
+	n       nlri
+	nextHop netip.Addr
+}
+
+// parseBGPUpdate decodes a BGP UPDATE message body: IPv4 withdrawals and
+// NLRI, and IPv4 and IPv6 unicast NLRI in MP_REACH_NLRI / MP_UNREACH_NLRI
+// (RFC 4760). addPath lists the address families whose NLRI carry ADD-PATH
+// path identifiers (RFC 7911 §3).
 //
-// Handles both IPv4 NLRI (carried directly in the UPDATE body) and IPv6 NLRI
-// (carried inside MP_REACH_NLRI / MP_UNREACH_NLRI path attributes per RFC 4760).
-// addPath lists the address families whose NLRI carry ADD-PATH path
-// identifiers (RFC 7911 §3).
-func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localASN uint32, addPath AFIMask) ([]types.Route, []types.Withdrawal, error) {
+// A malformed UPDATE is handled as RFC 7606 tells the monitored router to
+// handle it, so that RAVEN's table holds what the router's does:
+//
+//   - attribute discard: the attribute is dropped and the UPDATE processed
+//     without it;
+//   - treat-as-withdraw: every prefix the UPDATE announces is returned as a
+//     withdrawal instead of a route;
+//   - session reset: the router resets the peer's session. RAVEN cannot do
+//     that, and closing the BMP session would drop every peer on the
+//     router, so every prefix that can still be parsed is withdrawn; the
+//     caller marks the peer, and the router's Peer Down clears the rest.
+//
+// The malformation returned says which applied and why. Withdrawals that
+// parse are returned however malformed the rest of the UPDATE is.
+func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localASN uint32, addPath AFIMask) ([]types.Route, []types.Withdrawal, malformation) {
+	var m malformation
 	if len(data) < 4 {
-		return nil, nil, nil
+		m.add(actSessionReset, metrics.MalformedReasonUpdateLength,
+			fmt.Sprintf("%d-byte UPDATE, too short for its length fields", len(data)))
+		return nil, nil, m
 	}
 	ribType := ribTypeOf(pph)
 
 	// Withdrawn Routes Length, then the IPv4 withdrawn prefixes. A length
 	// running past the message used to be sliced as given, which panicked
-	// the session's goroutine and with it the whole process.
+	// the session's goroutine and with it the whole process. Past the
+	// message, the field cannot be delimited and nothing can be withdrawn.
 	withdrawnLen := int(binary.BigEndian.Uint16(data[0:2]))
 	if 2+withdrawnLen+2 > len(data) {
-		return nil, nil, fmt.Errorf("withdrawn routes length %d overflows a %d-byte UPDATE", withdrawnLen, len(data))
+		m.add(actSessionReset, metrics.MalformedReasonUpdateLength,
+			fmt.Sprintf("withdrawn routes length %d overflows a %d-byte UPDATE", withdrawnLen, len(data)))
+		return nil, nil, m
 	}
 	var withdrawals []types.Withdrawal
-	if withdrawnLen > 0 {
-		v4Withdrawals := parseNLRI(data[2:2+withdrawnLen], 4, addPath&AFIIPv4Unicast != 0)
-		for _, n := range v4Withdrawals {
-			withdrawals = append(withdrawals, makeWithdrawal(n, pph, router, ribType))
-		}
+	v4Withdrawn, ok := parseNLRI(data[2:2+withdrawnLen], 4, addPath&AFIIPv4Unicast != 0)
+	if !ok {
+		m.add(actSessionReset, metrics.MalformedReasonNLRI, "withdrawn routes field syntactically incorrect")
+	}
+	for _, n := range v4Withdrawn {
+		withdrawals = append(withdrawals, makeWithdrawal(n, pph, router, ribType))
 	}
 
 	offset := 2 + withdrawnLen
-
-	// Total Path Attribute Length (2 bytes)
-	pathAttrLen := binary.BigEndian.Uint16(data[offset : offset+2])
+	pathAttrLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
 	offset += 2
-	pathAttrEnd := offset + int(pathAttrLen)
-
+	pathAttrEnd := offset + pathAttrLen
 	if pathAttrEnd > len(data) {
-		return nil, nil, fmt.Errorf("path attributes overflow: %d > %d", pathAttrEnd, len(data))
+		// Neither the attributes nor the NLRI can be delimited; the
+		// withdrawals parsed above still apply. Dropping the whole UPDATE,
+		// as RAVEN used to, left the withdrawn routes in the table.
+		m.add(actSessionReset, metrics.MalformedReasonUpdateLength,
+			fmt.Sprintf("path attributes length %d overflows a %d-byte UPDATE", pathAttrLen, len(data)))
+		return nil, withdrawals, m
 	}
 
-	// Parse path attributes (extracts AS_PATH etc and the raw MP_REACH/MP_UNREACH bytes)
-	attrs := parsePathAttributes(data[offset:pathAttrEnd], pph.Flags&PeerFlagAS2 != 0)
-	offset = pathAttrEnd
+	// iBGP: LOCAL_PREF, ORIGINATOR_ID and CLUSTER_LIST errors are
+	// treat-as-withdraw only from an internal peer (RFC 7606 §7.5, §7.9,
+	// §7.10). Unknown local AS counts as external.
+	internal := localASN != 0 && localASN == pph.PeerASN
+	attrs := parsePathAttributes(data[offset:pathAttrEnd], pph.Flags&PeerFlagAS2 != 0, internal, &m)
 
-	// Parse IPv4 NLRI (remaining bytes after path attributes)
-	var routes []types.Route
-	v4Prefixes := parseNLRI(data[offset:], 4, addPath&AFIIPv4Unicast != 0)
-	for _, n := range v4Prefixes {
-		routes = append(routes, makeRoute(n, attrs.nextHop, pph, router, attrs, ribType, localASN))
+	// The NLRI field is located by the Total Path Attribute Length even when
+	// an attribute inside overran (RFC 7606 §4).
+	nlriField := data[pathAttrEnd:]
+	var reach []reachable
+	v4, ok := parseNLRI(nlriField, 4, addPath&AFIIPv4Unicast != 0)
+	if !ok {
+		m.add(actSessionReset, metrics.MalformedReasonNLRI, "NLRI field syntactically incorrect")
+	}
+	for _, n := range v4 {
+		reach = append(reach, reachable{n: n, nextHop: attrs.nextHop})
 	}
 
 	// NLRI carried in MP_REACH_NLRI / MP_UNREACH_NLRI (RFC 4760): IPv4 and
-	// IPv6 unicast. Any other address family is counted, not decoded.
-	if len(attrs.mpReach) > 0 {
-		mp := parseMPReachNLRI(attrs.mpReach, addPath)
+	// IPv6 unicast. Any other address family is counted, not decoded. More
+	// than one of either is a session reset; each is parsed so that all
+	// their prefixes are withdrawn.
+	for _, a := range attrs.mpReach {
+		mp := parseMPReachNLRI(a, addPath, &m)
 		if !mp.supported {
 			countUnsupportedNLRI(mp.afi, mp.safi)
 		}
 		for _, n := range mp.nlri {
-			routes = append(routes, makeRoute(n, mp.nextHop, pph, router, attrs, ribType, localASN))
+			reach = append(reach, reachable{n: n, nextHop: mp.nextHop})
 		}
 	}
-	if len(attrs.mpUnreach) > 0 {
-		mp := parseMPUnreachNLRI(attrs.mpUnreach, addPath)
+	for _, a := range attrs.mpUnreach {
+		mp := parseMPUnreachNLRI(a, addPath, &m)
 		if !mp.supported {
 			countUnsupportedNLRI(mp.afi, mp.safi)
 		}
@@ -746,7 +798,44 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localA
 		}
 	}
 
-	return routes, withdrawals, nil
+	announces := len(nlriField) > 0 || len(attrs.mpReach) > 0
+	if announces {
+		// RFC 7606 §3 (d): well-known mandatory attributes. NEXT_HOP is
+		// required only for NLRI in the NLRI field (RFC 4760 §3); an
+		// UPDATE carrying only withdrawals needs none of them.
+		var missing []string
+		if !attrs.seen[attrOrigin] {
+			missing = append(missing, "ORIGIN")
+		}
+		if !attrs.seen[attrASPath] {
+			missing = append(missing, "AS_PATH")
+		}
+		if len(nlriField) > 0 && !attrs.seen[attrNextHop] {
+			missing = append(missing, "NEXT_HOP")
+		}
+		if len(missing) > 0 {
+			m.add(actTreatAsWithdraw, metrics.MalformedReasonMissingMandatory,
+				fmt.Sprintf("missing %s", strings.Join(missing, ", ")))
+		}
+	} else if m.action == actTreatAsWithdraw {
+		// RFC 7606 §5.2: an attribute error in an UPDATE that announces
+		// nothing leaves no confidence that its NLRI were all found, so it
+		// is a session reset.
+		m.action = actSessionReset
+		m.detail += "; the UPDATE announces no NLRI (RFC 7606 §5.2)"
+	}
+
+	if m.action >= actTreatAsWithdraw {
+		for _, r := range reach {
+			withdrawals = append(withdrawals, makeWithdrawal(r.n, pph, router, ribType))
+		}
+		return nil, withdrawals, m
+	}
+	var routes []types.Route
+	for _, r := range reach {
+		routes = append(routes, makeRoute(r.n, r.nextHop, pph, router, attrs, ribType, localASN))
+	}
+	return routes, withdrawals, m
 }
 
 // ribTypeOf is the RIB a Route Monitoring message reports (RFC 7854 L flag,
@@ -812,41 +901,39 @@ type nlri struct {
 // parseNLRI iterates length-prefixed NLRI entries. addrLen is 4 for IPv4 NLRI
 // or 16 for IPv6 NLRI; it bounds how many bytes are read into the address slot.
 // With addPath each entry starts with a 4-byte path identifier (RFC 7911 §3).
-func parseNLRI(data []byte, addrLen int, addPath bool) []nlri {
+//
+// ok is false if the field is syntactically incorrect (RFC 7606 §5.3): a
+// prefix length beyond the address family's, or an entry running past the
+// field. The entries before the error are returned.
+func parseNLRI(data []byte, addrLen int, addPath bool) ([]nlri, bool) {
 	var out []nlri
 	off := 0
 	maxBits := addrLen * 8
 	for off < len(data) {
 		var pathID uint32
 		if addPath {
-			if off+4 > len(data) {
-				break
+			if off+4 >= len(data) { // the path identifier and a length octet
+				return out, false
 			}
 			pathID = binary.BigEndian.Uint32(data[off : off+4])
 			off += 4
-			if off >= len(data) {
-				break
-			}
 		}
 		pLen := int(data[off])
 		off++
 		if pLen > maxBits {
-			break
+			return out, false
 		}
 		pBytes := (pLen + 7) / 8
 		if off+pBytes > len(data) {
-			break
+			return out, false
 		}
 		buf := make([]byte, addrLen)
 		copy(buf, data[off:off+pBytes])
 		off += pBytes
-		addr, ok := netip.AddrFromSlice(buf)
-		if !ok {
-			continue
-		}
+		addr, _ := netip.AddrFromSlice(buf)
 		out = append(out, nlri{prefix: netip.PrefixFrom(addr.Unmap(), pLen), pathID: pathID})
 	}
-	return out
+	return out, true
 }
 
 // mpNLRI is a decoded MP_REACH_NLRI or MP_UNREACH_NLRI attribute.
@@ -878,10 +965,15 @@ func mpFamily(afi uint16, safi uint8) (addrLen int, bit AFIMask, ok bool) {
 // IPv4 and IPv6 unicast are decoded, each with its own ADD-PATH setting. The
 // next hop is IPv4 (4 bytes, IPv4 NLRI only) or IPv6 (16 bytes global, or 32
 // with a link-local RAVEN drops); an IPv6 next hop for IPv4 NLRI is RFC 8950.
-// Other address families come back unsupported. A malformed attribute (too
-// short, next hop running past it) yields no NLRI.
-func parseMPReachNLRI(data []byte, addPath AFIMask) mpNLRI {
+// Other address families come back unsupported.
+//
+// Malformations are session resets (RFC 7606 §5.3, §7.11), recorded in m:
+// an attribute under 5 bytes, a next hop of another length or running past
+// the attribute, or incorrect NLRI. The NLRI that parse are still returned,
+// to be withdrawn.
+func parseMPReachNLRI(data []byte, addPath AFIMask, m *malformation) mpNLRI {
 	if len(data) < 5 {
+		m.add(actSessionReset, metrics.MalformedReasonMPReach, fmt.Sprintf("MP_REACH_NLRI length %d, under 5", len(data)))
 		return mpNLRI{supported: true}
 	}
 	mp := mpNLRI{afi: binary.BigEndian.Uint16(data[0:2]), safi: data[2]}
@@ -892,6 +984,8 @@ func parseMPReachNLRI(data []byte, addPath AFIMask) mpNLRI {
 	mp.supported = true
 	nhLen := int(data[3])
 	if 4+nhLen+1 > len(data) {
+		m.add(actSessionReset, metrics.MalformedReasonMPReachNextHop,
+			fmt.Sprintf("MP_REACH_NLRI next hop length %d runs past the %d-byte attribute", nhLen, len(data)))
 		return mp
 	}
 	switch {
@@ -899,8 +993,14 @@ func parseMPReachNLRI(data []byte, addPath AFIMask) mpNLRI {
 		mp.nextHop = netip.AddrFrom4([4]byte(data[4:8]))
 	case nhLen == 16 || nhLen == 32:
 		mp.nextHop = netip.AddrFrom16([16]byte(data[4:20]))
+	default:
+		m.add(actSessionReset, metrics.MalformedReasonMPReachNextHop,
+			fmt.Sprintf("MP_REACH_NLRI next hop length %d for AFI %d SAFI %d", nhLen, mp.afi, mp.safi))
 	}
-	mp.nlri = parseNLRI(data[4+nhLen+1:], addrLen, addPath&bit != 0) // skip the reserved byte
+	mp.nlri, ok = parseNLRI(data[4+nhLen+1:], addrLen, addPath&bit != 0) // skip the reserved byte
+	if !ok {
+		m.add(actSessionReset, metrics.MalformedReasonNLRI, "MP_REACH_NLRI NLRI syntactically incorrect")
+	}
 	return mp
 }
 
@@ -910,9 +1010,11 @@ func parseMPReachNLRI(data []byte, addPath AFIMask) mpNLRI {
 //	AFI(2) | SAFI(1) | Withdrawn NLRI(variable)
 //
 // IPv4 and IPv6 unicast are decoded; other address families come back
-// unsupported.
-func parseMPUnreachNLRI(data []byte, addPath AFIMask) mpNLRI {
+// unsupported. An attribute under 3 bytes or incorrect NLRI is a session
+// reset (RFC 7606 §5.3), recorded in m; the NLRI that parse are returned.
+func parseMPUnreachNLRI(data []byte, addPath AFIMask, m *malformation) mpNLRI {
 	if len(data) < 3 {
+		m.add(actSessionReset, metrics.MalformedReasonMPUnreach, fmt.Sprintf("MP_UNREACH_NLRI length %d, under 3", len(data)))
 		return mpNLRI{supported: true}
 	}
 	mp := mpNLRI{afi: binary.BigEndian.Uint16(data[0:2]), safi: data[2]}
@@ -921,7 +1023,10 @@ func parseMPUnreachNLRI(data []byte, addPath AFIMask) mpNLRI {
 		return mp
 	}
 	mp.supported = true
-	mp.nlri = parseNLRI(data[3:], addrLen, addPath&bit != 0)
+	mp.nlri, ok = parseNLRI(data[3:], addrLen, addPath&bit != 0)
+	if !ok {
+		m.add(actSessionReset, metrics.MalformedReasonNLRI, "MP_UNREACH_NLRI NLRI syntactically incorrect")
+	}
 	return mp
 }
 
@@ -934,8 +1039,11 @@ type pathAttrs struct {
 	nextHop          netip.Addr // IPv4 NEXT_HOP only; MP next hops live in MP_REACH
 	communities      []types.Community
 	largeCommunities []types.LargeCommunity
-	mpReach          []byte // MP_REACH_NLRI body (attr type 14)
-	mpUnreach        []byte // MP_UNREACH_NLRI body (attr type 15)
+	// MP_REACH_NLRI (attr type 14) and MP_UNREACH_NLRI (15) bodies: one
+	// each in a well-formed UPDATE, every instance in a malformed one.
+	mpReach   [][]byte
+	mpUnreach [][]byte
+	seen      [256]bool // attribute types present
 }
 
 // BGP path attribute type codes RAVEN reads.
@@ -943,10 +1051,15 @@ const (
 	attrOrigin           = 1
 	attrASPath           = 2
 	attrNextHop          = 3
+	attrMED              = 4
+	attrLocalPref        = 5
 	attrCommunities      = 8
+	attrOriginatorID     = 9
+	attrClusterList      = 10
 	attrMPReach          = 14
 	attrMPUnreach        = 15
 	attrAS4Path          = 17 // RFC 6793
+	attrAS4Aggregator    = 18 // RFC 6793
 	attrLargeCommunities = 32
 )
 
@@ -961,46 +1074,74 @@ const asTrans = 23456
 // 2-octet AS numbers, so AS_PATH holds 2-octet ASNs (4-octet ones as
 // AS_TRANS) and AS4_PATH, if present, carries the 4-octet path to merge
 // (RFC 6793 §4.2.3). Without it AS_PATH holds 4-octet ASNs and AS4_PATH is
-// ignored, as a 4-octet speaker must.
-func parsePathAttributes(data []byte, as2 bool) pathAttrs {
+// ignored, as a 4-octet speaker must. internal is an iBGP peer.
+//
+// Errors are recorded in m with the approach RFC 7606 gives them: a
+// malformed or wrongly flagged ORIGIN, AS_PATH, NEXT_HOP, MULTI_EXIT_DISC,
+// COMMUNITIES or LARGE_COMMUNITIES (and from an internal peer LOCAL_PREF,
+// ORIGINATOR_ID or CLUSTER_LIST), or an attribute running past the others,
+// is treat-as-withdraw; a malformed AS4_PATH or AS4_AGGREGATOR is
+// discarded, leaving AS_PATH alone (RFC 6793 §6); of a repeated attribute
+// the first is kept, except that a repeated MP_REACH_NLRI or
+// MP_UNREACH_NLRI is a session reset (§3 (g)).
+func parsePathAttributes(data []byte, as2, internal bool, m *malformation) pathAttrs {
 	var out pathAttrs
 	var as4Path []types.ASSegment
+	withdraw := func(reason, detail string) { m.add(actTreatAsWithdraw, reason, detail) }
+	badFlags := func(name string, flags byte) {
+		withdraw(metrics.MalformedReasonAttrFlags, fmt.Sprintf("%s flags 0x%02x", name, flags))
+	}
 	offset := 0
 	for offset < len(data) {
-		if offset+2 > len(data) {
+		// Flags, type and a 1-byte length, or 2 bytes with Extended Length.
+		hdrLen := 3
+		if data[offset]&attrFlagExtLen != 0 {
+			hdrLen = 4
+		}
+		if offset+hdrLen > len(data) {
+			withdraw(metrics.MalformedReasonAttrLength,
+				fmt.Sprintf("%d bytes left after the last attribute, too few for another", len(data)-offset))
 			break
 		}
-
 		flags := data[offset]
 		attrType := data[offset+1]
-		offset += 2
-
-		// Attribute length: 1 byte or 2 bytes depending on Extended Length flag
-		var attrLen int
-		if flags&0x10 != 0 { // Extended Length
-			if offset+2 > len(data) {
-				break
-			}
-			attrLen = int(binary.BigEndian.Uint16(data[offset : offset+2]))
-			offset += 2
-		} else {
-			if offset+1 > len(data) {
-				break
-			}
-			attrLen = int(data[offset])
-			offset++
+		attrLen := int(data[offset+2])
+		if hdrLen == 4 {
+			attrLen = int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
 		}
-
+		offset += hdrLen
 		if offset+attrLen > len(data) {
+			withdraw(metrics.MalformedReasonAttrLength,
+				fmt.Sprintf("attribute type %d length %d runs past the path attributes", attrType, attrLen))
 			break
 		}
-
 		attrData := data[offset : offset+attrLen]
 		offset += attrLen
 
+		if out.seen[attrType] {
+			switch attrType {
+			case attrMPReach:
+				m.add(actSessionReset, metrics.MalformedReasonDuplicateMP, "MP_REACH_NLRI more than once")
+				out.mpReach = append(out.mpReach, attrData)
+			case attrMPUnreach:
+				m.add(actSessionReset, metrics.MalformedReasonDuplicateMP, "MP_UNREACH_NLRI more than once")
+				out.mpUnreach = append(out.mpUnreach, attrData)
+			default:
+				m.add(actAttributeDiscard, metrics.MalformedReasonDuplicateAttr,
+					fmt.Sprintf("attribute type %d more than once; the first kept", attrType))
+			}
+			continue
+		}
+		out.seen[attrType] = true
+
 		switch attrType {
 		case attrOrigin:
-			if len(attrData) >= 1 {
+			switch {
+			case !flagsAre(flags, false, true):
+				badFlags("ORIGIN", flags)
+			case len(attrData) != 1 || attrData[0] > uint8(types.OriginIncomplete):
+				withdraw(metrics.MalformedReasonOrigin, fmt.Sprintf("ORIGIN % x", attrData))
+			default:
 				out.origin = attrData[0]
 			}
 
@@ -1009,40 +1150,127 @@ func parsePathAttributes(data []byte, as2 bool) pathAttrs {
 			if as2 {
 				asnLen = 2
 			}
-			out.asPathRaw = parseASPath(attrData, asnLen)
+			segs, ok := parseASPath(attrData, asnLen)
+			switch {
+			case !flagsAre(flags, false, true):
+				badFlags("AS_PATH", flags)
+			case !ok:
+				withdraw(metrics.MalformedReasonASPath,
+					fmt.Sprintf("AS_PATH malformed after %d good segments", len(segs)))
+			}
+			out.asPathRaw = segs
 
 		case attrAS4Path:
-			if as2 {
-				as4Path = parseASPath(attrData, 4)
+			if !as2 {
+				continue
+			}
+			segs, ok := parseASPath(attrData, 4)
+			switch {
+			case !flagsAre(flags, true, true):
+				m.add(actAttributeDiscard, metrics.MalformedReasonAS4Path, fmt.Sprintf("AS4_PATH flags 0x%02x", flags))
+			case !ok:
+				m.add(actAttributeDiscard, metrics.MalformedReasonAS4Path,
+					fmt.Sprintf("AS4_PATH malformed after %d good segments", len(segs)))
+			default:
+				as4Path = segs
+			}
+
+		case attrAS4Aggregator:
+			// Not used by RAVEN; checked only to count its discard.
+			if as2 && (!flagsAre(flags, true, true) || len(attrData) != 8) {
+				m.add(actAttributeDiscard, metrics.MalformedReasonAS4Aggregator,
+					fmt.Sprintf("AS4_AGGREGATOR flags 0x%02x length %d", flags, len(attrData)))
 			}
 
 		case attrNextHop:
-			if len(attrData) == 4 {
+			switch {
+			case !flagsAre(flags, false, true):
+				badFlags("NEXT_HOP", flags)
+			case len(attrData) != 4:
+				withdraw(metrics.MalformedReasonNextHop, fmt.Sprintf("NEXT_HOP length %d", len(attrData)))
+			default:
 				out.nextHop = netip.AddrFrom4([4]byte(attrData))
 			}
 
+		case attrMED:
+			switch {
+			case !flagsAre(flags, true, false):
+				badFlags("MULTI_EXIT_DISC", flags)
+			case len(attrData) != 4:
+				withdraw(metrics.MalformedReasonMED, fmt.Sprintf("MULTI_EXIT_DISC length %d", len(attrData)))
+			}
+
+		case attrLocalPref:
+			// From an external peer it is discarded whatever it holds.
+			switch {
+			case !internal:
+			case !flagsAre(flags, false, true):
+				badFlags("LOCAL_PREF", flags)
+			case len(attrData) != 4:
+				withdraw(metrics.MalformedReasonLocalPref, fmt.Sprintf("LOCAL_PREF length %d", len(attrData)))
+			}
+
+		case attrOriginatorID:
+			switch {
+			case !internal:
+			case !flagsAre(flags, true, false):
+				badFlags("ORIGINATOR_ID", flags)
+			case len(attrData) != 4:
+				withdraw(metrics.MalformedReasonOriginatorID, fmt.Sprintf("ORIGINATOR_ID length %d", len(attrData)))
+			}
+
+		case attrClusterList:
+			switch {
+			case !internal:
+			case !flagsAre(flags, true, false):
+				badFlags("CLUSTER_LIST", flags)
+			case len(attrData) == 0 || len(attrData)%4 != 0:
+				withdraw(metrics.MalformedReasonClusterList, fmt.Sprintf("CLUSTER_LIST length %d", len(attrData)))
+			}
+
 		case attrCommunities:
-			for i := 0; i+4 <= len(attrData); i += 4 {
-				out.communities = append(out.communities, types.Community{
-					High: binary.BigEndian.Uint16(attrData[i : i+2]),
-					Low:  binary.BigEndian.Uint16(attrData[i+2 : i+4]),
-				})
+			switch {
+			case !flagsAre(flags, true, true):
+				badFlags("COMMUNITIES", flags)
+			case len(attrData) == 0 || len(attrData)%4 != 0:
+				withdraw(metrics.MalformedReasonCommunities, fmt.Sprintf("COMMUNITIES length %d", len(attrData)))
+			default:
+				for i := 0; i+4 <= len(attrData); i += 4 {
+					out.communities = append(out.communities, types.Community{
+						High: binary.BigEndian.Uint16(attrData[i : i+2]),
+						Low:  binary.BigEndian.Uint16(attrData[i+2 : i+4]),
+					})
+				}
+			}
+
+		case attrLargeCommunities:
+			switch {
+			case !flagsAre(flags, true, true):
+				badFlags("LARGE_COMMUNITY", flags)
+			case len(attrData) == 0 || len(attrData)%12 != 0:
+				withdraw(metrics.MalformedReasonLargeCommunities,
+					fmt.Sprintf("LARGE_COMMUNITY length %d", len(attrData)))
+			default:
+				for i := 0; i+12 <= len(attrData); i += 12 {
+					out.largeCommunities = append(out.largeCommunities, types.LargeCommunity{
+						GlobalAdmin: binary.BigEndian.Uint32(attrData[i : i+4]),
+						LocalData1:  binary.BigEndian.Uint32(attrData[i+4 : i+8]),
+						LocalData2:  binary.BigEndian.Uint32(attrData[i+8 : i+12]),
+					})
+				}
 			}
 
 		case attrMPReach:
-			out.mpReach = attrData
+			if !flagsAre(flags, true, false) {
+				m.add(actSessionReset, metrics.MalformedReasonMPReach, fmt.Sprintf("MP_REACH_NLRI flags 0x%02x", flags))
+			}
+			out.mpReach = append(out.mpReach, attrData)
 
 		case attrMPUnreach:
-			out.mpUnreach = attrData
-
-		case attrLargeCommunities:
-			for i := 0; i+12 <= len(attrData); i += 12 {
-				out.largeCommunities = append(out.largeCommunities, types.LargeCommunity{
-					GlobalAdmin: binary.BigEndian.Uint32(attrData[i : i+4]),
-					LocalData1:  binary.BigEndian.Uint32(attrData[i+4 : i+8]),
-					LocalData2:  binary.BigEndian.Uint32(attrData[i+8 : i+12]),
-				})
+			if !flagsAre(flags, true, false) {
+				m.add(actSessionReset, metrics.MalformedReasonMPUnreach, fmt.Sprintf("MP_UNREACH_NLRI flags 0x%02x", flags))
 			}
+			out.mpUnreach = append(out.mpUnreach, attrData)
 		}
 	}
 
@@ -1054,17 +1282,22 @@ func parsePathAttributes(data []byte, as2 bool) pathAttrs {
 }
 
 // parseASPath parses AS_PATH (or AS4_PATH) attribute data with asnLen-byte
-// AS numbers (2 or 4) into its segments. A segment running past the
-// attribute ends the parse; the segments before it are kept.
-func parseASPath(data []byte, asnLen int) []types.ASSegment {
-	var raw []types.ASSegment
+// AS numbers (2 or 4) into its segments. ok is false if the path is
+// malformed (RFC 7606 §7.2): an unknown segment type, a segment of length
+// zero or running past the attribute, or a single byte left over. The
+// segments before the error are returned.
+func parseASPath(data []byte, asnLen int) (raw []types.ASSegment, ok bool) {
 	offset := 0
-	for offset+2 <= len(data) {
+	for offset < len(data) {
+		if offset+2 > len(data) {
+			return raw, false
+		}
 		segType := types.ASSegmentType(data[offset])
 		segLen := int(data[offset+1])
 		offset += 2
-		if offset+segLen*asnLen > len(data) {
-			break
+		if segType < types.ASSegmentSet || segType > types.ASSegmentConfedSet ||
+			segLen == 0 || offset+segLen*asnLen > len(data) {
+			return raw, false
 		}
 		seg := types.ASSegment{Type: segType, ASNs: make([]uint32, segLen)}
 		for i := 0; i < segLen; i++ {
@@ -1077,7 +1310,7 @@ func parseASPath(data []byte, asnLen int) []types.ASSegment {
 		}
 		raw = append(raw, seg)
 	}
-	return raw
+	return raw, true
 }
 
 // flattenASPath lists the path's AS numbers in order. AS_SET members are

@@ -179,9 +179,9 @@ func TestDecodeUpdateAddPathOnAndOff(t *testing.T) {
 		pathID uint32
 	}
 	decode := func(body []byte, addPath AFIMask) (routes, withdrawals []got) {
-		rs, ws, err := parseBGPUpdate(body, pph, router, 0, addPath)
-		if err != nil {
-			t.Fatal(err)
+		rs, ws, m := parseBGPUpdate(body, pph, router, 0, addPath)
+		if m.action != actNone {
+			t.Fatalf("%+v", m)
 		}
 		for _, r := range rs {
 			if r.Router != router || r.PeerAddr != pph.PeerAddr {
@@ -223,9 +223,9 @@ func TestDecodeUpdateAddPathOnAndOff(t *testing.T) {
 		t.Errorf("ADD-PATH IPv4 only: routes %v, want %v", rs, want)
 	}
 
-	// The wrong setting misreads the NLRI.
-	if rs, _ := decode(on, 0); slices.Contains(rs, got{p1, 0}) && len(rs) == 3 {
-		t.Errorf("ADD-PATH NLRI read without ADD-PATH gave the right prefixes %v: the test does not exercise the setting", rs)
+	// The wrong setting misreads the NLRI: here it no longer parses.
+	if rs, _, m := parseBGPUpdate(on, pph, router, 0, 0); len(rs) == 3 || m.action == actNone {
+		t.Errorf("ADD-PATH NLRI read without ADD-PATH gave %v (%+v): the test does not exercise the setting", rs, m)
 	}
 }
 

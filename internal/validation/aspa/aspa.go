@@ -32,7 +32,9 @@ func (a *Annotator) Validate(route *types.Route) types.ASPAResult {
 // empty AS_PATH or an unknown peer ASN skip the check.
 func (a *Annotator) ValidateSelection(route *types.Route, sel Selection) types.ASPAResult {
 	var res types.ASPAResult
-	if sel.NeighborCheck && len(route.ASPath) > 0 && route.PeerASN != 0 && route.ASPath[0] != route.PeerASN {
+	if route.HasConfedSegment() {
+		res = confedResult(sel.Procedure)
+	} else if sel.NeighborCheck && len(route.ASPath) > 0 && route.PeerASN != 0 && route.ASPath[0] != route.PeerASN {
 		res = types.ASPAResult{
 			State:     types.ASPAInvalid,
 			Procedure: sel.Procedure,
@@ -52,6 +54,8 @@ func (a *Annotator) ValidateSelection(route *types.Route, sel Selection) types.A
 //
 // Algorithm per draft-ietf-sidrops-aspa-verification-24 §5:
 //
+//  0. If AS_PATH contains a confederation segment → Unverifiable, not
+//     verified (§6.2; see confedResult).
 //  1. If AS_PATH contains an AS_SET → Unverifiable. (The draft says Invalid;
 //     RAVEN reports these separately.)
 //  2. Empty AS_PATH (self-originated / iBGP) → Unknown. (The draft says
@@ -73,6 +77,9 @@ func (a *Annotator) ValidateSelection(route *types.Route, sel Selection) types.A
 // The neighbor-AS check (§5.4/§5.5 step 2) is not performed here; see
 // ValidateSelection.
 func (a *Annotator) ValidateProcedure(route *types.Route, proc types.ASPAProcedure) types.ASPAResult {
+	if route.HasConfedSegment() {
+		return confedResult(proc)
+	}
 	// Check for AS_SET segments — unverifiable per the draft
 	for _, seg := range route.ASPathRaw {
 		if seg.Type == types.ASSegmentSet {
@@ -153,6 +160,28 @@ func (a *Annotator) ValidateProcedure(route *types.Route, proc types.ASPAProcedu
 
 	result.HopDetails = hops
 	return result
+}
+
+// ConfedReason is the ASPA Reason on a route whose AS_PATH has
+// confederation segments.
+const ConfedReason = "not ASPA-verified: learned over a session internal to an AS confederation " +
+	"(draft-ietf-sidrops-aspa-verification-24 §6.2)"
+
+// confedResult is the result for a route whose AS_PATH has an
+// AS_CONFED_SEQUENCE or AS_CONFED_SET segment: Unverifiable, not verified.
+//
+// The draft defines no handling of confederation segments in the AS_PATH.
+// What it says about confederations is that verification is meant for
+// routers at the confederation's boundary facing external ASes and is NOT
+// RECOMMENDED on "eBGP sessions internal to an AS Confederation" (§6.2),
+// and that boundary ASes register ASPAs under the confederation's global
+// ASN (§4). Confederation segments only arrive over such internal sessions:
+// they are removed before a route leaves the confederation (RFC 5065
+// §4.1 (c)), and a router treats them from any other peer as a malformed
+// AS_PATH (§5), so such a route never reaches the table. Verifying the
+// path anyway would treat member ASes as hops.
+func confedResult(proc types.ASPAProcedure) types.ASPAResult {
+	return types.ASPAResult{State: types.ASPAUnverifiable, Procedure: proc, Reason: ConfedReason}
 }
 
 // compress returns the AS_PATH as COMPRESSED_AS_PATH (draft §5.1) in

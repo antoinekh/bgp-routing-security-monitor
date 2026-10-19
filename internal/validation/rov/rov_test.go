@@ -216,3 +216,34 @@ func TestROVMultipleVRPs(t *testing.T) {
 		t.Errorf("expected Valid (second VRP matches), got %s: %s", result.State, result.Reason)
 	}
 }
+
+// A route whose AS_PATH ends in a confederation segment has no origin RAVEN
+// can name (RFC 6811 §2): NotFound, never a confederation member AS. The
+// member AS used to be the origin, so a covering VRP made such a route
+// Invalid.
+func TestROVConfederationOrigin(t *testing.T) {
+	s := store.NewVRPStore()
+	s.ReplaceAll([]types.VRP{
+		{Prefix: netip.MustParsePrefix("198.51.100.0/24"), ASN: 64500, MaxLength: 24},
+	}, 1, 1)
+	a := NewAnnotator(s)
+	route := &types.Route{
+		Prefix:    netip.MustParsePrefix("198.51.100.0/24"),
+		ASPath:    []uint32{65001, 65002},
+		ASPathRaw: []types.ASSegment{{Type: types.ASSegmentConfedSequence, ASNs: []uint32{65001, 65002}}},
+	}
+	result := a.Validate(route)
+	if result.State != types.ROVNotFound || result.Reason != confedOriginReason {
+		t.Errorf("got %s (%s), want NotFound: %s", result.State, result.Reason, confedOriginReason)
+	}
+
+	// Confederation segments ahead of the AS_SEQUENCE do not change the origin.
+	route.ASPath = []uint32{65001, 64510, 64500}
+	route.ASPathRaw = []types.ASSegment{
+		{Type: types.ASSegmentConfedSequence, ASNs: []uint32{65001}},
+		{Type: types.ASSegmentSequence, ASNs: []uint32{64510, 64500}},
+	}
+	if result := a.Validate(route); result.State != types.ROVValid {
+		t.Errorf("got %s (%s), want Valid for origin AS64500", result.State, result.Reason)
+	}
+}

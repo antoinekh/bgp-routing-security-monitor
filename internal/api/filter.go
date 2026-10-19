@@ -25,10 +25,25 @@ type routeFilter struct {
 	// the name given (none, if no router has it).
 	byRouter bool
 	routers  []netip.Addr
+	// rib is the RIB to list: Adj-RIB-In pre-policy unless the rib
+	// parameter names another. A watch is filtered by RIB only when the
+	// parameter is given (ribGiven).
+	rib      types.RIBType
+	ribGiven bool
 }
 
-// parseRouteFilter reads the prefix, origin-asn, peer, posture and router
-// query parameters. router is a router address or a BMP sysName; named
+// parseRIB returns the RIB type a name (types.RIBType.String) gives.
+func parseRIB(name string) (types.RIBType, bool) {
+	for _, r := range types.AllRIBTypes {
+		if r.String() == name {
+			return r, true
+		}
+	}
+	return 0, false
+}
+
+// parseRouteFilter reads the prefix, origin-asn, peer, posture, router and
+// rib query parameters. router is a router address or a BMP sysName; named
 // resolves a sysName to the routers that have it.
 func parseRouteFilter(q url.Values, named func(string) []netip.Addr) (routeFilter, error) {
 	var f routeFilter
@@ -62,6 +77,13 @@ func parseRouteFilter(q url.Values, named func(string) []netip.Addr) (routeFilte
 		f.peer = a.Unmap()
 	}
 	f.posture = types.SecurityPosture(q.Get("posture"))
+	if v := q.Get("rib"); v != "" {
+		rib, ok := parseRIB(v)
+		if !ok {
+			return f, fmt.Errorf("invalid rib %q: want adj-rib-in-pre, adj-rib-in-post, loc-rib, adj-rib-out-pre or adj-rib-out-post", v)
+		}
+		f.rib, f.ribGiven = rib, true
+	}
 	return f, nil
 }
 
@@ -72,14 +94,19 @@ func (f *routeFilter) match(r *types.Route) bool {
 		(f.origin == 0 || r.OriginASN() == f.origin) &&
 		(!f.peer.IsValid() || r.PeerAddr.Unmap() == f.peer) &&
 		(f.posture == "" || r.SecurityPosture == f.posture) &&
-		(!f.byRouter || slices.Contains(f.routers, r.Router.Unmap()))
+		(!f.byRouter || slices.Contains(f.routers, r.Router.Unmap())) &&
+		(!f.ribGiven || r.RIBType == f.rib)
 }
 
-// routes returns the table's pre-policy routes that pass the filter, starting
-// from the most selective index the filter allows.
+// routes returns the table's routes of the filter's RIB (Adj-RIB-In
+// pre-policy by default) that pass the filter. For Adj-RIB-In pre-policy it
+// starts from the most selective index the filter allows; the indexes
+// return only that RIB, so any other is scanned whole.
 func (f *routeFilter) routes(t *routetable.Table) []*types.Route {
 	var candidates []*types.Route
 	switch {
+	case f.rib != types.AdjRIBInPre:
+		candidates = t.AllOfRIB(f.rib)
 	case f.prefix.IsValid():
 		candidates = t.GetByPrefix(f.prefix)
 	case f.origin != 0:
@@ -95,7 +122,7 @@ func (f *routeFilter) routes(t *routetable.Table) []*types.Route {
 	}
 	out := candidates[:0]
 	for _, r := range candidates {
-		if f.match(r) {
+		if r.RIBType == f.rib && f.match(r) {
 			out = append(out, r)
 		}
 	}

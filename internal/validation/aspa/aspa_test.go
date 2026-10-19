@@ -226,3 +226,44 @@ func TestValidate_NeighborToVerifierEdgeNotChecked(t *testing.T) {
 		t.Fatalf("got state=%s failing=%+v, want Unknown with no failing hop", got.State, got.FailingHop)
 	}
 }
+
+// A route with AS_CONFED_SEQUENCE or AS_CONFED_SET segments came over a
+// session inside the router's AS confederation (RFC 5065 §4.1 (c), §5),
+// where §6.2 does not recommend verification; the draft defines no handling
+// of the segments themselves. So it is Unverifiable with ConfedReason, not
+// verified with member ASes as hops, under either procedure and before the
+// neighbor-AS check.
+func TestConfederationNotVerified(t *testing.T) {
+	aspaStore := store.NewASPAStore()
+	aspaStore.AddProvider(13335, 64509) // 64500 not a provider of 13335: Invalid if verified
+	route := &types.Route{
+		PeerASN: 65002,
+		ASPath:  []uint32{65001, 64500, 13335},
+		ASPathRaw: []types.ASSegment{
+			{Type: types.ASSegmentConfedSequence, ASNs: []uint32{65001}},
+			{Type: types.ASSegmentSequence, ASNs: []uint32{64500, 13335}},
+		},
+	}
+	a := NewAnnotator(aspaStore)
+	for _, proc := range []types.ASPAProcedure{types.ASPAUpstream, types.ASPADownstream} {
+		got := a.ValidateProcedure(route, proc)
+		if got.State != types.ASPAUnverifiable || got.Reason != ConfedReason || got.Procedure != proc || got.HopDetails != nil {
+			t.Errorf("%s: %+v, want Unverifiable with the confederation reason", proc, got)
+		}
+		got = a.ValidateSelection(route, Selection{Procedure: proc, NeighborCheck: true})
+		if got.State != types.ASPAUnverifiable || got.Reason != ConfedReason {
+			t.Errorf("%s with neighbor check: %+v, want Unverifiable with the confederation reason", proc, got)
+		}
+	}
+	route.ASPathRaw[0].Type = types.ASSegmentConfedSet
+	if got := a.Validate(route); got.State != types.ASPAUnverifiable {
+		t.Errorf("AS_CONFED_SET: %s, want Unverifiable", got.State)
+	}
+
+	// Without the confederation segment the same path verifies (Invalid).
+	route.ASPath = []uint32{64500, 13335}
+	route.ASPathRaw = route.ASPathRaw[1:]
+	if got := a.Validate(route); got.State != types.ASPAInvalid {
+		t.Errorf("without confederation: %s, want Invalid", got.State)
+	}
+}

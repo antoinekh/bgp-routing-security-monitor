@@ -34,10 +34,34 @@ func TestBoundedSeriesExportedAtZero(t *testing.T) {
 		{"raven_revalidation_routes_total", "mode=incremental,result=changed,"},
 		{"raven_revalidation_routes_total", "mode=full,result=checked,"},
 		{"raven_revalidation_routes_total", "mode=full,result=changed,"},
+		{"raven_bmp_malformed_updates_total", "action=treat_as_withdraw,reason=as_path,"},
+		{"raven_bmp_malformed_updates_total", "action=session_reset,reason=as_path,"},
+		{"raven_bmp_malformed_updates_total", "action=session_reset,reason=duplicate_mp,"},
+		{"raven_bmp_malformed_updates_total", "action=attribute_discard,reason=as4_path,"},
 	} {
 		zero, ok := got[want]
 		if !ok || !zero {
 			t.Errorf("%s{%s} exported=%v at zero=%v, want exported at 0", want.name, want.labels, ok, zero)
+		}
+	}
+}
+
+// raven_bmp_malformed_updates_total exports exactly its valid action and
+// reason pairs: discard reasons only as attribute_discard, session-reset
+// reasons only as session_reset, treat-as-withdraw reasons under both
+// treat_as_withdraw and session_reset (RFC 7606 §5.2 escalation).
+func TestMalformedUpdateSeries(t *testing.T) {
+	n := 0
+	for _, reasons := range MalformedUpdateReasons {
+		n += len(reasons)
+	}
+	if want := 3 + 6 + 2*len(treatAsWithdrawReasons); n != want {
+		t.Errorf("%d series, want %d", n, want)
+	}
+	mfs, _ := prometheus.DefaultGatherer.Gather()
+	for _, mf := range mfs {
+		if mf.GetName() == "raven_bmp_malformed_updates_total" && len(mf.GetMetric()) < n {
+			t.Errorf("%d series exported, want at least %d", len(mf.GetMetric()), n)
 		}
 	}
 }
