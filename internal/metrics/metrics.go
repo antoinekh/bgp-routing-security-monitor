@@ -35,6 +35,16 @@ var (
 		Help: "Total MP_REACH/MP_UNREACH NLRI attributes not decoded, by AFI and SAFI.",
 	}, []string{"afi", "safi"})
 
+	// BGP UPDATEs in Route Monitoring that RFC 7606 classes as malformed,
+	// one per UPDATE, labelled with the approach RAVEN applied (the
+	// strongest the UPDATE's errors call for, RFC 7606 §3 (h)) and the
+	// error that called for it. Labels: action, reason; both bounded (see
+	// MalformedUpdateReasons).
+	BMPMalformedUpdatesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "raven_bmp_malformed_updates_total",
+		Help: "Total malformed BGP UPDATEs received via BMP, by RFC 7606 action and reason.",
+	}, []string{"action", "reason"})
+
 	// RTR session state: 1=connected 0=down. Label: cache.
 	RTRSessionState = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_rtr_session_state",
@@ -194,13 +204,64 @@ const (
 	RejectReasonNotAllowed    = "not_allowed"
 	RejectReasonBadRemoteAddr = "bad_remote_addr"
 
+	// raven_bmp_malformed_updates_total actions: the RFC 7606 §2
+	// approaches, weakest first.
+	MalformedActionAttributeDiscard = "attribute_discard"
+	MalformedActionTreatAsWithdraw  = "treat_as_withdraw"
+	MalformedActionSessionReset     = "session_reset"
+
+	// raven_bmp_malformed_updates_total reasons.
+	MalformedReasonASPath           = "as_path"           // truncated, zero-length or unknown segment (§7.2)
+	MalformedReasonAttrLength       = "attr_length"       // attribute running past the path attributes (§4)
+	MalformedReasonAttrFlags        = "attr_flags"        // Optional/Transitive bits wrong (§3 (c))
+	MalformedReasonOrigin           = "origin"            // §7.1
+	MalformedReasonNextHop          = "next_hop"          // §7.3
+	MalformedReasonMED              = "med"               // §7.4
+	MalformedReasonLocalPref        = "local_pref"        // §7.5, from an internal peer
+	MalformedReasonCommunities      = "communities"       // §7.8
+	MalformedReasonOriginatorID     = "originator_id"     // §7.9, from an internal peer
+	MalformedReasonClusterList      = "cluster_list"      // §7.10, from an internal peer
+	MalformedReasonLargeCommunities = "large_communities" // RFC 8092 §6
+	MalformedReasonMissingMandatory = "missing_mandatory" // §3 (d)
+	MalformedReasonAS4Path          = "as4_path"          // RFC 6793 §6
+	MalformedReasonAS4Aggregator    = "as4_aggregator"    // RFC 6793 §6
+	MalformedReasonDuplicateAttr    = "duplicate_attr"    // §3 (g), all but the first discarded
+	MalformedReasonNLRI             = "nlri"              // NLRI or Withdrawn Routes syntactically incorrect (§5.3)
+	MalformedReasonMPReach          = "mp_reach"          // MP_REACH_NLRI too short or flags wrong (§5.3)
+	MalformedReasonMPReachNextHop   = "mp_reach_next_hop" // next hop length not as expected (§7.11)
+	MalformedReasonMPUnreach        = "mp_unreach"        // MP_UNREACH_NLRI too short or flags wrong (§5.3)
+	MalformedReasonDuplicateMP      = "duplicate_mp"      // MP_REACH/MP_UNREACH more than once (§3 (g))
+	MalformedReasonUpdateLength     = "update_length"     // UPDATE length fields overflow the message (§3 (b))
+
 	RevalidationModeIncremental = "incremental"
 	RevalidationModeFull        = "full"
 	RevalidationResultChecked   = "checked"
 	RevalidationResultChanged   = "changed"
 )
 
+// MalformedUpdateReasons lists, per action, the reasons that can carry it:
+// the series of raven_bmp_malformed_updates_total. A treat-as-withdraw
+// error in an UPDATE with no reachable NLRI is escalated to session reset
+// (RFC 7606 §5.2), so those reasons appear under both.
+var MalformedUpdateReasons = map[string][]string{
+	MalformedActionAttributeDiscard: {MalformedReasonAS4Path, MalformedReasonAS4Aggregator, MalformedReasonDuplicateAttr},
+	MalformedActionTreatAsWithdraw:  treatAsWithdrawReasons,
+	MalformedActionSessionReset: append([]string{MalformedReasonNLRI, MalformedReasonMPReach,
+		MalformedReasonMPReachNextHop, MalformedReasonMPUnreach, MalformedReasonDuplicateMP,
+		MalformedReasonUpdateLength}, treatAsWithdrawReasons...),
+}
+
+var treatAsWithdrawReasons = []string{MalformedReasonASPath, MalformedReasonAttrLength, MalformedReasonAttrFlags,
+	MalformedReasonOrigin, MalformedReasonNextHop, MalformedReasonMED, MalformedReasonLocalPref,
+	MalformedReasonCommunities, MalformedReasonOriginatorID, MalformedReasonClusterList,
+	MalformedReasonLargeCommunities, MalformedReasonMissingMandatory}
+
 func init() {
+	for action, reasons := range MalformedUpdateReasons {
+		for _, reason := range reasons {
+			BMPMalformedUpdatesTotal.WithLabelValues(action, reason)
+		}
+	}
 	for _, reason := range []string{RejectReasonNotAllowed, RejectReasonBadRemoteAddr} {
 		BMPRejectedConnectionsTotal.WithLabelValues(reason)
 	}

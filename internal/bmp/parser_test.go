@@ -131,7 +131,10 @@ func TestParseASPath(t *testing.T) {
 	binary.BigEndian.PutUint32(asn2, 13335)
 	data = append(data, asn2...)
 
-	raw := parseASPath(data, 4)
+	raw, ok := parseASPath(data, 4)
+	if !ok {
+		t.Fatal("AS_PATH reported malformed")
+	}
 	flat := flattenASPath(raw)
 
 	if len(flat) != 2 {

@@ -15,7 +15,8 @@ import (
 )
 
 // asPathAttr encodes an AS_PATH-style attribute (flags, type, length, value)
-// from segments with asnLen-byte AS numbers.
+// from segments with asnLen-byte AS numbers: AS_PATH well-known, AS4_PATH
+// optional transitive.
 func asPathAttr(attrType byte, asnLen int, segs ...types.ASSegment) []byte {
 	var v []byte
 	for _, s := range segs {
@@ -28,7 +29,11 @@ func asPathAttr(attrType byte, asnLen int, segs ...types.ASSegment) []byte {
 			}
 		}
 	}
-	return append([]byte{0x40, attrType, byte(len(v))}, v...)
+	flags := byte(attrFlagTransitive)
+	if attrType == attrAS4Path {
+		flags |= attrFlagOptional
+	}
+	return append([]byte{flags, attrType, byte(len(v))}, v...)
 }
 
 func seq(asns ...uint32) types.ASSegment {
@@ -76,9 +81,10 @@ func TestAS4PathMerge(t *testing.T) {
 			[]uint32{64500, big1}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := parsePathAttributes(tc.attrs, tc.as2)
-			if !slices.Equal(a.asPath, tc.want) || len(a.asPathRaw) != tc.segs {
-				t.Errorf("path %v in %d segments, want %v in %d", a.asPath, len(a.asPathRaw), tc.want, tc.segs)
+			var m malformation
+			a := parsePathAttributes(tc.attrs, tc.as2, false, &m)
+			if !slices.Equal(a.asPath, tc.want) || len(a.asPathRaw) != tc.segs || m.action != actNone {
+				t.Errorf("path %v in %d segments (%+v), want %v in %d", a.asPath, len(a.asPathRaw), m, tc.want, tc.segs)
 			}
 		})
 	}
@@ -90,7 +96,7 @@ func TestAS4PathMerge(t *testing.T) {
 	body := binary.BigEndian.AppendUint16([]byte{0, 0}, uint16(len(attrs)))
 	body = append(append(body, attrs...), encodeNLRI(false, pathNLRI{0, netip.MustParsePrefix("1.1.1.0/24")})...)
 	rs, _, err := parseBGPUpdate(body, pph, netip.MustParseAddr("192.0.2.1"), 0, 0)
-	if err != nil || len(rs) != 1 || !slices.Equal(rs[0].ASPath, []uint32{64500, big1}) || rs[0].OriginASN() != big1 {
+	if err.action != actNone || len(rs) != 1 || !slices.Equal(rs[0].ASPath, []uint32{64500, big1}) || rs[0].OriginASN() != big1 {
 		t.Errorf("A-flag UPDATE: routes %+v err %v, want path [64500 %d]", rs, err, uint32(big1))
 	}
 }
@@ -163,7 +169,7 @@ func TestIPv4InMPReach(t *testing.T) {
 			attrs := mpReachAttr(1, 1, tc.nh, encodeNLRI(ap, pathNLRI{5, p}))
 			attrs = append(attrs, mpUnreachAttr(1, 1, encodeNLRI(ap, pathNLRI{6, netip.MustParsePrefix("8.8.8.0/24")}))...)
 			rs, ws, err := parseBGPUpdate(updateWithAttrs(attrs), pph, router, 0, tc.addPath)
-			if err != nil || len(rs) != 1 || len(ws) != 1 {
+			if err.action != actNone || len(rs) != 1 || len(ws) != 1 {
 				t.Fatalf("routes %v withdrawals %v err %v, want one each", rs, ws, err)
 			}
 			wantID := map[bool]uint32{true: 5, false: 0}[ap]
@@ -281,16 +287,17 @@ func TestPeerStateMetricLabels(t *testing.T) {
 }
 
 // Regression: a Withdrawn Routes Length running past the UPDATE was sliced as
-// given and panicked the session goroutine, taking down the process.
+// given and panicked the session goroutine, taking down the process. Now it
+// is a session reset (RFC 7606 §3 (b)) with nothing to withdraw: the field
+// cannot be delimited.
 func TestWithdrawnLengthOverflow(t *testing.T) {
 	for _, body := range [][]byte{
-		{0xff, 0xff, 0, 0},       // 65535 withdrawn bytes in a 4-byte UPDATE
-		{0, 3, 24, 1, 1},         // withdrawn routes, no room for the attributes length
-		{0, 1, 0, 0xff, 0xff, 0}, // attributes length past the end
+		{0xff, 0xff, 0, 0}, // 65535 withdrawn bytes in a 4-byte UPDATE
+		{0, 3, 24, 1, 1},   // withdrawn routes, no room for the attributes length
 	} {
-		rs, ws, err := parseBGPUpdate(body, BMPPerPeerHeader{}, netip.Addr{}, 0, 0)
-		if err == nil || rs != nil || ws != nil {
-			t.Errorf("UPDATE % x: routes %v withdrawals %v err %v, want an error and nothing", body, rs, ws, err)
+		rs, ws, m := parseBGPUpdate(body, BMPPerPeerHeader{}, netip.Addr{}, 0, 0)
+		if m.action != actSessionReset || m.reason != "update_length" || rs != nil || ws != nil {
+			t.Errorf("UPDATE % x: routes %v withdrawals %v %+v, want update_length session reset and nothing", body, rs, ws, m)
 		}
 	}
 }

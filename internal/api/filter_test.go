@@ -173,3 +173,65 @@ func TestRouteJSONFailingHop(t *testing.T) {
 		t.Errorf("JSON %s lacks the failing hop", b)
 	}
 }
+
+// The routes listing shows one RIB, Adj-RIB-In pre-policy unless rib names
+// another, with or without other filters. Outbound routes could not be
+// listed at all before.
+func TestRoutesRIB(t *testing.T) {
+	table := routetable.New()
+	peer := netip.MustParseAddr("80.81.194.180")
+	for _, rib := range types.AllRIBTypes {
+		for _, prefix := range []string{"1.1.1.0/24", "8.8.8.0/24"} {
+			table.Insert(&types.Route{PeerAddr: peer, Prefix: netip.MustParsePrefix(prefix),
+				ASPath: []uint32{64501, 13335}, RIBType: rib, SecurityPosture: types.PostureSecured})
+		}
+	}
+	s := NewServer(table, nil, store.NewVRPStore(), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	for _, filter := range []url.Values{{}, {"prefix": {"1.1.1.0/24"}}, {"origin-asn": {"13335"}},
+		{"peer": {"80.81.194.180"}}, {"posture": {"secured"}}} {
+		for _, rib := range append([]string{""}, func() (names []string) {
+			for _, r := range types.AllRIBTypes {
+				names = append(names, r.String())
+			}
+			return
+		}()...) {
+			q := url.Values{}
+			for k, v := range filter {
+				q[k] = v
+			}
+			want := rib
+			if rib != "" {
+				q.Set("rib", rib)
+			} else {
+				want = "adj-rib-in-pre"
+			}
+			code, routes := getRoutes(t, s, q)
+			if code != http.StatusOK || len(routes) == 0 {
+				t.Fatalf("%v: status %d, %d routes", q, code, len(routes))
+			}
+			for _, r := range routes {
+				if r.RIB != want {
+					t.Errorf("%v: got a %s route, want only %s", q, r.RIB, want)
+				}
+			}
+		}
+	}
+	if code, _ := getRoutes(t, s, url.Values{"rib": {"adj-rib-in"}}); code != http.StatusBadRequest {
+		t.Errorf("unknown rib: status %d, want 400", code)
+	}
+
+	// A watch is filtered by RIB only when rib is given.
+	all, err := parseRouteFilter(url.Values{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := parseRouteFilter(url.Values{"rib": {"adj-rib-out-pre"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := &types.Route{RIBType: types.AdjRIBInPost}
+	outbound := &types.Route{RIBType: types.AdjRIBOutPre}
+	if !all.match(post) || !all.match(outbound) || out.match(post) || !out.match(outbound) {
+		t.Error("watch RIB filtering wrong")
+	}
+}

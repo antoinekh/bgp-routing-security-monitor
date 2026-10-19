@@ -107,3 +107,43 @@ func TestStatusAndPeersShowRouter(t *testing.T) {
 		}
 	}
 }
+
+// raven routes sends --rib, adj-rib-in-pre unless given.
+func TestRoutesRIBFlag(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+	runCLI(t, srv, "routes")
+	if got.Get("rib") != "adj-rib-in-pre" {
+		t.Errorf("default rib = %q, want adj-rib-in-pre", got.Get("rib"))
+	}
+	runCLI(t, srv, "routes", "--rib", "adj-rib-out-post")
+	if got.Get("rib") != "adj-rib-out-post" {
+		t.Errorf("rib = %q, want adj-rib-out-post", got.Get("rib"))
+	}
+	runCLI(t, srv, "routes", "--rib", "adj-rib-in-pre")
+}
+
+// raven peers shows a MALFORMED column, with the reason, only when a peer
+// is marked for malformed input.
+func TestPeersMalformedColumn(t *testing.T) {
+	peers := `[{"router":"192.0.2.1","addr":"80.81.194.180","asn":6695,"state":"up","route_count":12,
+  "malformed_input":true,"malformed_reason":"nlri"},
+ {"router":"192.0.2.1","addr":"80.81.194.181","asn":6695,"state":"up","route_count":3}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, peers)
+	}))
+	defer srv.Close()
+	lines := strings.Split(strings.TrimSpace(runCLI(t, srv, "peers")), "\n")
+	if len(lines) != 3 || !strings.HasSuffix(strings.TrimSpace(lines[0]), "MALFORMED") ||
+		!strings.HasSuffix(strings.TrimSpace(lines[1]), "nlri") || !strings.HasSuffix(strings.TrimSpace(lines[2]), "-") {
+		t.Errorf("peers output:\n%s", strings.Join(lines, "\n"))
+	}
+	peers = `[{"router":"192.0.2.1","addr":"80.81.194.181","asn":6695,"state":"up","route_count":3}]`
+	if out := runCLI(t, srv, "peers"); strings.Contains(out, "MALFORMED") {
+		t.Errorf("MALFORMED column with no marked peer:\n%s", out)
+	}
+}

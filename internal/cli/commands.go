@@ -167,6 +167,36 @@ type peerRow struct {
 	RouteCount        uint64            `json:"route_count"` // Adj-RIB-In pre-policy
 	RoutesByRIB       map[string]uint64 `json:"routes_by_rib"`
 	UpSince           string            `json:"up_since"`
+	MalformedInput    bool              `json:"malformed_input"`
+	MalformedReason   string            `json:"malformed_reason"`
+}
+
+// anyMalformed reports whether any peer is marked for malformed input: only
+// then does peers show a MALFORMED column, the RFC 7606 reason or "-".
+func anyMalformed(rows []peerRow) bool {
+	for _, p := range rows {
+		if p.MalformedInput {
+			return true
+		}
+	}
+	return false
+}
+
+func malformedHeader(show bool) string {
+	if show {
+		return "\tMALFORMED"
+	}
+	return ""
+}
+
+func (p peerRow) malformedCell(show bool) string {
+	switch {
+	case !show:
+		return ""
+	case p.MalformedInput:
+		return "\t" + p.MalformedReason
+	}
+	return "\t-"
 }
 
 // anyOutbound reports whether any peer has Adj-RIB-Out routes: only then do
@@ -232,10 +262,12 @@ var peersCmd = &cobra.Command{
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		out := anyOutbound(peers)
-		fmt.Fprintf(tw, "ROUTER\tPEER\tASN\tROUTER ID\tSTATE\tROUTES%s\tUP SINCE\n", outHeader(out))
+		bad := anyMalformed(peers)
+		fmt.Fprintf(tw, "ROUTER\tPEER\tASN\tROUTER ID\tSTATE\tROUTES%s\tUP SINCE%s\n", outHeader(out), malformedHeader(bad))
 		for _, p := range peers {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d%s\t%s\n",
-				p.router(), p.peer(), p.ASN, p.RouterID, p.State, p.RouteCount, p.outCell(out), p.UpSince)
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d%s\t%s%s\n",
+				p.router(), p.peer(), p.ASN, p.RouterID, p.State, p.RouteCount, p.outCell(out), p.UpSince,
+				p.malformedCell(bad))
 		}
 		tw.Flush()
 		return nil
@@ -265,6 +297,9 @@ var routesCmd = &cobra.Command{
 		}
 		if v, _ := cmd.Flags().GetString("router"); v != "" {
 			params.Set("router", v)
+		}
+		if v, _ := cmd.Flags().GetString("rib"); v != "" {
+			params.Set("rib", v)
 		}
 
 		resp, err := apiGet(addr, "/api/v1/routes", params)
@@ -526,6 +561,8 @@ func init() {
 	routesCmd.Flags().String("peer", "", "filter by BMP peer address")
 	routesCmd.Flags().String("posture", "", "filter by security posture")
 	routesCmd.Flags().String("router", "", "filter by monitored router: its address or BMP sysName")
+	routesCmd.Flags().String("rib", "adj-rib-in-pre",
+		"RIB to list: adj-rib-in-pre, adj-rib-in-post, adj-rib-out-pre, adj-rib-out-post or loc-rib")
 	routesCmd.Flags().String("format", "table", "output format: table, wide, json")
 
 	// validate flags

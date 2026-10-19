@@ -168,6 +168,16 @@ type Peer struct {
 	UpSince       time.Time
 	LastMsg       time.Time
 
+	// MalformedInput is set when an UPDATE from the peer was malformed in
+	// a way RFC 7606 answers with a session reset (MalformedReason says
+	// which, a raven_bmp_malformed_updates_total reason; MalformedAt when
+	// first). RAVEN withdrew what it could parse and expects the router's
+	// Peer Down; until then its routes for the peer may be incomplete. A
+	// new Peer Up clears it.
+	MalformedInput  bool
+	MalformedReason string
+	MalformedAt     time.Time
+
 	session uint64       // ID of the BMP session whose Peer Up created this entry
 	addPath AddPathState // from Peer Up
 }

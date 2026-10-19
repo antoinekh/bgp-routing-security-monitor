@@ -28,9 +28,13 @@ func NewAnnotator(vrpStore *store.VRPStore) *Annotator {
 func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 	originASN := route.OriginASN()
 	if originASN == 0 {
+		reason := "no origin ASN in AS_PATH"
+		if n := len(route.ASPathRaw); n > 0 && route.ASPathRaw[n-1].Type.IsConfed() {
+			reason = confedOriginReason
+		}
 		return types.ROVResult{
 			State:  types.ROVNotFound,
-			Reason: "no origin ASN in AS_PATH",
+			Reason: reason,
 		}
 	}
 
@@ -61,6 +65,12 @@ func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 		Reason:      invalidReason(originASN),
 	}
 }
+
+// confedOriginReason is the ROV Reason when the AS_PATH ends in a
+// confederation segment. RFC 6811 §2 takes the origin from the final
+// segment only if it is an AS_SEQUENCE; after a confederation segment it is
+// the router's own AS, which RAVEN does not know.
+const confedOriginReason = "no origin ASN: route originated inside the local AS confederation (RFC 6811 §2)"
 
 // validReason and invalidReason build the Reason strings with a single
 // allocation; fmt.Sprintf boxed each argument as well. The text is the same:

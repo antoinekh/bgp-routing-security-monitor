@@ -20,6 +20,10 @@ import (
 //     hidden bytes after it (len < cap) gives exactly what decoding an exact
 //     copy gives.
 //
+// The UPDATE decoders are also checked for the RFC 7606 invariants
+// (checkUpdateInvariants) and for classifying the same input the same way
+// every time.
+//
 // Run with `make fuzz` (FUZZTIME per target, default 5m). Inputs that fail
 // are saved under testdata/fuzz/<Target>/ and replayed by every `go test`.
 
@@ -69,25 +73,183 @@ func sameOnBothSlices[T any](t *testing.T, data []byte, decode func([]byte) T) T
 type updateResult struct {
 	Routes      []types.Route
 	Withdrawals []types.Withdrawal
-	Err         string
+	// The RFC 7606 classification.
+	Action, Reason, Detail string
+}
+
+func toResult(rs []types.Route, ws []types.Withdrawal, m malformation) updateResult {
+	return updateResult{Routes: rs, Withdrawals: ws, Action: m.action.String(), Reason: m.reason, Detail: m.detail}
 }
 
 func decodeUpdate(data []byte, flags uint8, addPath AFIMask) updateResult {
 	pph := BMPPerPeerHeader{Flags: flags, PeerAddr: netip.MustParseAddr("80.81.194.180"), PeerASN: 64501}
-	rs, ws, err := parseBGPUpdate(data, pph, netip.MustParseAddr("192.0.2.1"), 64500, addPath)
-	r := updateResult{Routes: rs, Withdrawals: ws}
-	if err != nil {
-		r.Err = err.Error()
+	return toResult(parseBGPUpdate(data, pph, netip.MustParseAddr("192.0.2.1"), 64500, addPath))
+}
+
+// checkDeterministic decodes data twice more, each from a fresh copy, and
+// fails unless both give exactly want, classification included.
+func checkDeterministic[T any](t *testing.T, data []byte, want T, decode func([]byte) T) {
+	t.Helper()
+	for range 2 {
+		if got := decode(exactCopy(data)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("same input decoded differently:\n first %+v\n again %+v", want, got)
+		}
 	}
-	return r
+}
+
+// strictAttrs is the fuzz oracle for routes: an independent, strict reading
+// of an UPDATE body's ORIGIN, AS_PATH and NEXT_HOP (the first of each). ok
+// is false if any attribute cannot be delimited, or if ORIGIN or AS_PATH is
+// missing or malformed, or NEXT_HOP is when the NLRI field is not empty:
+// an UPDATE whose prefixes the router would never install.
+func strictAttrs(body []byte, as2 bool) (origin uint8, path []types.ASSegment, ok bool) {
+	if len(body) < 4 {
+		return 0, nil, false
+	}
+	wl := int(body[0])<<8 | int(body[1])
+	if 2+wl+2 > len(body) {
+		return 0, nil, false
+	}
+	al := int(body[2+wl])<<8 | int(body[3+wl])
+	attrs, end := body[4+wl:], 4+wl+al
+	if end > len(body) {
+		return 0, nil, false
+	}
+	attrs = attrs[:al]
+	nlriPresent := end < len(body)
+	var haveOrigin, havePath, haveNH bool
+	for i := 0; i < len(attrs); {
+		if i+3 > len(attrs) {
+			return 0, nil, false
+		}
+		flags, typ, hl, l := attrs[i], attrs[i+1], 3, int(attrs[i+2])
+		if flags&0x10 != 0 {
+			if i+4 > len(attrs) {
+				return 0, nil, false
+			}
+			hl, l = 4, int(attrs[i+2])<<8|int(attrs[i+3])
+		}
+		if i+hl+l > len(attrs) {
+			return 0, nil, false
+		}
+		v := attrs[i+hl : i+hl+l]
+		i += hl + l
+		wellKnown := flags&0xc0 == 0x40
+		switch {
+		case typ == 1 && !haveOrigin:
+			haveOrigin = true
+			if !wellKnown || l != 1 || v[0] > 2 {
+				return 0, nil, false
+			}
+			origin = v[0]
+		case typ == 2 && !havePath:
+			havePath = true
+			if !wellKnown {
+				return 0, nil, false
+			}
+			n := 4
+			if as2 {
+				n = 2
+			}
+			for j := 0; j < len(v); {
+				if j+2 > len(v) || v[j] < 1 || v[j] > 4 || v[j+1] == 0 || j+2+int(v[j+1])*n > len(v) {
+					return 0, nil, false
+				}
+				seg := types.ASSegment{Type: types.ASSegmentType(v[j])}
+				for k := 0; k < int(v[j+1]); k++ {
+					var a uint32
+					for b := 0; b < n; b++ {
+						a = a<<8 | uint32(v[j+2+k*n+b])
+					}
+					seg.ASNs = append(seg.ASNs, a)
+				}
+				path = append(path, seg)
+				j += 2 + int(v[j+1])*n
+			}
+		case typ == 3 && !haveNH:
+			haveNH = true
+			if !wellKnown || l != 4 {
+				return 0, nil, false
+			}
+		}
+	}
+	if !haveOrigin || !havePath || (nlriPresent && !haveNH) {
+		return 0, nil, false
+	}
+	return origin, path, true
+}
+
+// rfc6811Origin is the origin AS of a path per RFC 6811 §2, written apart
+// from types.Route.OriginASN: the last AS of a final AS_SEQUENCE; 0 (no
+// origin RAVEN can name) after a final confederation segment or for an
+// empty path. A final AS_SET gives its last member, as RAVEN does.
+func rfc6811Origin(path []types.ASSegment) uint32 {
+	if len(path) == 0 {
+		return 0
+	}
+	last := path[len(path)-1]
+	if last.Type == types.ASSegmentConfedSequence || last.Type == types.ASSegmentConfedSet || len(last.ASNs) == 0 {
+		return 0
+	}
+	return last.ASNs[len(last.ASNs)-1]
+}
+
+// checkUpdateInvariants checks what a decoded UPDATE may contain:
+//
+//   - a treat-as-withdraw or session-reset UPDATE yields no route;
+//   - every route comes from an UPDATE the oracle (strictAttrs) finds a
+//     valid ORIGIN, AS_PATH and, for NLRI-field prefixes, NEXT_HOP in, and
+//     carries that ORIGIN and, over a 4-octet session, that AS_PATH and its
+//     RFC 6811 origin AS. Over a 2-octet session AS4_PATH may rewrite the
+//     path, so the origin AS is checked against the route's own path.
+//
+// So no route is stored without a valid origin; anything else must have
+// come back as a withdrawal.
+func checkUpdateInvariants(t *testing.T, body []byte, flags uint8, r updateResult) {
+	t.Helper()
+	if r.Action == actTreatAsWithdraw.String() || r.Action == actSessionReset.String() {
+		if len(r.Routes) != 0 {
+			t.Fatalf("%s (%s) UPDATE produced %d routes", r.Action, r.Reason, len(r.Routes))
+		}
+		return
+	}
+	if len(r.Routes) == 0 {
+		return
+	}
+	as2 := flags&PeerFlagAS2 != 0
+	origin, path, ok := strictAttrs(body, as2)
+	if !ok {
+		t.Fatalf("route stored from an UPDATE without a valid ORIGIN/AS_PATH/NEXT_HOP (classified %q %q): %+v",
+			r.Action, r.Reason, r.Routes[0])
+	}
+	for _, rt := range r.Routes {
+		if !rt.Prefix.IsValid() {
+			t.Fatalf("decoded an invalid prefix %v", rt.Prefix)
+		}
+		if uint8(rt.Origin) != origin {
+			t.Fatalf("route ORIGIN %d, UPDATE has %d", rt.Origin, origin)
+		}
+		want := path
+		if as2 {
+			want = rt.ASPathRaw
+		} else if !reflect.DeepEqual(rt.ASPathRaw, path) {
+			t.Fatalf("route AS_PATH %+v, UPDATE has %+v", rt.ASPathRaw, path)
+		}
+		if got := rt.OriginASN(); got != rfc6811Origin(want) {
+			t.Fatalf("route origin AS%d, RFC 6811 gives AS%d for %+v", got, rfc6811Origin(want), want)
+		}
+	}
 }
 
 // FuzzDecodeUpdate fuzzes the BGP UPDATE decoder: withdrawn routes, path
 // attributes (AS_PATH and AS4_PATH with 2- and 4-octet ASNs, communities,
 // MP_REACH_NLRI / MP_UNREACH_NLRI for every AFI/SAFI) and NLRI, with
-// ADD-PATH on and off per address family and every per-peer flag.
+// ADD-PATH on and off per address family and every per-peer flag. Besides
+// the common checks it checks the RFC 7606 invariants
+// (checkUpdateInvariants) and that classification is deterministic.
 func FuzzDecodeUpdate(f *testing.F) {
 	p, v6 := netip.MustParsePrefix("1.1.1.0/24"), netip.MustParsePrefix("2001:db8:1::/48")
+	nh := []byte{0x40, 3, 4, 192, 0, 2, 254}
 	for _, seed := range [][]byte{
 		updateBody(false, false, []pathNLRI{{0, p}}, []pathNLRI{{0, p}}, []pathNLRI{{0, v6}}),
 		updateBody(true, true, []pathNLRI{{3, p}}, []pathNLRI{{1, p}, {2, p}}, []pathNLRI{{7, v6}}),
@@ -97,6 +259,13 @@ func FuzzDecodeUpdate(f *testing.F) {
 		updateWithAttrs(mpReachAttr(1, 128, make([]byte, 12), []byte{0x70, 0, 0, 1})),
 		updateWithAttrs(append(asPathAttr(2, 2, seq(64500, asTrans)), asPathAttr(17, 4, seq(4200000001))...)),
 		updateWithAttrs([]byte{0xc0, 8, 4, 0xfd, 0xe8, 0, 1, 0xc0, 32, 12, 0, 0, 0xfd, 0xe8, 0, 0, 0, 1, 0, 0, 0, 2}),
+		// RFC 7606 cases: a truncated AS_PATH, a confederation path, a
+		// repeated MP_REACH_NLRI, and an attribute overrun with withdrawals.
+		append(rawUpdate(nil, append([]byte{0x40, 1, 1, 0, 0x40, 2, 6, 2, 2, 0, 0, 0xfb, 0xf5}, nh...)), 24, 1, 1, 1),
+		append(rawUpdate(nil, append(append([]byte{0x40, 1, 1, 0}, asPathAttr(2, 4, confed(65001), seq(64500))...), nh...)), 24, 1, 1, 1),
+		updateWithAttrs(append(mpReachAttr(2, 1, netip.MustParseAddr("2001:db8::fe").AsSlice(), encodeNLRI(false, pathNLRI{0, v6})),
+			mpReachAttr(2, 1, netip.MustParseAddr("2001:db8::fe").AsSlice(), encodeNLRI(false, pathNLRI{0, v6}))...)),
+		rawUpdate([]byte{24, 8, 8, 8}, []byte{0x40, 1, 5, 0}),
 	} {
 		for _, flags := range []uint8{0, PeerFlagAS2, PeerFlagAdjRIBOut | PeerFlagPostPolicy} {
 			f.Add(seed, flags, uint8(0))
@@ -104,14 +273,12 @@ func FuzzDecodeUpdate(f *testing.F) {
 		}
 	}
 	f.Fuzz(func(t *testing.T, data []byte, flags, addPath uint8) {
-		r := sameOnBothSlices(t, data, func(b []byte) updateResult {
+		decode := func(b []byte) updateResult {
 			return decodeUpdate(b, flags, AFIMask(addPath)&(AFIIPv4Unicast|AFIIPv6Unicast))
-		})
-		for _, rt := range r.Routes {
-			if !rt.Prefix.IsValid() || rt.Prefix != rt.Prefix.Masked() && rt.Prefix.Bits() < 0 {
-				t.Fatalf("decoded an invalid prefix %v", rt.Prefix)
-			}
 		}
+		r := sameOnBothSlices(t, data, decode)
+		checkDeterministic(t, data, r, decode)
+		checkUpdateInvariants(t, data, flags, r)
 	})
 }
 
@@ -205,11 +372,10 @@ func decodeMessage(data []byte, addPath AFIMask) messageResult {
 		rm, err := ParseRouteMonitoring(body)
 		r.Parsed = rm
 		setErr(err)
-		if err == nil && len(rm.BGPUpdateData) >= 19 && rm.BGPUpdateData[18] == 2 {
-			n := int(binary.BigEndian.Uint16(rm.BGPUpdateData[16:18]))
-			if n >= 19 && n <= len(rm.BGPUpdateData) {
-				r.Update = decodeUpdate(rm.BGPUpdateData[19:n], rm.PerPeer.Flags, addPath)
-			}
+		if err == nil {
+			// The listener's own path from here: decodeRouteMonitoring,
+			// BGP header checks included.
+			r.Update = toResult(decodeRouteMonitoring(rm, netip.MustParseAddr("192.0.2.1"), 64500, addPath))
 		}
 	}
 	return r
@@ -228,6 +394,7 @@ func FuzzBMPMessage(f *testing.F) {
 		peerUpWithOpens(peer, 0, openMsg(64500, addPathCap(withSR(v4uni, 1))), openMsg(64501, addPathCap(withSR(v4uni, 2)))),
 		routeMonitoringMsg(peer, p, netip.MustParsePrefix("8.8.8.0/24")),
 		routeMonitoringRD(peer, 0x0000fde8_00000064, updateBody(true, false, nil, []pathNLRI{{1, p}, {2, p}}, nil)),
+		routeMonitoringWithBGPLength(peer, 5, updateBody(false, false, []pathNLRI{{0, p}}, nil, nil)),
 		bmpMsg(MsgTypePeerDown, peerDownBody(peer)),
 		bmpMsg(MsgTypeStatisticsReport, stats),
 		bmpMsg(MsgTypeTermination, nil),
@@ -236,8 +403,19 @@ func FuzzBMPMessage(f *testing.F) {
 		f.Add(msg, uint8(AFIIPv4Unicast))
 	}
 	f.Fuzz(func(t *testing.T, data []byte, addPath uint8) {
-		sameOnBothSlices(t, data, func(b []byte) messageResult {
+		decode := func(b []byte) messageResult {
 			return decodeMessage(b, AFIMask(addPath)&(AFIIPv4Unicast|AFIIPv6Unicast))
-		})
+		}
+		r := sameOnBothSlices(t, data, decode)
+		checkDeterministic(t, data, r, decode)
+		rm, ok := r.Parsed.(BMPRouteMonitoring)
+		if !ok || len(rm.BGPUpdateData) < bgpHeaderLen {
+			return
+		}
+		body := rm.BGPUpdateData[bgpHeaderLen:]
+		if n := int(binary.BigEndian.Uint16(rm.BGPUpdateData[16:18])); n >= bgpHeaderLen && n <= len(rm.BGPUpdateData) {
+			body = rm.BGPUpdateData[bgpHeaderLen:n]
+		}
+		checkUpdateInvariants(t, body, rm.PerPeer.Flags, r.Update)
 	})
 }

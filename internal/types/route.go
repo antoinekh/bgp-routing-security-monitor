@@ -99,12 +99,42 @@ type IngestEvent struct {
 	Superseded bool
 }
 
-// OriginASN returns the last ASN in the AS_PATH (the route originator).
+// OriginASN returns the route's origin AS (RFC 6811 §2): the rightmost AS
+// in the AS_PATH's final segment. Confederation segments never supply it:
+// a final AS_CONFED_SEQUENCE or AS_CONFED_SET means the route originated
+// inside the monitored router's own confederation, whose origin RFC 6811
+// makes the router's own AS. RAVEN does not know the confederation's AS
+// (the session's OPEN carries the member AS), so the result is 0, as for
+// an empty AS_PATH: no origin.
+//
+// A final AS_SET gives its last member, though RFC 6811 makes the origin
+// NONE. A route with no ASPathRaw (one built without segments) uses the
+// last AS of ASPath.
 func (r *Route) OriginASN() uint32 {
+	if n := len(r.ASPathRaw); n > 0 {
+		last := r.ASPathRaw[n-1]
+		if last.Type.IsConfed() || len(last.ASNs) == 0 {
+			return 0
+		}
+		return last.ASNs[len(last.ASNs)-1]
+	}
 	if len(r.ASPath) == 0 {
 		return 0
 	}
 	return r.ASPath[len(r.ASPath)-1]
+}
+
+// HasConfedSegment reports whether the AS_PATH has an AS_CONFED_SEQUENCE
+// or AS_CONFED_SET segment. A router only accepts those from a peer inside
+// its own AS confederation (RFC 5065 §5); outside it they are stripped
+// (§4.1).
+func (r *Route) HasConfedSegment() bool {
+	for _, seg := range r.ASPathRaw {
+		if seg.Type.IsConfed() {
+			return true
+		}
+	}
+	return false
 }
 
 // PeerRef identifies a BGP peer as one monitored router sees it: the router,
@@ -162,6 +192,11 @@ const (
 	ASSegmentConfedSequence ASSegmentType = 3 // AS_CONFED_SEQUENCE (RFC 5065)
 	ASSegmentConfedSet      ASSegmentType = 4 // AS_CONFED_SET (RFC 5065)
 )
+
+// IsConfed reports whether t is a confederation segment type.
+func (t ASSegmentType) IsConfed() bool {
+	return t == ASSegmentConfedSequence || t == ASSegmentConfedSet
+}
 
 type ASSegment struct {
 	Type ASSegmentType

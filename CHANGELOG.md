@@ -24,8 +24,31 @@ All notable changes to RAVEN are recorded here.
 - The daemon reports the build's version (`raven status`), from the same
   build info as `raven version`; it always said "dev". Build info moved from
   `internal/cli` to `internal/buildinfo` (Makefile LDFLAGS updated).
+- Malformed BGP UPDATEs in Route Monitoring are handled as RFC 7606 tells
+  the monitored router to, so RAVEN's table matches the router's Adj-RIB-In:
+  treat-as-withdraw (malformed AS_PATH, ORIGIN, NEXT_HOP, MED, COMMUNITIES,
+  LARGE_COMMUNITY, attribute overruns and flag errors, missing mandatory
+  attributes) withdraws the UPDATE's prefixes instead of storing them;
+  a malformed AS4_PATH or AS4_AGGREGATOR is discarded; of a repeated
+  attribute the first is kept. Session-reset errors (malformed NLRI or
+  MP_REACH next hop, repeated MP_REACH/MP_UNREACH, overflowing length
+  fields) withdraw every prefix that parses and mark the peer
+  `malformed_input` in `/api/v1/peers` and `raven peers` until its next
+  Peer Up; the BMP session stays up. Such routes used to be stored with
+  partial attributes, and a truncated AS_PATH gave a false ROV origin.
+- ROV takes no origin from confederation segments (RFC 6811 §2): a route
+  whose AS_PATH ends in AS_CONFED_SEQUENCE/AS_CONFED_SET is NotFound with a
+  reason; it used to be checked against a confederation member AS. ASPA
+  does not verify routes with confederation segments (Unverifiable, with
+  the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
+  used to be treated as hops.
 
 ### Fixed
+- A Route Monitoring message whose BGP Length field was below 19 panicked
+  and took down the daemon. The fuzz targets missed it: they reimplemented
+  that step with a guard; they now call the listener's decoder.
+- Withdrawals in an UPDATE whose other fields are malformed are applied;
+  the whole UPDATE used to be dropped, leaving the routes in the table.
 - BMP/BGP decoding of untrusted input: a malformed UPDATE (Withdrawn Routes
   Length past the message) panicked and took down the daemon; a BMP header
   could make RAVEN allocate up to 4 GB (messages are now capped at 1 MiB and
@@ -43,6 +66,14 @@ All notable changes to RAVEN are recorded here.
 ### Added
 - `raven_bmp_unsupported_nlri_total{afi,safi}` counts NLRI RAVEN does not
   decode, instead of dropping it silently.
+- `raven_bmp_malformed_updates_total{action,reason}` counts malformed
+  UPDATEs by RFC 7606 action and reason (all series exported at 0), with a
+  WARN per peer and reason at most once a minute (router, peer, reason,
+  action, and how many were suppressed).
+- `raven routes --rib` (API `rib` parameter): adj-rib-in-pre (default),
+  adj-rib-in-post, adj-rib-out-pre, adj-rib-out-post or loc-rib, so
+  outbound routes can be listed. `/api/v1/watch` streams are filtered by RIB
+  only when `rib` is given.
 - `make fuzz`: native Go fuzzing of the BMP message, Peer Up/OPEN and UPDATE
   decoders (not part of `make check`).
 - `bmp.allowed-routers`: IP addresses and prefixes BMP connections are
