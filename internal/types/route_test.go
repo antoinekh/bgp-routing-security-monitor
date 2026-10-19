@@ -48,7 +48,8 @@ func TestOriginASNRFC6811(t *testing.T) {
 		{"AS_CONFED_SEQUENCE only", []ASSegment{cs(65001, 65002)}, 0},
 		{"AS_CONFED_SET only", []ASSegment{cset(65001, 65002)}, 0},
 		{"AS_SEQUENCE then confederation (out of order)", []ASSegment{sq(64500), cs(65001)}, 0},
-		{"final AS_SET: its last member", []ASSegment{sq(64501), st(64510, 64511)}, 64511},
+		{"final AS_SET: NONE", []ASSegment{sq(64501), st(64510, 64511)}, 0},
+		{"AS_SET then AS_SEQUENCE", []ASSegment{st(64510, 64511), sq(64501)}, 64501},
 		{"empty", nil, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,6 +59,10 @@ func TestOriginASNRFC6811(t *testing.T) {
 			}
 			if got := r.OriginASN(); got != tc.want {
 				t.Errorf("OriginASN() = %d, want %d", got, tc.want)
+			}
+			wantNone := len(tc.segs) > 0 && tc.segs[len(tc.segs)-1].Type == ASSegmentSet
+			if got := r.OriginIsNone(); got != wantNone {
+				t.Errorf("OriginIsNone() = %v, want %v", got, wantNone)
 			}
 		})
 	}

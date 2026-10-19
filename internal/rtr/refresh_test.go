@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"strings"
@@ -322,5 +323,59 @@ func TestUnsupportedVersionDowngradesAndClearsASPA(t *testing.T) {
 	}
 	if !strings.Contains(tc.logs.String(), "level=WARN msg=\"RTR session below protocol version 2: ASPA validation is unavailable\"") {
 		t.Errorf("no WARN that ASPA validation is unavailable; logs:\n%s", tc.logs)
+	}
+}
+
+// rtr.expire-interval is clamped to RFC 8210's 600-172800 s; zero or less
+// is unset.
+func TestExpireOverrideClamp(t *testing.T) {
+	for _, tc := range []struct {
+		in      int
+		want    uint32
+		clamped bool
+	}{
+		{0, 0, false}, {-5, 0, false}, {1, 600, true}, {599, 600, true}, {600, 600, false},
+		{3600, 3600, false}, {172800, 172800, false}, {172801, 172800, true}, {1 << 40, 172800, true},
+	} {
+		if got, clamped := ExpireOverride(tc.in); got != tc.want || clamped != tc.clamped {
+			t.Errorf("ExpireOverride(%d) = %d, %v; want %d, %v", tc.in, got, clamped, tc.want, tc.clamped)
+		}
+	}
+}
+
+// Set, rtr.expire-interval replaces the cache's Expire Interval: data from a
+// cache saying 172800 expires after the configured 600. Unset, the cache's
+// 172800 holds and the data does not expire then. It used to be read and
+// never used.
+func TestExpireOverrideReplacesCacheInterval(t *testing.T) {
+	for _, override := range []uint32{600, 0} {
+		cache := rtrtest.NewCache(t)
+		tc := newTestClient(t, cache, 2)
+		tc.SetExpireOverride(override)
+		tc.start(t)
+		addr := cache.Addr()
+
+		_, eod := fullSync(t, cache, 2, 3, 100, 5000, 172800)
+		tc.synced(t)
+		cache.Next(time.Second) // the poll, left unanswered
+
+		deadline := eod.Add(1500 * time.Millisecond)
+		expired := false
+		for time.Now().Before(deadline) && !expired {
+			expired = rtrtest.Gauge("raven_rtr_data_expired", addr) == 1
+			time.Sleep(5 * time.Millisecond)
+		}
+		if override != 0 && !expired {
+			t.Errorf("override %d: data not expired 1.5s after the sync (600ms interval)", override)
+		}
+		if override != 0 && time.Since(eod) < 590*time.Millisecond {
+			t.Errorf("override %d: expired %v after the sync, before the 600ms interval", override, time.Since(eod))
+		}
+		if override == 0 && expired {
+			t.Error("unset: data expired within 1.5s, though the cache said 172800")
+		}
+		if !strings.Contains(tc.logs.String(), fmt.Sprintf("expire_effective=%d", map[bool]uint32{true: 600, false: 172800}[override != 0])) {
+			t.Errorf("override %d: sync log lacks the effective expire:\n%s", override, tc.logs)
+		}
 	}
 }

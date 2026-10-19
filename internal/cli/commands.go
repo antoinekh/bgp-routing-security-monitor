@@ -99,7 +99,7 @@ var statusCmd = &cobra.Command{
 	Short: "Show BMP peer states, RTR cache health, and system status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		addr, _ := cmd.Flags().GetString("address")
-		resp, err := apiGet(addr, "/api/v1/status", nil)
+		resp, err := apiGet(addr, "/api/v1/status", routerParam(cmd))
 		if err != nil {
 			return err
 		}
@@ -244,12 +244,20 @@ func routerLabel(addr, name string) string {
 	return addr
 }
 
+// routerParam is the router query parameter from --router, or nil.
+func routerParam(cmd *cobra.Command) url.Values {
+	if v, _ := cmd.Flags().GetString("router"); v != "" {
+		return url.Values{"router": {v}}
+	}
+	return nil
+}
+
 var peersCmd = &cobra.Command{
 	Use:   "peers",
 	Short: "List all BMP peers with session metadata",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		addr, _ := cmd.Flags().GetString("address")
-		resp, err := apiGet(addr, "/api/v1/peers", nil)
+		resp, err := apiGet(addr, "/api/v1/peers", routerParam(cmd))
 		if err != nil {
 			return err
 		}
@@ -398,6 +406,13 @@ var validateCmd = &cobra.Command{
 		addr, _ := cmd.Flags().GetString("address")
 		prefix, _ := cmd.Flags().GetString("prefix")
 
+		// One-shot validation against an RTR cache does not exist yet;
+		// these flags were accepted and silently ignored.
+		for _, name := range []string{"origin-asn", "rtr"} {
+			if cmd.Flags().Changed(name) {
+				return fmt.Errorf("--%s is not supported yet; validate reads the running daemon's routes for --prefix", name)
+			}
+		}
 		if prefix == "" {
 			return fmt.Errorf("--prefix is required")
 		}
@@ -555,6 +570,11 @@ func init() {
 	// serve flags
 	serveCmd.Flags().Bool("demo", false, "use test VRPs instead of live RTR connection")
 
+	// status and peers flags: --router limits the peers listed. Status
+	// totals stay daemon-wide.
+	statusCmd.Flags().String("router", "", "show only this monitored router's peers: its address or BMP sysName")
+	peersCmd.Flags().String("router", "", "show only this monitored router's peers: its address or BMP sysName")
+
 	// routes flags
 	routesCmd.Flags().String("prefix", "", "filter by prefix (e.g. 1.0.0.0/24)")
 	routesCmd.Flags().Uint32("origin-asn", 0, "filter by origin ASN")
@@ -567,8 +587,8 @@ func init() {
 
 	// validate flags
 	validateCmd.Flags().String("prefix", "", "prefix to validate (required)")
-	validateCmd.Flags().Uint32("origin-asn", 0, "origin ASN to validate")
-	validateCmd.Flags().String("rtr", "", "RTR cache address (for one-shot mode)")
+	validateCmd.Flags().Uint32("origin-asn", 0, "origin ASN to validate (not supported yet)")
+	validateCmd.Flags().String("rtr", "", "RTR cache address for one-shot mode (not supported yet)")
 
 	// watch flags
 	watchCmd.Flags().String("prefix", "", "filter by prefix")

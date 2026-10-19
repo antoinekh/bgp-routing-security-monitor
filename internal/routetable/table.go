@@ -22,18 +22,20 @@ type Table struct {
 	// distinguisher, peer address, prefix, path ID, RIB type)
 	shards []shard
 
-	// Prefix index: BART trie mapping prefix -> route keys. A prefix's list
-	// holds at most one key per peer carrying it, so it stays short and a
-	// linear scan is cheap; a map per prefix would roughly triple the index's
-	// memory when most prefixes have a single route.
+	// Prefix index: BART trie mapping prefix -> route keys, of every RIB.
+	// A prefix's list holds at most one key per peer, path and RIB carrying
+	// it, so it stays short and a linear scan is cheap; a map per prefix
+	// would roughly triple the index's memory when most prefixes have a
+	// single route.
 	prefixMu  sync.RWMutex
 	prefixIdx bart.Table[[]types.RouteKey]
 
-	// Secondary index: origin ASN -> route keys
+	// Secondary index: origin ASN -> route keys, of every RIB
 	asnMu  sync.RWMutex
 	asnIdx map[uint32]keySet
 
-	// Secondary index: security posture -> route keys
+	// Secondary index: security posture -> route keys, of Adj-RIB-In
+	// pre-policy routes only (see Insert)
 	postureMu  sync.RWMutex
 	postureIdx map[types.SecurityPosture]keySet
 }
@@ -648,25 +650,39 @@ func (t *Table) Get(key types.RouteKey) *types.Route {
 	return s.routes[key]
 }
 
+// GetByPrefix returns the Adj-RIB-In pre-policy routes to exactly prefix.
 func (t *Table) GetByPrefix(prefix netip.Prefix) []*types.Route {
+	return t.GetByPrefixIn(prefix, types.AdjRIBInPre)
+}
+
+// GetByPrefixIn returns the routes of one RIB to exactly prefix.
+func (t *Table) GetByPrefixIn(prefix netip.Prefix, rib types.RIBType) []*types.Route {
 	t.prefixMu.RLock()
 	keys, _ := t.prefixIdx.Get(prefix)
 	t.prefixMu.RUnlock()
-	return t.resolveKeys(keys)
+	return t.resolveKeys(keys, rib)
 }
 
+// GetByOriginASN returns the Adj-RIB-In pre-policy routes originated by asn.
 func (t *Table) GetByOriginASN(asn uint32) []*types.Route {
+	return t.GetByOriginASNIn(asn, types.AdjRIBInPre)
+}
+
+// GetByOriginASNIn returns the routes of one RIB originated by asn.
+func (t *Table) GetByOriginASNIn(asn uint32, rib types.RIBType) []*types.Route {
 	t.asnMu.RLock()
 	keys := t.asnIdx[asn].keys()
 	t.asnMu.RUnlock()
-	return t.resolveKeys(keys)
+	return t.resolveKeys(keys, rib)
 }
 
+// GetByPosture returns the Adj-RIB-In pre-policy routes with a posture; the
+// posture index holds no other RIB.
 func (t *Table) GetByPosture(posture types.SecurityPosture) []*types.Route {
 	t.postureMu.RLock()
 	keys := t.postureIdx[posture].keys()
 	t.postureMu.RUnlock()
-	return t.resolveKeys(keys)
+	return t.resolveKeys(keys, types.AdjRIBInPre)
 }
 
 // GetByPeer returns the pre-policy routes from a peer address, on every
@@ -854,11 +870,12 @@ func (t *Table) getShard(key types.RouteKey) *shard {
 	return &t.shards[h.Sum32()%uint32(len(t.shards))]
 }
 
-func (t *Table) resolveKeys(keys []types.RouteKey) []*types.Route {
+func (t *Table) resolveKeys(keys []types.RouteKey, rib types.RIBType) []*types.Route {
 	routes := make([]*types.Route, 0, len(keys))
 	for _, key := range keys {
-		if key.RIBType != types.AdjRIBInPre {
-			continue // only return pre-policy routes by default
+		// The prefix and ASN indexes hold keys of every RIB.
+		if key.RIBType != rib {
+			continue
 		}
 		s := t.getShard(key)
 		s.mu.RLock()

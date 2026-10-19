@@ -26,6 +26,14 @@ func NewAnnotator(vrpStore *store.VRPStore) *Annotator {
 //     prefix length ≤ VRP's maxLength → Valid.
 //  4. Otherwise → Invalid.
 func (a *Annotator) Validate(route *types.Route) types.ROVResult {
+	if route.OriginIsNone() {
+		// RFC 6811 §2: the origin is NONE, which no VRP matches.
+		covering := a.vrpStore.FindCovering(route.Prefix)
+		if len(covering) == 0 {
+			return types.ROVResult{State: types.ROVNotFound, Reason: noneOriginNotFoundReason}
+		}
+		return types.ROVResult{State: types.ROVInvalid, MatchedVRPs: covering, Reason: noneOriginInvalidReason}
+	}
 	originASN := route.OriginASN()
 	if originASN == 0 {
 		reason := "no origin ASN in AS_PATH"
@@ -71,6 +79,15 @@ func (a *Annotator) Validate(route *types.Route) types.ROVResult {
 // segment only if it is an AS_SEQUENCE; after a confederation segment it is
 // the router's own AS, which RAVEN does not know.
 const confedOriginReason = "no origin ASN: route originated inside the local AS confederation (RFC 6811 §2)"
+
+// The ROV Reasons for a route whose AS_PATH ends in an AS_SET: its origin is
+// NONE (RFC 6811 §2), Invalid under any covering VRP, NotFound otherwise.
+// RAVEN used to take the set's last member as the origin, which a VRP could
+// match.
+const (
+	noneOriginInvalidReason  = "origin is NONE: AS_PATH ends in an AS_SET (RFC 6811 §2), which no covering VRP can match"
+	noneOriginNotFoundReason = "origin is NONE: AS_PATH ends in an AS_SET (RFC 6811 §2); no covering VRPs found"
+)
 
 // validReason and invalidReason build the Reason strings with a single
 // allocation; fmt.Sprintf boxed each argument as well. The text is the same:

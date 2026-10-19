@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -629,4 +630,34 @@ func TestWarnLimiter(t *testing.T) {
 	if ok, n := w.allow(a, now.Add(malformedWarnInterval)); !ok || n != 3 {
 		t.Errorf("after the interval: %v, %d suppressed, want true, 3", ok, n)
 	}
+}
+
+// A route's Timestamp is the per-peer header's, the router's receive time;
+// a header timestamp of 0 (none given, RFC 7854 §4.2) becomes RAVEN's.
+func TestRouteTimestampFromPerPeerHeader(t *testing.T) {
+	ingest := make(chan types.IngestEvent, 8)
+	h := newSessionHarness(t, ingest)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client, done := h.connect(ctx, t)
+	peer := testPPH.PeerAddr
+
+	before := time.Now()
+	send(t, client, routeMonitoringMsg(peer, p1111))
+	ev := h.next(t)
+	if ev.Route == nil || ev.Route.Timestamp.Before(before) || ev.Route.Timestamp.After(time.Now()) {
+		t.Fatalf("zero header timestamp: route %+v, want RAVEN's receive time", ev.Route)
+	}
+
+	msg := routeMonitoringMsg(peer, p8888)
+	off := CommonHeaderLen + 34 // per-peer header seconds, then microseconds
+	binary.BigEndian.PutUint32(msg[off:], 1760790605)
+	binary.BigEndian.PutUint32(msg[off+4:], 250000)
+	send(t, client, msg)
+	ev = h.next(t)
+	if want := time.Unix(1760790605, 250000000); ev.Route == nil || !ev.Route.Timestamp.Equal(want) {
+		t.Fatalf("route %+v, want the header's timestamp %v", ev.Route, want)
+	}
+	client.Close()
+	<-done
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -44,7 +45,9 @@ type RouteResponse struct {
 	// ASPAFailingHop is the hop that made ASPA Invalid, if one did.
 	ASPAFailingHop *FailingHopResponse `json:"aspa_failing_hop,omitempty"`
 	Posture        string              `json:"posture"`
-	Timestamp      string              `json:"timestamp"`
+	// Timestamp is when the route was received (types.Route.Timestamp),
+	// RFC 3339 in UTC; "" if unknown.
+	Timestamp string `json:"timestamp"`
 }
 
 // FailingHopResponse is the customer→provider hop that failed ASPA: the
@@ -114,8 +117,9 @@ type WatchEvent struct {
 
 // Server is the HTTP/JSON API server.
 type Server struct {
-	table     *routetable.Table
-	bmpListen *bmp.Listener
+	table *routetable.Table
+	// bmpPeers lists the BMP peers: the BMP listener in production.
+	bmpPeers peerLister
 	// routers names the monitored routers: the BMP listener in production.
 	routers   routerDirectory
 	vrpStore  *store.VRPStore
@@ -129,11 +133,15 @@ type Server struct {
 	watchSubs map[chan RouteResponse]*routeFilter // each watcher's filter
 }
 
+// peerLister lists the BMP peers.
+type peerLister interface {
+	GetPeers() []bmp.Peer
+}
+
 // NewServer creates an API server.
 func NewServer(table *routetable.Table, bmpListen *bmp.Listener, vrpStore *store.VRPStore, log *slog.Logger, version string) *Server {
 	s := &Server{
 		table:     table,
-		bmpListen: bmpListen,
 		vrpStore:  vrpStore,
 		log:       log.With("subsystem", "api"),
 		version:   version,
@@ -142,6 +150,7 @@ func NewServer(table *routetable.Table, bmpListen *bmp.Listener, vrpStore *store
 		mux:       http.NewServeMux(),
 	}
 	if bmpListen != nil {
+		s.bmpPeers = bmpListen
 		s.routers = bmpListen
 	}
 	s.mux.HandleFunc("/api/v1/routes", s.handleRoutes)
@@ -230,16 +239,23 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.peerResponses())
+	writeJSON(w, s.peerResponses(parseRouter(r.URL.Query(), s.routersNamed)))
 }
 
 // peerResponses lists the BMP peers, each with the number of its routes the
 // route table holds now: counted per router, per instance, per address.
-func (s *Server) peerResponses() []PeerResponse {
-	peers := s.bmpListen.GetPeers()
+// byRouter limits them to the peers on routers.
+func (s *Server) peerResponses(byRouter bool, routers []netip.Addr) []PeerResponse {
+	var peers []bmp.Peer
+	if s.bmpPeers != nil {
+		peers = s.bmpPeers.GetPeers()
+	}
 	counts := s.table.PeerRouteCounts()
 	resp := make([]PeerResponse, 0, len(peers))
 	for _, p := range peers {
+		if byRouter && !slices.Contains(routers, p.Router.Unmap()) {
+			continue
+		}
 		var malformedSince string
 		if p.MalformedInput {
 			malformedSince = p.MalformedAt.Format(time.RFC3339)
@@ -323,7 +339,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.RouteTable.TotalRoutes = resp.RouteTable.ByRIB[types.AdjRIBInPre.String()]
 
-	resp.BMP = s.peerResponses()
+	resp.BMP = s.peerResponses(parseRouter(r.URL.Query(), s.routersNamed))
 
 	writeJSON(w, resp)
 }
@@ -398,6 +414,9 @@ func routeToResponse(r *types.Route, routerName string) RouteResponse {
 		ASPAProcedureSource: r.ASPA.ProcedureSource.String(),
 		ASPAReason:          r.ASPA.Reason,
 		Posture:             string(r.SecurityPosture),
+	}
+	if !r.Timestamp.IsZero() {
+		rr.Timestamp = r.Timestamp.UTC().Format(time.RFC3339)
 	}
 	if h := r.ASPA.FailingHop; h != nil {
 		rr.ASPAFailingHop = &FailingHopResponse{CustomerASN: h.CustomerASN, ProviderASN: h.ProviderASN}
