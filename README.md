@@ -21,6 +21,28 @@ raven serve --config raven.yaml
 raven routes --posture origin-invalid
 ```
 
+## Container Image
+
+Images are published on every `v*` tag to `ghcr.io/<owner>/bgp-routing-security-monitor` and, when the `DOCKERHUB_NAMESPACE` repository variable and the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets are set, to Docker Hub. Release tags are published as the version without the leading `v` (for example `0.4.0`) and move `latest`; pre-release tags only get the version tag. Images support `linux/amd64` and `linux/arm64` and run as UID 10001.
+
+The previous image at `ghcr.io/antoinekh/raven-bgp-routing-security-monitor` is replaced by this project-owned image.
+
+The entrypoint is `raven`, so pass normal subcommands:
+
+```bash
+docker run --rm -v "$PWD/raven.yaml":/etc/raven/raven.yaml:ro \
+  -p 11019:11019 -p 9595:9595 \
+  ghcr.io/<owner>/bgp-routing-security-monitor:latest serve --config /etc/raven/raven.yaml
+```
+
+Pin a version tag in production instead of `latest`.
+
+The image runs as UID 10001. Make the mounted config readable by that user. Warm-start snapshots use `~/.raven/snapshots`, which is `/var/lib/raven/.raven/snapshots` in the container; a mounted snapshot directory must be writable by UID 10001.
+
+The API binds to `127.0.0.1:11020` by default. To reach it from outside the container, set `api.listen: "0.0.0.0:11020"` in the config and restrict access to the port.
+
+Publishing BMP port 11019 exposes the listener. Set `bmp.allowed-routers` and restrict the port at the host firewall. Docker port publishing can bypass host firewall rules.
+
 ## What Does RAVEN Answer?
 
 > *"Show me every route I'm receiving, whether the origin is RPKI-valid, whether the AS_PATH is ASPA-valid, and what I should do about the ones that aren't."*

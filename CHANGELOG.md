@@ -4,6 +4,9 @@ All notable changes to RAVEN are recorded here.
 
 ## Unreleased
 
+### Added
+- Multi-arch container images (`linux/amd64`, `linux/arm64`) are published on every `v*` tag to GHCR and, when a Docker Hub namespace and token are configured, to Docker Hub. The image runs as a non-root user, and pre-release tags do not update `latest`.
+
 ### Changed
 - Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
 - `raven watch` now shows each route's ASPA state and, for an ASPA
