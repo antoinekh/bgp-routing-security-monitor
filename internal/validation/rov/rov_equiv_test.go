@@ -13,11 +13,13 @@ import (
 
 // refValidate is ROV as it was before the covering index and the
 // append-built reasons, over the old string-keyed FindCovering, kept as the
-// reference the current Annotator must match.
+// reference the current Annotator must match. Its routes have no LocalASN,
+// so an empty path has an origin (the local AS, RFC 6811 §2) RAVEN does
+// not know.
 func refValidate(byPrefix map[string][]types.VRP, route *types.Route) types.ROVResult {
 	originASN := route.OriginASN()
 	if originASN == 0 {
-		return types.ROVResult{State: types.ROVNotFound, Reason: "no origin ASN in AS_PATH"}
+		return types.ROVResult{State: types.ROVNotFound, Reason: "origin unknown: local AS not known"}
 	}
 	var covering []types.VRP
 	addr := route.Prefix.Addr()
@@ -122,6 +124,27 @@ func TestValidateAllocations(t *testing.T) {
 		}
 		if got := testing.AllocsPerRun(100, func() { a.Validate(r) }); got != tc.allocs {
 			t.Errorf("%s from AS%d (%s): %v allocs per Validate, want %v", tc.prefix, tc.origin, tc.state, got, tc.allocs)
+		}
+	}
+	// Routes whose origin is the router's own AS (empty AS_PATH) build the
+	// longer Reason in the same single allocation.
+	for _, tc := range []struct {
+		prefix string
+		local  uint32
+		state  types.ROVState
+		allocs float64
+	}{
+		{"198.51.100.0/24", 64501, types.ROVValid, 1},
+		{"198.51.100.0/24", 64999, types.ROVInvalid, 1},
+		{"203.0.113.0/24", 64501, types.ROVNotFound, 0},
+		{"198.51.100.0/24", 0, types.ROVNotFound, 0},
+	} {
+		r := &types.Route{Prefix: netip.MustParsePrefix(tc.prefix), LocalASN: tc.local}
+		if got := a.Validate(r).State; got != tc.state {
+			t.Fatalf("%s local AS%d: %s, want %s", tc.prefix, tc.local, got, tc.state)
+		}
+		if got := testing.AllocsPerRun(100, func() { a.Validate(r) }); got != tc.allocs {
+			t.Errorf("%s local AS%d (%s): %v allocs per Validate, want %v", tc.prefix, tc.local, tc.state, got, tc.allocs)
 		}
 	}
 }

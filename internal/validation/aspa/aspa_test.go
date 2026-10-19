@@ -267,3 +267,17 @@ func TestConfederationNotVerified(t *testing.T) {
 		t.Errorf("without confederation: %s, want Invalid", got.State)
 	}
 }
+
+// A route with an empty AS_PATH is not verified, as before (Unknown), and the
+// Reason says why: it is locally originated or iBGP-learned without an
+// AS_PATH. The neighbor-AS check does not apply to it either.
+func TestEmptyPathNotVerified(t *testing.T) {
+	a := NewAnnotator(store.NewASPAStore())
+	route := &types.Route{PeerASN: 64501, LocalASN: 64500}
+	for _, proc := range []types.ASPAProcedure{types.ASPAUpstream, types.ASPADownstream} {
+		got := a.ValidateSelection(route, Selection{Procedure: proc, NeighborCheck: true})
+		if got.State != types.ASPAUnknown || got.Reason != EmptyPathReason || got.Procedure != proc {
+			t.Errorf("%s: %s (%q), want Unknown with %q", proc, got.State, got.Reason, EmptyPathReason)
+		}
+	}
+}

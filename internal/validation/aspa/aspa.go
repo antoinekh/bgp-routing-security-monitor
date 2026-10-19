@@ -97,6 +97,7 @@ func (a *Annotator) ValidateProcedure(route *types.Route, proc types.ASPAProcedu
 		return types.ASPAResult{
 			State:     types.ASPAUnknown,
 			Procedure: proc,
+			Reason:    EmptyPathReason,
 		}
 	}
 
@@ -161,6 +162,13 @@ func (a *Annotator) ValidateProcedure(route *types.Route, proc types.ASPAProcedu
 	result.HopDetails = hops
 	return result
 }
+
+// EmptyPathReason is the ASPA Reason on a route with an empty AS_PATH: Unknown,
+// not verified. The draft only defines verification of an AS_PATH received
+// over eBGP; a route without one was originated by the monitored router or
+// learned over iBGP from a speaker in its AS that originated it. (ROV gives
+// such a route the router's own AS as origin, RFC 6811 §2.)
+const EmptyPathReason = "not ASPA-verified: empty AS_PATH; the route is locally originated or iBGP-learned without an AS_PATH"
 
 // ConfedReason is the ASPA Reason on a route whose AS_PATH has
 // confederation segments.

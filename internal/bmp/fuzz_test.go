@@ -83,7 +83,7 @@ func toResult(rs []types.Route, ws []types.Withdrawal, m malformation) updateRes
 
 func decodeUpdate(data []byte, flags uint8, addPath AFIMask) updateResult {
 	pph := BMPPerPeerHeader{Flags: flags, PeerAddr: netip.MustParseAddr("80.81.194.180"), PeerASN: 64501}
-	return toResult(parseBGPUpdate(data, pph, netip.MustParseAddr("192.0.2.1"), 64500, addPath))
+	return toResult(parseBGPUpdate(data, pph, netip.MustParseAddr("192.0.2.1"), fuzzLocalAS, addPath))
 }
 
 // checkDeterministic decodes data twice more, each from a fresh copy, and
@@ -179,19 +179,28 @@ func strictAttrs(body []byte, as2 bool) (origin uint8, path []types.ASSegment, o
 	return origin, path, true
 }
 
+// fuzzLocalAS is the monitored router's own AS the fuzz targets decode with.
+const fuzzLocalAS = 64500
+
 // rfc6811Origin is the origin AS of a path per RFC 6811 §2, written apart
-// from types.Route.OriginASN: the last AS of a final AS_SEQUENCE; 0 (no
-// origin RAVEN can name) after a final confederation segment or AS_SET
-// (NONE), or for an empty path.
-func rfc6811Origin(path []types.ASSegment) uint32 {
+// from types.Route.OriginASN: the last AS of a final AS_SEQUENCE; the BGP
+// speaker's own AS, localAS, for an empty path or after a final
+// confederation segment (the decoder knows no confederation identifier);
+// 0 after a final AS_SET (NONE).
+func rfc6811Origin(path []types.ASSegment, localAS uint32) uint32 {
 	if len(path) == 0 {
-		return 0
+		return localAS
 	}
 	last := path[len(path)-1]
-	if last.Type != types.ASSegmentSequence || len(last.ASNs) == 0 {
-		return 0
+	switch last.Type {
+	case types.ASSegmentConfedSequence, types.ASSegmentConfedSet:
+		return localAS
+	case types.ASSegmentSequence:
+		if len(last.ASNs) > 0 {
+			return last.ASNs[len(last.ASNs)-1]
+		}
 	}
-	return last.ASNs[len(last.ASNs)-1]
+	return 0
 }
 
 // checkUpdateInvariants checks what a decoded UPDATE may contain:
@@ -200,7 +209,9 @@ func rfc6811Origin(path []types.ASSegment) uint32 {
 //   - every route comes from an UPDATE the oracle (strictAttrs) finds a
 //     valid ORIGIN, AS_PATH and, for NLRI-field prefixes, NEXT_HOP in, and
 //     carries that ORIGIN and, over a 4-octet session, that AS_PATH and its
-//     RFC 6811 origin AS. Over a 2-octet session AS4_PATH may rewrite the
+//     RFC 6811 origin AS (the session's local AS, fuzzLocalAS, for an
+//     empty or confederation-terminated path). Over a 2-octet session
+//     AS4_PATH may rewrite the
 //     path, so the origin AS is checked against the route's own path.
 //
 // So no route is stored without a valid origin; anything else must have
@@ -235,8 +246,8 @@ func checkUpdateInvariants(t *testing.T, body []byte, flags uint8, r updateResul
 		} else if !reflect.DeepEqual(rt.ASPathRaw, path) {
 			t.Fatalf("route AS_PATH %+v, UPDATE has %+v", rt.ASPathRaw, path)
 		}
-		if got := rt.OriginASN(); got != rfc6811Origin(want) {
-			t.Fatalf("route origin AS%d, RFC 6811 gives AS%d for %+v", got, rfc6811Origin(want), want)
+		if got := rt.OriginASN(); got != rfc6811Origin(want, fuzzLocalAS) {
+			t.Fatalf("route origin AS%d, RFC 6811 gives AS%d for %+v", got, rfc6811Origin(want, fuzzLocalAS), want)
 		}
 	}
 }
@@ -263,6 +274,10 @@ func FuzzDecodeUpdate(f *testing.F) {
 		// repeated MP_REACH_NLRI, and an attribute overrun with withdrawals.
 		append(rawUpdate(nil, append([]byte{0x40, 1, 1, 0, 0x40, 2, 6, 2, 2, 0, 0, 0xfb, 0xf5}, nh...)), 24, 1, 1, 1),
 		append(rawUpdate(nil, append(append([]byte{0x40, 1, 1, 0}, asPathAttr(2, 4, confed(65001), seq(64500))...), nh...)), 24, 1, 1, 1),
+		// Paths whose origin is the local AS (RFC 6811 §2): empty, and
+		// ending in a confederation segment.
+		append(rawUpdate(nil, append([]byte{0x40, 1, 1, 0, 0x40, 2, 0}, nh...)), 24, 1, 1, 1),
+		append(rawUpdate(nil, append(append([]byte{0x40, 1, 1, 0}, asPathAttr(2, 4, confed(65001, 65002))...), nh...)), 24, 1, 1, 1),
 		updateWithAttrs(append(mpReachAttr(2, 1, netip.MustParseAddr("2001:db8::fe").AsSlice(), encodeNLRI(false, pathNLRI{0, v6})),
 			mpReachAttr(2, 1, netip.MustParseAddr("2001:db8::fe").AsSlice(), encodeNLRI(false, pathNLRI{0, v6}))...)),
 		rawUpdate([]byte{24, 8, 8, 8}, []byte{0x40, 1, 5, 0}),
@@ -375,7 +390,7 @@ func decodeMessage(data []byte, addPath AFIMask) messageResult {
 		if err == nil {
 			// The listener's own path from here: decodeRouteMonitoring,
 			// BGP header checks included.
-			r.Update = toResult(decodeRouteMonitoring(rm, netip.MustParseAddr("192.0.2.1"), 64500, addPath))
+			r.Update = toResult(decodeRouteMonitoring(rm, netip.MustParseAddr("192.0.2.1"), fuzzLocalAS, addPath))
 		}
 	}
 	return r
