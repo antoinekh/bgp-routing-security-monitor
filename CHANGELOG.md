@@ -5,15 +5,7 @@ All notable changes to RAVEN are recorded here.
 ## Unreleased
 
 ### Changed
-- **Breaking:** the HTTP API the CLI talks to now binds to `127.0.0.1:11020`
-  by default instead of every interface (`:11020`). Anyone running the CLI
-  (`raven status`, `raven routes`, `raven watch`, ...) against a daemon on
-  another host must now set `api.listen` (for example `"0.0.0.0:11020"`)
-  on that daemon, and should restrict access to it. The Prometheus metrics
-  listener is unchanged.
-- **Breaking for dashboards:** `raven_bmp_peer_state` gains `router_addr` and
-  `peer_distinguisher` labels, so the same peer address on two routers or
-  in two VRFs no longer shares one series.
+- Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
 - **Breaking for dashboards and alerts:** `raven_routes_total` gains a `rib`
   label: `adj-rib-in-pre`, `adj-rib-in-post` and `loc-rib` are counted
   apart (every rib/posture/afi series exists, at 0 when empty). It counted
@@ -41,9 +33,8 @@ All notable changes to RAVEN are recorded here.
   `by_posture`) count the default view, named in the new `default_view`
   field and in `raven status`'s header; per-peer `route_count` counts a BGP
   peer's Adj-RIB-In pre-policy routes and a Loc-RIB instance's Loc-RIB
-  routes. Adding up every RIB, as they did before, counted a route twice
-  when a router sent pre- and post-policy. Every RIB is reported apart
-  (`by_rib`, `routes_by_rib`).
+  routes. They counted Adj-RIB-In pre-policy routes only, so a router
+  sending only its Loc-RIB showed 0 routes.
 - RIB names are the same everywhere: `adj-rib-in-pre`, `adj-rib-in-post`,
   `loc-rib`, `adj-rib-out-pre`, `adj-rib-out-post`. `pre-policy` and
   `post-policy` are accepted as aliases of the Adj-RIB-In ones in the CLI,
@@ -72,106 +63,11 @@ All notable changes to RAVEN are recorded here.
   origin-only, unverified, path-suspect, origin-invalid), then RIBs; the
   order changed from run to run. `raven status` and `raven peers` show each
   peer's TYPE; `raven routes` shows each route's RIB.
-- Route and withdrawal events carry the monitored router in `router_id`
-  (they had the peer's BGP identifier, or the peer's address).
-- The daemon reports the build's version (`raven status`), from the same
-  build info as `raven version`; it always said "dev". Build info moved from
-  `internal/cli` to `internal/buildinfo` (Makefile LDFLAGS updated).
-- Malformed BGP UPDATEs in Route Monitoring are handled as RFC 7606 tells
-  the monitored router to, so RAVEN's table matches the router's Adj-RIB-In:
-  treat-as-withdraw (malformed AS_PATH, ORIGIN, NEXT_HOP, MED, COMMUNITIES,
-  LARGE_COMMUNITY, attribute overruns and flag errors, missing mandatory
-  attributes) withdraws the UPDATE's prefixes instead of storing them;
-  a malformed AS4_PATH or AS4_AGGREGATOR is discarded; of a repeated
-  attribute the first is kept. Session-reset errors (malformed NLRI or
-  MP_REACH next hop, repeated MP_REACH/MP_UNREACH, overflowing length
-  fields) withdraw every prefix that parses and mark the peer
-  `malformed_input` in `/api/v1/peers` and `raven peers` until its next
-  Peer Up; the BMP session stays up. Such routes used to be stored with
-  partial attributes, and a truncated AS_PATH gave a false ROV origin.
-- ROV takes no origin from confederation member ASes in the AS_PATH; it
-  used to check a route against the last one. Per RFC 6811 §2, a route
-  whose AS_PATH is empty or ends in AS_CONFED_SEQUENCE/AS_CONFED_SET has the
-  monitored router's own AS as origin and is validated normally: inside a
-  confederation, the confederation identifier when RAVEN can infer it (the
-  single other local AS the router uses towards external peers; for an
-  empty path, only once a route with confederation segments has shown the
-  router is in one), since its ROAs are registered under that AS; else the
-  local AS from Peer Up's Sent OPEN (the member AS in a confederation),
-  which the reason says. `origin_asn` shows that AS. With no local AS known the route
-  is NotFound ("origin unknown: local AS not known"). Such routes used to
-  get origin 0 and NotFound, the confederation reason wrongly citing §2.
-  ASPA still does not verify an empty AS_PATH (Unknown), now with a reason.
-  ASPA
-  does not verify routes with confederation segments (Unverifiable, with
-  the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
-  used to be treated as hops.
-
-### Fixed
-- ASPA is not verified without ASPA data. Until an RTR cache syncs at
-  protocol version 2 (the first with ASPA), every route's ASPA is Unknown
-  with reason `no ASPA data (no RTR v2 session)`; with `validation.aspa:
-  false`, Unknown with reason `ASPA disabled` (the setting was ignored). A
-  path of one AS used to verify as Valid with no ASPA data at all, so behind
-  a version 1 cache postures were `path-only` or `secured` instead of
-  `unverified` or `origin-only`. The first version 2 sync, and a fall back
-  to version 1 by the last version 2 cache, revalidate the whole table.
-- `raven_bmp_peer_state` goes to 0 for every peer of a BMP session that
-  ends; it stayed at 1 for peers without a Peer Down before the end, until
-  RAVEN restarted.
-- ROV follows RFC 6811 §2 for a route whose AS_PATH ends in an AS_SET: its
-  origin is NONE, so it is Invalid under any covering VRP and NotFound
-  otherwise, each with a reason. The set's last member used to be taken as
-  the origin, which a VRP could match (Valid). Its `origin_asn` is now 0.
-- `RAVEN_*` environment variables override nested and hyphenated config
-  keys (`RAVEN_BMP_LISTEN`, `RAVEN_API_LISTEN`, `RAVEN_LOGGING_LEVEL`,
-  `RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE`, ...): dots and dashes map to
-  underscores, and keys without a default are bound too. They were ignored.
-- `rtr.expire-interval` is applied: it overrides each cache's Expire
-  Interval, clamped to RFC 8210's 600-172800 s, and the value in effect is
-  logged at startup. It was read and never used.
-- Route JSON `timestamp` (routes and watch) is the route's receive time,
-  RFC 3339 UTC: the BMP per-peer header's, or RAVEN's when the router sends
-  0. It was always "".
-- `raven validate` rejects `--origin-asn` and `--rtr`, which it accepted and
-  ignored, until one-shot RTR validation exists.
-- A Route Monitoring message whose BGP Length field was below 19 panicked
-  and took down the daemon. The fuzz targets missed it: they reimplemented
-  that step with a guard; they now call the listener's decoder.
-- Withdrawals in an UPDATE whose other fields are malformed are applied;
-  the whole UPDATE used to be dropped, leaving the routes in the table.
-- BMP/BGP decoding of untrusted input: a malformed UPDATE (Withdrawn Routes
-  Length past the message) panicked and took down the daemon; a BMP header
-  could make RAVEN allocate up to 4 GB (messages are now capped at 1 MiB and
-  the session closed); a Statistics Report count sized a map.
-- AS_PATH from peers on 2-octet sessions (BMP A flag) is read with 2-octet
-  ASNs and merged with AS4_PATH (RFC 6793); it was read as 4-octet.
-- Adj-RIB-Out (RFC 8671) routes are stored as such, no longer overwriting
-  the peer's Adj-RIB-In routes. They get ROV; ASPA verification, defined for
-  received routes, is not run (ASPA Unverifiable, with the reason). They
-  raise no events. Counted in `raven_adj_rib_out_routes_total`.
-- IPv4 unicast in MP_REACH/MP_UNREACH (including RFC 8950 IPv6 next hops) is
-  decoded; it was dropped.
-- RFC 9072 extended OPEN optional parameters are read in Peer Up.
 
 ### Added
-- `raven status --router` and `raven peers --router` (API `router` on
-  `/api/v1/status` and `/api/v1/peers`): only that router's peers, by
-  address or BMP sysName, as `routes` and `watch` match it. Status totals
-  stay daemon-wide.
-- `raven routes --rib` with `--prefix` or `--origin-asn` looks up that RIB in
-  the prefix and origin indexes, which hold every RIB, instead of scanning
-  the table.
-- `raven_bmp_unsupported_nlri_total{afi,safi}` counts NLRI RAVEN does not
-  decode, instead of dropping it silently.
-- `raven_bmp_malformed_updates_total{action,reason}` counts malformed
-  UPDATEs by RFC 7606 action and reason (all series exported at 0), with a
-  WARN per peer and reason at most once a minute (router, peer, reason,
-  action, and how many were suppressed).
-- `raven routes --rib` and `raven watch --rib` (API `rib` parameter):
-  adj-rib-in-pre, adj-rib-in-post, adj-rib-out-pre, adj-rib-out-post or
-  loc-rib, one or more, so outbound routes can be listed; without it, the
-  default view (see Changed).
+- `raven watch --rib`, and `--rib` (API `rib` parameter) on `raven routes`
+  and `raven watch` takes one or more RIBs, comma-separated; without it,
+  the default view (see Changed).
 - BMP Loc-RIB monitoring (RFC 9069, peer type 3). Loc-RIB routes are stored
   as `loc-rib`, keyed like any route by router, peer distinguisher (VRF
   Loc-RIBs stay apart), the zero peer address, path ID and RIB. The 0x80
@@ -213,6 +109,102 @@ All notable changes to RAVEN are recorded here.
   the default view and per-RIB counts in the route table stats, `rib` in
   the route filter and the audit; the snapshot schema matches the snapshot
   file (router, peer distinguisher, peer type, path ID, format version).
+
+### Fixed
+- ASPA is not verified without ASPA data. Until an RTR cache syncs at
+  protocol version 2 (the first with ASPA), every route's ASPA is Unknown
+  with reason `no ASPA data (no RTR v2 session)`; with `validation.aspa:
+  false`, Unknown with reason `ASPA disabled` (the setting was ignored). A
+  path of one AS used to verify as Valid with no ASPA data at all, so behind
+  a version 1 cache postures were `path-only` or `secured` instead of
+  `unverified` or `origin-only`. The first version 2 sync, and a fall back
+  to version 1 by the last version 2 cache, revalidate the whole table.
+- `raven_bmp_peer_state` goes to 0 for every peer of a BMP session that
+  ends; it stayed at 1 for peers without a Peer Down before the end, until
+  RAVEN restarted.
+
+## v0.4.0 (2026-10-19)
+
+### Security
+- A Route Monitoring message whose Withdrawn Routes Length exceeded the
+  UPDATE, or whose BGP Length was below 19, panicked the daemon. Any source
+  able to reach the BMP port could crash RAVEN with one message.
+- A single BMP message header could make RAVEN allocate up to 4 GB. BMP
+  messages are now capped at 1 MiB (the session is closed) and Statistics
+  Report sizing is bounded by the bytes present.
+- New `bmp.allowed-routers` closes connections from any other source before
+  reading a byte; the HTTP API now binds to loopback by default.
+- If you run an earlier version with a BMP port reachable from untrusted
+  networks, upgrade and restrict BMP sources (allowlist and host firewall).
+
+### Changed
+- **Breaking:** the HTTP API the CLI talks to now binds to `127.0.0.1:11020`
+  by default instead of every interface (`:11020`). Anyone running the CLI
+  (`raven status`, `raven routes`, `raven watch`, ...) against a daemon on
+  another host must now set `api.listen` (for example `"0.0.0.0:11020"`)
+  on that daemon, and should restrict access to it. The Prometheus metrics
+  listener is unchanged.
+- **Breaking for dashboards:** `raven_bmp_peer_state` gains `router_addr` and
+  `peer_distinguisher` labels, so the same peer address on two routers or
+  in two VRFs no longer shares one series.
+- Status totals (`raven status`, `/api/v1/status` `total_routes` and
+  `by_posture`) and per-peer `route_count` now count Adj-RIB-In pre-policy
+  routes only, as `raven_routes_total` always did; they used to add up every
+  RIB, counting a route twice when a router sent pre- and post-policy. The
+  other RIBs are reported apart (`by_rib`, `routes_by_rib`).
+- Route and withdrawal events carry the monitored router in `router_id`
+  (they had the peer's BGP identifier, or the peer's address).
+- The daemon reports the build's version (`raven status`), from the same
+  build info as `raven version`; it always said "dev". Build info moved from
+  `internal/cli` to `internal/buildinfo` (Makefile LDFLAGS updated).
+- Malformed BGP UPDATEs in Route Monitoring are handled as RFC 7606 tells
+  the monitored router to, so RAVEN's table matches the router's Adj-RIB-In:
+  treat-as-withdraw (malformed AS_PATH, ORIGIN, NEXT_HOP, MED, COMMUNITIES,
+  LARGE_COMMUNITY, attribute overruns and flag errors, missing mandatory
+  attributes) withdraws the UPDATE's prefixes instead of storing them;
+  a malformed AS4_PATH or AS4_AGGREGATOR is discarded; of a repeated
+  attribute the first is kept. Session-reset errors (malformed NLRI or
+  MP_REACH next hop, repeated MP_REACH/MP_UNREACH, overflowing length
+  fields) withdraw every prefix that parses and mark the peer
+  `malformed_input` in `/api/v1/peers` and `raven peers` until its next
+  Peer Up; the BMP session stays up. Such routes used to be stored with
+  partial attributes, and a truncated AS_PATH gave a false ROV origin.
+- ROV takes no origin from confederation member ASes in the AS_PATH; it
+  used to check a route against the last one. Per RFC 6811 §2, a route
+  whose AS_PATH is empty or ends in AS_CONFED_SEQUENCE/AS_CONFED_SET has the
+  monitored router's own AS as origin and is validated normally: inside a
+  confederation, the confederation identifier when RAVEN can infer it (the
+  single other local AS the router uses towards external peers; for an
+  empty path, only once a route with confederation segments has shown the
+  router is in one), since its ROAs are registered under that AS; else the
+  local AS from Peer Up's Sent OPEN (the member AS in a confederation),
+  which the reason says. `origin_asn` shows that AS. With no local AS known the route
+  is NotFound ("origin unknown: local AS not known"). Such routes used to
+  get origin 0 and NotFound, the confederation reason wrongly citing §2.
+  ASPA still does not verify an empty AS_PATH (Unknown), now with a reason.
+  ASPA
+  does not verify routes with confederation segments (Unverifiable, with
+  the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
+  used to be treated as hops.
+
+### Added
+- `raven status --router` and `raven peers --router` (API `router` on
+  `/api/v1/status` and `/api/v1/peers`): only that router's peers, by
+  address or BMP sysName, as `routes` and `watch` match it. Status totals
+  stay daemon-wide.
+- `raven routes --rib` with `--prefix` or `--origin-asn` looks up that RIB in
+  the prefix and origin indexes, which hold every RIB, instead of scanning
+  the table.
+- `raven_bmp_unsupported_nlri_total{afi,safi}` counts NLRI RAVEN does not
+  decode, instead of dropping it silently.
+- `raven_bmp_malformed_updates_total{action,reason}` counts malformed
+  UPDATEs by RFC 7606 action and reason (all series exported at 0), with a
+  WARN per peer and reason at most once a minute (router, peer, reason,
+  action, and how many were suppressed).
+- `raven routes --rib` (API `rib` parameter): adj-rib-in-pre (default),
+  adj-rib-in-post, adj-rib-out-pre, adj-rib-out-post or loc-rib, so
+  outbound routes can be listed. `/api/v1/watch` streams are filtered by RIB
+  only when `rib` is given.
 - `make fuzz`: native Go fuzzing of the BMP message, Peer Up/OPEN and UPDATE
   decoders (not part of `make check`).
 - `bmp.allowed-routers`: IP addresses and prefixes BMP connections are
@@ -242,6 +234,40 @@ All notable changes to RAVEN are recorded here.
   bound beyond loopback.
 
 ### Fixed
+- ROV follows RFC 6811 §2 for a route whose AS_PATH ends in an AS_SET: its
+  origin is NONE, so it is Invalid under any covering VRP and NotFound
+  otherwise, each with a reason. The set's last member used to be taken as
+  the origin, which a VRP could match (Valid). Its `origin_asn` is now 0.
+- `RAVEN_*` environment variables override nested and hyphenated config
+  keys (`RAVEN_BMP_LISTEN`, `RAVEN_API_LISTEN`, `RAVEN_LOGGING_LEVEL`,
+  `RAVEN_VALIDATION_ASPA_DEFAULT_PROCEDURE`, ...): dots and dashes map to
+  underscores, and keys without a default are bound too. They were ignored.
+- `rtr.expire-interval` is applied: it overrides each cache's Expire
+  Interval, clamped to RFC 8210's 600-172800 s, and the value in effect is
+  logged at startup. It was read and never used.
+- Route JSON `timestamp` (routes and watch) is the route's receive time,
+  RFC 3339 UTC: the BMP per-peer header's, or RAVEN's when the router sends
+  0. It was always "".
+- `raven validate` rejects `--origin-asn` and `--rtr`, which it accepted and
+  ignored, until one-shot RTR validation exists.
+- A Route Monitoring message whose BGP Length field was below 19 panicked
+  and took down the daemon. The fuzz targets missed it: they reimplemented
+  that step with a guard; they now call the listener's decoder.
+- Withdrawals in an UPDATE whose other fields are malformed are applied;
+  the whole UPDATE used to be dropped, leaving the routes in the table.
+- BMP/BGP decoding of untrusted input: a malformed UPDATE (Withdrawn Routes
+  Length past the message) panicked and took down the daemon; a BMP header
+  could make RAVEN allocate up to 4 GB (messages are now capped at 1 MiB and
+  the session closed); a Statistics Report count sized a map.
+- AS_PATH from peers on 2-octet sessions (BMP A flag) is read with 2-octet
+  ASNs and merged with AS4_PATH (RFC 6793); it was read as 4-octet.
+- Adj-RIB-Out (RFC 8671) routes are stored as such, no longer overwriting
+  the peer's Adj-RIB-In routes. They get ROV; ASPA verification, defined for
+  received routes, is not run (ASPA Unverifiable, with the reason). They
+  raise no events. Counted in `raven_adj_rib_out_routes_total`.
+- IPv4 unicast in MP_REACH/MP_UNREACH (including RFC 8950 IPv6 next hops) is
+  decoded; it was dropped.
+- RFC 9072 extended OPEN optional parameters are read in Peer Up.
 - RTR anomaly detector no longer evaluates or contaminates its baseline
   with full (non-incremental) RTR syncs, which previously produced a
   false-positive high-severity anomaly on every `raven rtr monitor`
@@ -305,6 +331,10 @@ All notable changes to RAVEN are recorded here.
   0 or 1 session the ASPA store is cleared and a WARN says ASPA validation
   is unavailable.
   
+- Prefix queries (`raven routes --prefix`, `/api/v1/routes?prefix=`) running
+  while routes on the same prefix were withdrawn could return duplicate routes
+  and miss others (data race in the prefix index).
+
 ## v0.3.3 (2026-07-02)
 
 ### Added
