@@ -53,6 +53,7 @@ All notable changes to RAVEN are recorded here.
   does not verify routes with confederation segments (Unverifiable, with
   the reason; draft-ietf-sidrops-aspa-verification-24 §6.2); member ASes
   used to be treated as hops.
+- Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
 
 ### Fixed
 - ROV follows RFC 6811 §2 for a route whose AS_PATH ends in an AS_SET: its
