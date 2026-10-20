@@ -56,7 +56,7 @@ rr1     198.51.100.7  global   64500  198.51.100.7  up     1       2026-10-18T09
 rr1     loc-rib       loc-rib  64499  192.0.2.3     up     3       2026-10-18T09:12:44Z
 ```
 
-A VRF's Loc-RIB shows its route distinguisher, as in `loc-rib rd 64499:100`. In `/api/v1/peers` and in the `bmp_peers` array of `/api/v1/status`, a Loc-RIB instance has `peer_type` `loc-rib`, `addr` `0.0.0.0` and a `table_name`, the VRF/Table Name from its Peer Up. The default instance is `global`, as RFC 9069 §5.2.1 names it, whether or not its Peer Up carries the name.
+A VRF's Loc-RIB shows its route distinguisher, as in `loc-rib rd 64499:100`. In `/api/v1/peers` and in the `bmp_peers` array of `/api/v1/status`, a Loc-RIB instance has `peer_type` `loc-rib`, `addr` `0.0.0.0` and a `table_name`, the VRF/Table Name from its Peer Up. The default instance is `global`, as RFC 9069 §5.2.1 names it, whether or not its Peer Up carries the name, and whether or not it sends a Peer Up at all.
 
 **Routes.** `raven routes` has a `RIB` column, and a Loc-RIB route shows
 `-` as its peer, since it is the router's own selection:
@@ -188,26 +188,15 @@ router's documentation for BMP Loc-RIB (RFC 9069), then confirm with
 
 ### Loc-RIB without a Peer Up
 
-RFC 9069 has the router send a Peer Up for its Loc-RIB instance, but some
-routers, FRR 10.2 among them, send routes without one. RAVEN registers a
-Loc-RIB instance from its first Route Monitoring message that carries
-routes or withdrawals; an End-of-RIB alone does not register it. It does
-the same for an instance that sends routes after its Peer Down. Each
-registration is logged at INFO, here with `logging.format: text`:
+RFC 9069 has the router send a Peer Up for its Loc-RIB instance, but some routers, FRR 10.2 among them, send routes without one. RAVEN registers a Loc-RIB instance from its first Route Monitoring message that carries routes or withdrawals; an End-of-RIB alone does not register it. It does the same for an instance that sends routes after its Peer Down. Each registration is logged at INFO, here with `logging.format: text`:
 
 ```text
-time=2026-10-18T09:12:44.047Z level=INFO msg="BMP Loc-RIB registered" subsystem=bmp router=192.0.2.3:51775 session=1 peer_up=false asn=64499 router_id=192.0.2.3 peer_distinguisher="" table_name="" filtered=false
+time=2026-10-18T09:12:44.047Z level=INFO msg="BMP Loc-RIB registered" subsystem=bmp router=192.0.2.3:51775 session=1 peer_up=false asn=64499 router_id=192.0.2.3 peer_distinguisher="" table_name="global" filtered=false
 ```
 
-`peer_up` is `true` when the instance registered from its Peer Up, and
-`filtered` reports the Loc-RIB's F flag (RFC 9069 §4.2: the router sends a
-filtered, not complete, Loc-RIB). An instance registered without a Peer Up
-has no `table_name` in the API.
+`peer_up` is `true` when the instance registered from its Peer Up, and `filtered` reports the Loc-RIB's F flag (RFC 9069 §4.2: the router sends a filtered, not complete, Loc-RIB). The default instance is named `global` whether or not it sent a Peer Up; a VRF instance has no name without one.
 
-A Loc-RIB instance's Peer Down removes its Loc-RIB routes only, and a BGP
-peer's Peer Down removes that peer's Adj-RIB-In and Adj-RIB-Out routes
-only. When the BMP session ends, every route it sent is withdrawn and
-every peer's `raven_bmp_peer_state` goes to 0.
+A Loc-RIB instance's Peer Down removes its Loc-RIB routes only, and a BGP peer's Peer Down removes that peer's Adj-RIB-In and Adj-RIB-Out routes only. When the BMP session ends, every route it sent is withdrawn and every peer's `raven_bmp_peer_state` goes to 0.
 
 ## Metrics, events and audit
 
