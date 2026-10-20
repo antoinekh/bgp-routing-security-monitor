@@ -69,8 +69,8 @@ type PeerResponse struct {
 	PeerDistinguisher string `json:"peer_distinguisher,omitempty"`
 	// PeerType is the BMP peer type: global, rd, local or loc-rib. A
 	// loc-rib peer is the router's Loc-RIB instance (RFC 9069), with the
-	// zero address; TableName is its VRF/Table Name, when its Peer Up
-	// gave one.
+	// zero address; TableName is its VRF/Table Name, "global" for the
+	// default instance.
 	PeerType  string `json:"peer_type"`
 	TableName string `json:"table_name,omitempty"`
 	Addr      string `json:"addr"`
