@@ -46,11 +46,11 @@ The decoder handles:
   instance, and the default instance (zero peer distinguisher) is `global`
   when the TLV is missing (RFC 9069 §5.2.1). A Loc-RIB instance that sends
   routes or withdrawals without a Peer Up, as FRR 10.2 does, or after its
-  Peer Down, is registered as a peer from that message; an End-of-RIB alone
-  does not register it. RAVEN logs the registration at INFO as
-  `BMP Loc-RIB registered`, with `peer_up` true or false. A Loc-RIB Peer
-  Down removes that Loc-RIB's routes only, and a BGP peer's Peer Down its
-  Adj-RIB-In and Adj-RIB-Out routes only.
+  Peer Down, is registered as a peer from that message, with the same
+  default name; an End-of-RIB alone does not register it. RAVEN logs the
+  registration at INFO as `BMP Loc-RIB registered`, with `peer_up` true or
+  false. A Loc-RIB Peer Down removes that Loc-RIB's routes only, and a BGP
+  peer's Peer Down its Adj-RIB-In and Adj-RIB-Out routes only.
 
 A malformed UPDATE is handled the way RFC 7606 tells your router to handle
 it (attribute discard, treat-as-withdraw or session reset), so RAVEN's

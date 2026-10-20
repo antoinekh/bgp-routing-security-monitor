@@ -193,9 +193,9 @@ The API's `/api/v1/peers` output for a Loc-RIB instance:
 }
 ```
 
-`table_name` is omitted when the instance sent no Peer Up (FRR 10.2 sends
-none for its Loc-RIB), and `peer_distinguisher` is omitted for the default
-instance.
+`table_name` is omitted for a VRF instance that sent no Peer Up (FRR 10.2
+sends none for its Loc-RIB); the default instance is `global` either way.
+`peer_distinguisher` is omitted for the default instance.
 
 ### The MALFORMED column
 
