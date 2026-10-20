@@ -83,12 +83,15 @@ stabilises before expecting complete results.
 **If routes never appear:**
 
 Check whether the router is configured to send Adj-RIB-In Pre-Policy.
-Some router configurations only send Loc-RIB or post-policy by default:
-FRR — explicitly configure pre-policy
+Some router configurations only send Loc-RIB or post-policy by default.
+For FRR, configure pre-policy explicitly:
+
+```text
 bmp targets raven
 monitor ipv4 unicast pre-policy
 monitor ipv6 unicast pre-policy
 exit
+```
 
 ---
 

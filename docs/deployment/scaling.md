@@ -41,24 +41,27 @@ file output (NDJSON logging), size accordingly.
 
 ## Reducing Memory Usage
 
-If you do not need full pre-policy visibility, configure your routers to
-send only post-policy BMP:
-FRR — post-policy only
+If you do not need full pre-policy visibility, configure your routers to send only post-policy BMP. For FRR:
+
+```text
 bmp targets raven
 monitor ipv4 unicast post-policy
 monitor ipv6 unicast post-policy
 exit
+```
 
 Post-policy tables are significantly smaller than pre-policy since import
 policies filter out many routes before installation.
 
 ## Multiple Routers, Single RAVEN Instance
 
-The recommended pattern for most networks — one RAVEN instance receiving
-BMP from all your routers:
+The recommended pattern for most networks is one RAVEN instance receiving BMP from all your routers:
+
+```text
 Router 1 ──BMP──┐
 Router 2 ──BMP──┼──▶ RAVEN ──▶ Prometheus ──▶ Grafana
 Router 3 ──BMP──┘
+```
 
 RAVEN handles concurrent BMP sessions with one goroutine per session.
 There is no practical limit on the number of BMP sessions a single instance
@@ -66,14 +69,15 @@ can accept beyond the RAM budget for the combined route table.
 
 ## Filtering at the Router
 
-For very large deployments, reduce the route table size by filtering BMP
-exports at the router:
-FRR — only send routes from specific peers
+For very large deployments, reduce the route table size by filtering BMP exports at the router. For FRR, send only routes from specific peers:
+
+```text
 bmp targets raven
 monitor ipv4 unicast pre-policy
 neighbor 192.0.2.1 bmp
 neighbor 192.0.2.2 bmp
 exit
+```
 
 This is useful when you want to focus RAVEN on specific peering sessions
 rather than your full BGP table.
@@ -84,18 +88,24 @@ RAVEN is a passive observability tool — it has no role in the data plane.
 A RAVEN outage does not affect routing. Design for availability based on
 your monitoring SLA, not routing resilience requirements.
 
-**Simple HA pattern — two independent instances:**
+**Simple HA pattern: two independent instances**
+
+```text
 Router 1 ──BMP──▶ RAVEN-1 ──▶ Prometheus-1
 Router 2 ──BMP──▶ RAVEN-2 ──▶ Prometheus-2
+```
 
 Run two RAVEN instances receiving from different sets of routers. Aggregate
 in Prometheus using federation or a shared remote write target. This gives
 you redundancy without coordination complexity.
 
-**Full redundancy — all routers to both instances:**
-              ┌──▶ RAVEN-1 ──▶ Prometheus
-Router 1 ──BMP───┤
-└──▶ RAVEN-2 ──▶ Prometheus
+**Full redundancy: all routers to both instances**
+
+```text
+               ┌──▶ RAVEN-1 ──▶ Prometheus
+Router 1 ──BMP─┤
+               └──▶ RAVEN-2 ──▶ Prometheus
+```
 
 Both instances receive the full route table independently. Prometheus
 aggregates via federation. Use different job labels to distinguish instances.

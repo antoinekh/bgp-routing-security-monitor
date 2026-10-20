@@ -9,6 +9,11 @@ All notable changes to RAVEN are recorded here.
 - `raven watch` now shows each route's ASPA state and, for an ASPA
   Invalid, the failing hop as `hop(C→P)`: AS C's ASPA does not list the
   next AS P. The protobuf `RouteEntry` gains `aspa_failing_hop` (field 14).
+- The documentation site now has a light and dark theme toggle. The first visit follows the operating system preference.
+
+### Fixed
+- Documentation pages now fence command output, router configuration and metric examples, so they render as code. The production architecture diagram was redrawn, and the observability note keeps its example inside the note.
+- The warm-start example on the active-response page uses the real configuration keys (`persistence`, `snapshot_dir`, `stale_eviction_timeout`) instead of the removed `snapshot` block.
 
 ## v0.4.0 (2026-10-19)
 
