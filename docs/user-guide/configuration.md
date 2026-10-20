@@ -186,6 +186,14 @@ one for the peer's ASN, then `aspa-default-procedure`. See
 [ASPA Path Verification](../getting-started/concepts.md#upstream-and-downstream-verification)
 for what the two procedures check and why the choice matters.
 
+**`validation.aspa`** — With `true` (the default), RAVEN verifies ASPA once
+an RTR cache has synced at protocol version 2, the first with ASPA data;
+until then every route's ASPA state is `Unknown` with the reason
+`no ASPA data (no RTR v2 session)`. With `false`, RAVEN never verifies
+ASPA, and every route's ASPA state is `Unknown` with the reason
+`ASPA disabled`; earlier releases ignored the setting. See
+[ASPA without ASPA data](../architecture/validation-engine.md#aspa-without-aspa-data).
+
 <a id="validationaspa-peers"></a>
 **`validation.aspa-peers`** — Maps BMP peers to the neighbor's role, which
 selects the procedure for routes learned from that peer. The role is what
@@ -223,6 +231,15 @@ the route is ASPA `Invalid` with the reason in `aspa_reason`. A route server
 is left out because it does not add its own AS to the AS_PATH, so the check
 would fail on every route it sends. RAVEN skips the check for routes with an
 empty AS_PATH or an unknown peer ASN.
+
+Loc-RIB routes (BMP peer type 3, RFC 9069) have no neighbor address: their
+procedure comes from an `asn` entry for the neighbor AS, the first AS of
+the AS_PATH, then `aspa-default-procedure`. `address` entries never match
+them, and the neighbor-AS check does not apply. A leading copy of the
+router's own AS, which FRR 10.2 puts in Loc-RIB paths, is removed first.
+For a best path learned over iBGP, the first AS is the neighbor of the
+border router that learned the route, not of the monitored router. See
+[ASPA on Loc-RIB routes](loc-rib.md#aspa-on-loc-rib-routes).
 
 RAVEN reads `aspa-peers` once at startup; restart it to apply changes.
 
@@ -546,6 +563,7 @@ events:
 | `asn` | Fires when a route involves one of the listed ASNs. `asn_match: origin` (default) matches the origin only; `asn_match: path` matches any ASN in the full path |
 | `protected_asn` | Fires when an origin-invalid route hijacks a prefix authorised for one of the listed ASNs |
 | `cache_unhealthy` | Fires when an RTR cache becomes unreachable |
+| `rib` | Fires on routes in one of the RIBs in `ribs`: `adj-rib-in-pre` (or `pre-policy`), `adj-rib-in-post` (or `post-policy`), `loc-rib`, `adj-rib-out-pre`, `adj-rib-out-post`. Use it in a `compound` trigger to keep a rule to some RIBs. An empty `ribs` or an unknown name is a configuration error |
 | `compound` | Combines sub-`triggers` with an `operator` of `and` or `or` |
 
 **Action types:**
@@ -557,33 +575,40 @@ events:
 | `flowspec` | Generate a Flowspec drop rule, inject via GoBGP |
 | `global-correlate` | Query external global BGP visibility and annotate the event. See [External Correlation](#external-correlation-ripestat) |
 
-**Cooldown** — Minimum time between repeated firings of the same rule for the
-same prefix+peer combination. Prevents alert storms during flapping.
+**Cooldown** — Minimum time between repeated firings of the same rule for
+the same route: router, peer distinguisher, peer, prefix, path ID and RIB.
+Prevents alert storms during flapping. Without `cooldown`, a rule has
+none. A router that sends several RIBs fires a rule once per RIB; see
+[Active Response](active-response.md#rule-structure).
 
 **Webhook payload** — The JSON body sent to your webhook URL:
 
 ```json
 {
   "id": "b65b80a6-...",
-  "timestamp": "2026-05-06T14:23:01Z",
+  "timestamp": "2026-10-18T14:23:01Z",
   "type": "posture_change",
   "rule_name": "alert-origin-invalid",
-  "prefix": "192.0.2.0/24",
-  "peer_addr": "10.0.0.1",
-  "peer_asn": 65000,
+  "router_id": "192.0.2.1",
+  "prefix": "203.0.113.0/24",
+  "peer_addr": "198.51.100.1",
+  "peer_distinguisher": "",
+  "rib": "adj-rib-in-pre",
+  "peer_asn": 64500,
   "origin_asn": 64496,
   "protected_asns": [64511],
   "old_posture": "origin-only",
   "new_posture": "origin-invalid",
   "rov_state": "Invalid",
   "aspa_state": "Unknown",
-  "router_id": "10.0.0.1"
+  "cache_name": ""
 }
 ```
 
 `rule_name` identifies which rule fired. `protected_asns` lists the ASNs named as
 authorized originators in matched VRPs — present only when there are covering VRPs
-(relevant for `protected_asn` trigger alerts).
+(relevant for `protected_asn` trigger alerts). `rib` and
+`peer_distinguisher` (`""` for a global-instance peer) are always present.
 
 **Flowspec options:**
 

@@ -32,7 +32,9 @@ AS in the path. Will become more common as ASPA adoption grows.
 ### origin-only
 
 The origin ASN is authorised by a ROA but the AS_PATH cannot be fully verified
-because some ASes in the path have no ASPA records.
+because some ASes in the path have no ASPA records. Routes your own routers
+originate (empty AS_PATH) are `origin-only` at best, and so is every
+ROV-valid route while RAVEN has no ASPA data from an RTR version 2 cache.
 
 **What to do:** Nothing urgent. This is the expected state for most RPKI-covered
 routes during the current early phase of ASPA deployment. You are protected
@@ -117,6 +119,11 @@ announcing it. This is either:
 - An **origin hijack** — a malicious AS announcing your prefix
 - A **ROA misconfiguration** — your own ROA is wrong (wrong ASN or maxLength)
 - A **legitimate announcement** that predates the ROA — rare but possible
+- One of **your own internal routes**, such as a loopback or link subnet
+  more specific than your ROA's maxLength, seen in a Loc-RIB or from an
+  iBGP peer. Its `origin_asn` is your own AS. This is expected and harmless
+  if the prefix is not announced outside your network; see
+  [Internal routes show as Invalid](../troubleshooting.md#internal-routes-show-as-invalid)
 
 **What to do:**
 
@@ -145,8 +152,13 @@ raven watch --posture path-suspect
 raven routes --posture origin-invalid
 raven routes --posture path-suspect
 raven routes --prefix 192.0.2.0/24
-raven routes --posture origin-invalid --format json | jq '.[] | {prefix, peer, origin}'
+raven routes --posture origin-invalid --format json | jq '.[] | {prefix, peer, rib, origin_asn}'
 ```
+
+These commands show the default view, pre-policy Adj-RIB-In and Loc-RIB, so
+a hijacked route your router also selected appears once per RIB. Add
+`--rib loc-rib` to see only the routes your routers selected, or
+`--rib adj-rib-in-pre` to see only what your peers sent.
 
 ### Policy Planning
 

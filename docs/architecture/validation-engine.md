@@ -16,6 +16,9 @@ RAVEN validates each route once on ingest:
    came from (an `aspa-peers` entry by address, then by ASN, then
    `aspa-default-procedure`) and verifies the AS_PATH as described in
    [ASPA Path Verification](../getting-started/concepts.md#aspa-path-verification).
+   For a Loc-RIB route, which has no peer address, the procedure comes from
+   the neighbor AS in its path instead (see
+   [ASPA on Loc-RIB routes](../user-guide/loc-rib.md#aspa-on-loc-rib-routes)).
    Picking the procedure costs two map lookups and no allocations; RAVEN
    builds the lookup tables once at startup.
 3. **Posture**: RAVEN combines the two results into one of the
@@ -30,26 +33,70 @@ which AS that is. RAVEN follows it:
 |---|---|---|
 | An AS_SEQUENCE | The last AS of that sequence | Compared against the covering VRPs as usual |
 | An AS_SET | NONE, which no VRP can match | `Invalid` if any VRP covers the prefix, `NotFound` otherwise |
-| A confederation segment (AS_CONFED_SEQUENCE or AS_CONFED_SET) | The route originated inside your router's own AS confederation | `NotFound` |
-| Nothing (empty AS_PATH) | None | `NotFound` |
+| A confederation segment (AS_CONFED_SEQUENCE or AS_CONFED_SET) | Your router's own AS: its confederation identifier when RAVEN knows it, else its member AS | Compared against the covering VRPs as usual |
+| Nothing (empty AS_PATH) | Your router's own AS: its confederation identifier when RAVEN knows it, else its AS | Compared against the covering VRPs as usual |
 
-Confederation segments never supply the origin, wherever they appear: a
-path with a confederation segment followed by an AS_SEQUENCE takes its
-origin from the sequence. When the path ends in a confederation segment,
-RFC 6811 makes the origin your router's own AS, but the BMP session only
-tells RAVEN the member AS, not the confederation's AS, so RAVEN reports no
-origin.
+An empty AS_PATH belongs to a route your router originated, or learned
+over iBGP from a router in its own AS that originated it. RFC 6811 §2 makes
+the origin of such a route, and of one whose path ends in a confederation
+segment, the AS of the router doing the validation. RAVEN validates on
+behalf of the monitored router, so it uses that router's AS:
+
+- from a BGP peer's Peer Up, the local AS in the OPEN the router sent;
+- for a Loc-RIB route, the Peer AS of the Loc-RIB's BMP header, which RFC
+  9069 sets to the router's own AS, with or without a Peer Up.
+
+ROAs for a confederation are registered under the AS it is known by
+outside, its confederation identifier, so inside a confederation RAVEN
+uses the identifier when it can infer it: the one local AS, other than the
+member AS, that the router uses on its eBGP sessions, as RFC 5065 has it
+send its identifier to peers outside the confederation. For an empty
+AS_PATH RAVEN uses the identifier only once a route with confederation
+segments has shown that the router is in a confederation. Otherwise it
+uses the member AS, and the reason says so, since a VRP for the
+identifier will not match it.
+
+Some routers put their own AS in front of every Loc-RIB AS_PATH; FRR 10.2
+does. A Loc-RIB route whose AS_PATH holds nothing but the router's own AS
+(once or prepended) counts as empty, so a locally originated route gets
+the same origin from those routers as from any other.
+
+Confederation segments never supply the origin themselves, wherever they
+appear: a path with a confederation segment followed by an AS_SEQUENCE
+takes its origin from the sequence. `origin_asn` shows the AS RAVEN used,
+and `rov_reason` says where it came from, for example (from RAVEN's
+validator, on a locally originated Loc-RIB route `2001:db8:100::/48` of
+AS64496 under a VRP for `2001:db8::/32`, maxLength 48):
+
+```text
+matches VRP {2001:db8::/32, AS64496, /48}; origin is the router's own AS: empty AS_PATH (RFC 6811 §2)
+```
+
+A path ending in a confederation segment ends its reason with
+`origin is the router's own AS, its confederation identifier: AS_PATH ends
+in a confederation segment (RFC 6811 §2)`, or, with the identifier not
+known, `origin is the router's own AS, its member AS: AS_PATH ends in a
+confederation segment (RFC 6811 §2) and the confederation identifier is not
+known`. If RAVEN does not know the router's AS at all (no Peer Up gave it),
+the route is `NotFound` with the reason `origin unknown: local AS not
+known`, and `origin_asn` is `0`.
+
+Releases before v0.4.0 gave these routes no origin, so they were always
+`NotFound`, or took a confederation member AS from the path as the origin.
 
 An AS_SET hides which of its members originated the route, so a VRP can
 never confirm it. Earlier releases took the set's last member as the
-origin, which let a VRP for that AS mark an aggregate `Valid`. In each case
-without an origin, `origin_asn` is `0`, the CLI shows `-`, and `rov_reason`
+origin, which let a VRP for that AS mark an aggregate `Valid`. Such a route
+has no origin: `origin_asn` is `0`, the CLI shows `-`, and `rov_reason`
 says why, for example (from RAVEN's validator, on a route
 `64500 {64502 64503}` under a VRP for `203.0.113.0/24`):
 
 ```text
 origin is NONE: AS_PATH ends in an AS_SET (RFC 6811 §2), which no covering VRP can match
 ```
+
+Once RAVEN validates your own routes, expect some of them to be `Invalid`:
+see [Internal routes show as Invalid](../troubleshooting.md#internal-routes-show-as-invalid).
 
 ### Routes RAVEN does not ASPA-verify
 
@@ -68,6 +115,34 @@ instead of a verified result:
 
 A route whose AS_PATH contains an AS_SET is also `Unverifiable`, because
 an AS_SET has no single order to walk.
+
+A route with an empty AS_PATH is not verified either: the draft verifies
+paths received over eBGP, and an empty path has no hop to check. Its ASPA
+state is `Unknown`, with the reason `not ASPA-verified: empty AS_PATH; the
+route is locally originated or iBGP-learned without an AS_PATH`. A Loc-RIB
+path holding only the router's own AS counts as empty here too.
+
+### ASPA without ASPA data
+
+ASPA data arrives over RTR protocol version 2. Until an RTR cache has
+synced at version 2, RAVEN has no ASPA records to verify against, and
+verifying anyway would be misleading: a path of one AS has no hop to check
+and would verify as `Valid`, making its posture `path-only` or `secured`.
+So until then RAVEN does not verify ASPA at all. Every route's ASPA state
+is `Unknown` with the reason `no ASPA data (no RTR v2 session)`, and
+postures are `unverified`, `origin-only` or `origin-invalid`.
+
+The first version 2 sync turns verification on and revalidates the whole
+table, logging `ASPA verification on: an RTR cache synced at protocol
+version 2` at INFO. If every cache later falls back to version 1, whose
+sessions carry no ASPA, verification turns off again with a WARN
+(`ASPA verification off: no RTR cache has synced at protocol version 2`)
+and another full revalidation.
+
+With `validation.aspa: false`, RAVEN never verifies ASPA: every route's
+ASPA state is `Unknown` with the reason `ASPA disabled`. Earlier releases
+ignored the setting. Neither kind of `Unknown` is counted in
+`raven_aspa_validations_total`, because no verification ran.
 
 ### Adj-RIB-Out routes
 

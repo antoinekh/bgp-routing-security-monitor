@@ -46,30 +46,69 @@ scrape_configs:
 
 ### Available Metrics
 
-**Route counts by security posture:**
-raven_routes_total{posture="secured", afi="ipv4"}
-raven_routes_total{posture="origin-only", afi="ipv4"}
-raven_routes_total{posture="path-suspect", afi="ipv4"}
-raven_routes_total{posture="path-only", afi="ipv4"}
-raven_routes_total{posture="unverified", afi="ipv4"}
-raven_routes_total{posture="origin-invalid", afi="ipv4"}
+**Route counts by security posture and RIB:**
+raven_routes_total{posture="secured", afi="ipv4", rib="adj-rib-in-pre"}
+raven_routes_total{posture="origin-only", afi="ipv4", rib="adj-rib-in-pre"}
+raven_routes_total{posture="path-suspect", afi="ipv4", rib="adj-rib-in-pre"}
+raven_routes_total{posture="path-only", afi="ipv4", rib="adj-rib-in-pre"}
+raven_routes_total{posture="unverified", afi="ipv4", rib="adj-rib-in-pre"}
+raven_routes_total{posture="origin-invalid", afi="ipv4", rib="adj-rib-in-pre"}
 
-Same metrics available with `afi="ipv6"`.
+Same metrics available with `afi="ipv6"`, and with `rib="adj-rib-in-post"`
+and `rib="loc-rib"`. Every combination of `posture`, `afi` and `rib` is
+exported, at 0 when it has no routes.
 
-`raven_routes_total` counts Adj-RIB-In pre-policy routes only: what your
-routers received, before import policy. Routes your routers send are counted
-separately (see [Adj-RIB-Out routes](#adj-rib-out-routes)), so a sum over
-`raven_routes_total` never mixes the two directions.
+`raven_routes_total` counts the routes your routers received (Adj-RIB-In
+pre-policy and post-policy) and selected (Loc-RIB), each RIB under its own
+`rib` label. A router that sends two RIBs reports most of its routes in
+both, so a sum over every RIB counts those routes twice: always filter on
+`rib`. Routes your routers send are counted separately (see
+[Adj-RIB-Out routes](#adj-rib-out-routes)), so `raven_routes_total` never
+mixes the two directions.
 
-**Total route table size:**
-raven_route_table_size                           # Total Adj-RIB-In pre-policy routes in the table
+**Route table size by RIB:**
+raven_route_table_size{rib="adj-rib-in-pre"}     # Routes in the table, one series per RIB
+raven_route_table_size{rib="adj-rib-in-post"}
+raven_route_table_size{rib="loc-rib"}
+
+!!! warning "Breaking change: rib label on raven_routes_total and raven_route_table_size"
+    Both metrics gained a `rib` label. They used to count Adj-RIB-In
+    pre-policy routes only, without the label, so a router that sent only
+    its Loc-RIB showed 0 routes. A query without a `rib` matcher now adds
+    up the RIBs, counting a route once per RIB it is reported in. To keep
+    the old values, add `rib="adj-rib-in-pre"`:
+
+    ```promql
+    sum by (posture) (raven_routes_total{rib="adj-rib-in-pre"})
+    raven_route_table_size{rib="adj-rib-in-pre"}
+    ```
+
+    To count what route queries return (the
+    [default view](../getting-started/concepts.md#which-rib-to-monitor),
+    Adj-RIB-In pre-policy and Loc-RIB), as `raven status` does:
+
+    ```promql
+    sum(raven_route_table_size{rib=~"adj-rib-in-pre|loc-rib"})
+    ```
+
+    The Grafana dashboard in the code repository
+    (`lab/grafana-dashboard.json`) uses these queries. The OpenTelemetry
+    gauge `raven.routes.total` has the same `rib` attribute.
 
 **BMP session health:**
 raven_bmp_session_state{router="edge1"}                                   # 1=up, 0=down
 raven_bmp_messages_total{router="edge1", msg_type="route_monitoring"}
 raven_bmp_peer_state{router="edge1", router_addr="192.0.2.1", peer="198.51.100.1", peer_distinguisher=""}   # 1=established, 0=down
 
-`router` is the router's BMP sysName, or its address when it sent none.
+`router` is the router's BMP sysName, or its address when it sent none. A
+router's Loc-RIB instance has its own `raven_bmp_peer_state` series, with
+`peer="0.0.0.0"` (the zero address RFC 9069 gives it) and the instance's
+route distinguisher, `""` for the default instance.
+
+`raven_bmp_peer_state` goes to 0 for a peer on its Peer Down, and for every
+peer of a BMP session when that session ends. Earlier releases left it at
+1 after the session ended for peers that had no Peer Down first, until
+RAVEN restarted.
 
 !!! warning "Label change on raven_bmp_peer_state"
     `raven_bmp_peer_state` gained two labels: `router_addr`, the source
@@ -109,7 +148,12 @@ procedure produces your `Invalid` results. A jump in
 `procedure="upstream", source="default", state="Invalid"` after a new
 transit session comes up usually means a provider is missing from
 `aspa-peers` and is being verified with the wrong procedure. Adj-RIB-Out
-routes are not ASPA-verified and are not counted. Because revalidation
+routes are not ASPA-verified and are not counted. Nor is any route while
+ASPA verification is off: until an RTR cache syncs at protocol version 2,
+or with `validation.aspa: false` (see
+[ASPA without ASPA data](../architecture/validation-engine.md#aspa-without-aspa-data)).
+Loc-RIB routes are counted with `source="config-asn"` or
+`source="default"`, never `config-address`. Because revalidation
 counts too, read the rate, not the absolute value:
 
 ```promql
@@ -205,8 +249,9 @@ network is advertising.
 
 #### Zero-valued series at startup
 
-These counters and histograms export every label combination at 0 from
+These metrics export every label combination at 0 from
 startup, so an alert can tell "none yet" from "not exported":
+`raven_routes_total` and `raven_route_table_size` (every `rib`),
 `raven_bmp_rejected_connections_total`, `raven_revalidation_duration_seconds`,
 `raven_revalidation_routes_total`, `raven_aspa_validations_total`,
 `raven_bmp_malformed_updates_total` (every action and reason pair it can
@@ -269,12 +314,16 @@ rate(raven_global_check_total[5m])
 
 ### Useful PromQL Queries
 
-**Percentage of routes that are origin-invalid:**
+Each query names one RIB, so a route a router reports in two RIBs is
+counted once. Use `rib="loc-rib"` instead for routers that send only their
+Loc-RIB.
+
+**Percentage of received IPv4 routes that are origin-invalid:**
 
 ```promql
-raven_routes_total{posture="origin-invalid", afi="ipv4"}
+sum(raven_routes_total{posture="origin-invalid", afi="ipv4", rib="adj-rib-in-pre"})
 /
-sum(raven_routes_total{afi="ipv4"}) * 100
+sum(raven_routes_total{afi="ipv4", rib="adj-rib-in-pre"}) * 100
 ```
 
 **Alert: origin-invalid routes above threshold:**
@@ -284,7 +333,7 @@ groups:
   - name: raven
     rules:
       - alert: RAVENOriginInvalidHigh
-        expr: raven_routes_total{posture="origin-invalid"} > 100
+        expr: sum(raven_routes_total{posture="origin-invalid", rib="adj-rib-in-pre"}) > 100
         for: 2m
         labels:
           severity: warning
@@ -292,7 +341,7 @@ groups:
           summary: "High number of origin-invalid routes detected"
 
       - alert: RAVENPathSuspect
-        expr: raven_routes_total{posture="path-suspect"} > 0
+        expr: sum(raven_routes_total{posture="path-suspect", rib="adj-rib-in-pre"}) > 0
         for: 1m
         labels:
           severity: warning

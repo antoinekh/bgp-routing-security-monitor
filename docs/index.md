@@ -33,6 +33,7 @@ raven routes --posture origin-invalid
 | Capability | Description |
 |---|---|
 | **BMP Ingest** | Accept BMP sessions from any vendor's router |
+| **Loc-RIB Monitoring** | Validate the routes your routers selected, including their own and iBGP-learned routes, from BMP Loc-RIB (RFC 9069) |
 | **IPv6** | IPv6 route monitoring via BMP `MP_REACH_NLRI` / `MP_UNREACH_NLRI`, with ROV validation against IPv6 ROAs |
 | **RTR Monitoring** | Standalone `raven rtr monitor` — watch your RPKI validator's RTR cache sessions directly, with adaptive anomaly detection on sync behavior |
 | **ROV** | Route Origin Validation per RFC 6811 |
@@ -74,4 +75,4 @@ RAVEN is open source under the BSD-3-Clause license, developed at Nokia.
 
 - **GitHub:** [nokia/bgp-routing-security-monitor](https://github.com/nokia/bgp-routing-security-monitor)
 - **License:** BSD-3-Clause
-- **Standards:** RFC 7854, RFC 6811, RFC 8210, draft-ietf-sidrops-aspa-verification-24
+- **Standards:** RFC 7854, RFC 9069, RFC 6811, RFC 8210, draft-ietf-sidrops-aspa-verification-24

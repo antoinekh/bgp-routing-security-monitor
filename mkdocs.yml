@@ -34,11 +34,13 @@ nav:
     - Configuration: user-guide/configuration.md
     - CLI Reference: user-guide/cli-reference.md
     - Security Postures: user-guide/security-postures.md
+    - Loc-RIB Monitoring: user-guide/loc-rib.md
     - Observability & Metrics: user-guide/observability.md
     - Active Response: user-guide/active-response.md
   - Demo Lab:
     - Overview: lab/overview.md
     - Attack Scenarios: lab/scenarios.md
+    - Loc-RIB Lab: lab/loc-rib.md
   - Deployment:
     - Production Setup: deployment/production.md
     - Deployment Hardening: deployment/hardening.md
