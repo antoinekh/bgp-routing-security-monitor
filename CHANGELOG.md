@@ -18,6 +18,9 @@ All notable changes to RAVEN are recorded here.
 - Documentation pages now fence command output, router configuration and metric examples, so they render as code. The production architecture diagram was redrawn, and the observability note keeps its example inside the note.
 - The warm-start example on the active-response page uses the real configuration keys (`persistence`, `snapshot_dir`, `stale_eviction_timeout`) instead of the removed `snapshot` block.
 
+### Fixed
+- CI build artifacts report the version, commit and date from `internal/buildinfo`. The linker flags named the removed `internal/cli` variables and were silently ignored.
+
 ## v0.4.0 (2026-10-19)
 
 ### Security

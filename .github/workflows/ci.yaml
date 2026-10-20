@@ -49,10 +49,17 @@ jobs:
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           MODULE=$(head -1 go.mod | awk '{print $2}')
           go build -ldflags "-s -w \
-            -X ${MODULE}/internal/cli.version=${VERSION} \
-            -X ${MODULE}/internal/cli.commit=${COMMIT} \
-            -X ${MODULE}/internal/cli.date=${DATE}" \
-            -o raven-${GOOS}-${GOARCH} ./cmd/raven
+            -X ${MODULE}/internal/buildinfo.Version=${VERSION} \
+            -X ${MODULE}/internal/buildinfo.Commit=${COMMIT} \
+            -X ${MODULE}/internal/buildinfo.Date=${DATE}" \
+            -o "raven-${GOOS}-${GOARCH}" ./cmd/raven
+      - name: Check build metadata
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          VERSION=${GITHUB_REF_NAME:-dev}
+          COMMIT=${GITHUB_SHA::8}
+          ./raven-linux-amd64 version | grep -F "raven ${VERSION}"
+          ./raven-linux-amd64 version | grep -F "commit: ${COMMIT}"
   proto-check:
     runs-on: ubuntu-latest
     steps:
