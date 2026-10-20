@@ -486,23 +486,18 @@ Pipe audit output to your ticketing or reporting pipeline:
 
 ## Warm-start Persistence
 
-On clean shutdown, RAVEN saves the route table and RPKI cache to a
-snapshot file. On restart, it restores from the snapshot before
-reconnecting to BMP and RTR, eliminating the 30–90 second blind
-window of a cold start.
+On clean shutdown, RAVEN saves the route table and RPKI cache to `routes.snap` and `rpki.snap` in the snapshot directory. On restart, it restores from the snapshots before reconnecting to BMP and RTR, eliminating the 30–90 second blind window of a cold start.
 
 Enable in config:
 
 ```yaml
-snapshot:
+persistence:
   enabled: true
-  path: "/var/lib/raven/snapshot.json"
-  stale_timeout: 5m
+  snapshot_dir: "/var/lib/raven/snapshots"   # directory, not a file
+  stale_eviction_timeout: 5m
 ```
 
-Restored routes are marked stale. If BMP doesn't refresh a route within
-`stale_timeout`, it is evicted. This prevents stale routes from persisting
-if the topology changed during the downtime.
+Restored routes are marked stale. If BMP doesn't refresh a route within `stale_eviction_timeout`, it is evicted. This prevents stale routes from persisting if the topology changed during the downtime.
 
 !!! note
     The snapshot uses JSON serialisation. When buf/protoc become available
