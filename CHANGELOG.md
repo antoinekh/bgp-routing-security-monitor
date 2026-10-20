@@ -4,6 +4,10 @@ All notable changes to RAVEN are recorded here.
 
 ## Unreleased
 
+### Added
+- Multi-arch container images (`linux/amd64`, `linux/arm64`) are published on every `v*` tag to GHCR and, when a Docker Hub namespace and token are configured, to Docker Hub. The image runs as a non-root user, and pre-release tags do not update `latest`.
+- The `Docker image` workflow rebuilds any existing tag when run from the `Actions` tab with the `tag` input set. A tag published before the `Dockerfile` existed borrows it from the branch the workflow runs on, so a backfill needs no local build.
+
 ### Changed
 - Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
 - `raven watch` now shows each route's ASPA state and, for an ASPA
@@ -14,6 +18,9 @@ All notable changes to RAVEN are recorded here.
 ### Fixed
 - Documentation pages now fence command output, router configuration and metric examples, so they render as code. The production architecture diagram was redrawn, and the observability note keeps its example inside the note.
 - The warm-start example on the active-response page uses the real configuration keys (`persistence`, `snapshot_dir`, `stale_eviction_timeout`) instead of the removed `snapshot` block.
+
+### Fixed
+- CI build artifacts report the version, commit and date from `internal/buildinfo`. The linker flags named the removed `internal/cli` variables and were silently ignored.
 
 ## v0.4.0 (2026-10-19)
 

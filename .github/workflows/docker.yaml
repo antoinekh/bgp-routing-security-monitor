@@ -1,0 +1,170 @@
+name: Docker image
+
+# Builds the multi-arch raven image on every v* tag and pushes it to GHCR, and
+# to Docker Hub when a namespace and credentials are configured. Pull requests
+# build the image without pushing so a broken Dockerfile fails before a tag.
+# A tag v0.5.0 is published as :0.5.0; release tags also move :latest.
+# workflow_dispatch rebuilds an existing tag from its own source. A tag
+# published before this Dockerfile existed borrows the Dockerfile from the ref
+# the workflow was dispatched on.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build (for example v0.5.0)
+        required: true
+        type: string
+      publish_latest:
+        description: Also move :latest to this tag
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+# Serialize release builds so :latest is not raced by two tags finishing out of
+# order. Pull requests get their own group and cancel older runs.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('docker-pr-{0}', github.event.pull_request.number) || 'docker-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_REPO: bgp-routing-security-monitor
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Optional Docker Hub mirror. Leave the variable unset to push to GHCR only.
+      DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+          fetch-depth: 0
+
+      # A tag published before this workflow existed has no Dockerfile. Take it
+      # from the ref the workflow was dispatched on, so the backfill builds the
+      # tag's own source with the current Dockerfile.
+      - name: Take the Dockerfile from the dispatch ref
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          git fetch --no-tags origin "$DISPATCH_REF"
+          for file in Dockerfile .dockerignore; do
+            if [[ ! -f $file ]] && git cat-file -e "FETCH_HEAD:$file"; then
+              git show "FETCH_HEAD:$file" > "$file"
+            fi
+          done
+          if [[ ! -f Dockerfile ]]; then
+            echo "No Dockerfile in the tag nor in $DISPATCH_REF" >&2
+            exit 1
+          fi
+
+      # version keeps the tag as is for internal/buildinfo; release is the
+      # Docker tag, without the leading "v".
+      - name: Resolve build metadata and image tags
+        id: meta
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || (github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name) }}
+          PUBLISH_LATEST: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_latest || 'false' }}
+        run: |
+          revision=$(git rev-parse HEAD)
+          commit=$(git rev-parse --short=8 HEAD)
+          date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            version="$TAG"
+            release="$TAG"
+            latest=false
+          else
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "Invalid release tag: $TAG" >&2
+              exit 1
+            fi
+            version="$TAG"
+            release="${TAG#v}"
+            latest=false
+            if [[ "$release" != *-* ]]; then
+              newest=$(git tag --list 'v*' --sort=-v:refname | grep -v -- '-' | sed -n '1p')
+              if [[ "v${release}" == "$newest" ]]; then
+                latest=true
+              fi
+            fi
+            if [[ "$PUBLISH_LATEST" == "true" && "$release" != *-* ]]; then
+              latest=true
+            fi
+          fi
+
+          {
+            echo "version=${version}"
+            echo "release=${release}"
+            echo "revision=${revision}"
+            echo "commit=${commit}"
+            echo "date=${date}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            echo "tags=raven:${release}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:${release}"
+            if [[ "$latest" == "true" ]]; then
+              echo "${IMAGE}:latest"
+            fi
+            if [[ -n "$DOCKERHUB_NAMESPACE" ]]; then
+              echo "docker.io/${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPO}:${release}"
+              if [[ "$latest" == "true" ]]; then
+                echo "docker.io/${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPO}:latest"
+              fi
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && env.DOCKERHUB_NAMESPACE != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          sbom: ${{ github.event_name != 'pull_request' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.release }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+            org.opencontainers.image.licenses=BSD-3-Clause
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            DATE=${{ steps.meta.outputs.date }}

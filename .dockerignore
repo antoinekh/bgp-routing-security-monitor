@@ -1,0 +1,22 @@
+.git
+.github
+.gitignore
+.dockerignore
+
+# Build artifacts, rebuilt inside the image
+/raven
+/raven-linux-*
+/raven-darwin-*
+/dist/
+/gen/
+
+# Local labs and docs, not needed to build the binary
+/docs
+/lab
+/slides
+*.md
+
+# IDE and OS files
+.idea
+.vscode
+.DS_Store
