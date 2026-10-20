@@ -1,10 +1,6 @@
 # Loc-RIB Monitoring
 
-BMP Loc-RIB monitoring (RFC 9069) lets a router export its Loc-RIB: the
-routes it accepted and selected as best, one per prefix, whichever peer
-they came from or whether it originated them itself. RAVEN stores a
-router's Loc-RIB apart from its Adj-RIB-In and validates every route in it,
-so you see the security posture of the paths your network actually uses.
+BMP Loc-RIB monitoring ([RFC 9069](https://www.rfc-editor.org/rfc/rfc9069.html)) lets a router export its Loc-RIB: the routes it accepted and selected as best, one per prefix, whichever peer they came from or whether it originated them itself. RAVEN stores a router's Loc-RIB apart from its Adj-RIB-In and validates every route in it, so you see the security posture of the paths your network actually uses.
 
 ## Loc-RIB or pre-policy Adj-RIB-In
 
@@ -14,7 +10,7 @@ The two answer different questions:
 |---|---|---|
 | What it holds | Every route each peer sent, before import policy | The router's best path for each prefix, after import policy and best-path selection |
 | Shows attacks your import policy already drops | Yes | No |
-| Shows the routes the router installs and advertises | Not on its own | Yes |
+| Shows the routes the router uses for forwarding | Not on its own | Yes |
 | Includes routes the router originates, and routes learned over iBGP | Only from monitored iBGP peers | Yes |
 | Size | One table per peer | One table per router |
 
@@ -52,11 +48,7 @@ raven watch --rib loc-rib --posture origin-invalid
 curl -s 'http://127.0.0.1:11020/api/v1/routes?rib=loc-rib'
 ```
 
-**The Loc-RIB instance as a peer.** RFC 9069 sends Loc-RIB routes under a
-per-peer header of peer type 3 with the zero peer address, so RAVEN lists
-each Loc-RIB instance as a peer of type `loc-rib`. `raven peers` and
-`raven status` have a `TYPE` column and show the instance as `loc-rib` in
-`PEER`; its `ASN` and `ROUTER ID` are the router's own:
+**The Loc-RIB instance as a peer.** RFC 9069 sends Loc-RIB routes under a per-peer header of peer type 3 with the zero peer address, so RAVEN lists each Loc-RIB instance as a peer of type `loc-rib`. `raven peers` and `raven status` have a `TYPE` column and show the instance as `loc-rib` in `PEER`. In `raven peers`, its `ASN` and `ROUTER ID` are the router's own:
 
 ```text
 ROUTER  PEER          TYPE     ASN    ROUTER ID     STATE  ROUTES  UP SINCE
@@ -64,11 +56,7 @@ rr1     198.51.100.7  global   64500  198.51.100.7  up     1       2026-10-18T09
 rr1     loc-rib       loc-rib  64499  192.0.2.3     up     3       2026-10-18T09:12:44Z
 ```
 
-A VRF's Loc-RIB shows its route distinguisher, as in `loc-rib rd
-64499:100`. In `/api/v1/peers` and `/api/v1/status`, a Loc-RIB instance has
-`peer_type` `loc-rib`, `addr` `0.0.0.0` and a `table_name`, the VRF/Table
-Name from its Peer Up: `global` for the default instance, as RFC 9069
-§5.2.1 names it, whether or not the router sends the name.
+A VRF's Loc-RIB shows its route distinguisher, as in `loc-rib rd 64499:100`. In `/api/v1/peers` and in the `bmp_peers` array of `/api/v1/status`, a Loc-RIB instance has `peer_type` `loc-rib`, `addr` `0.0.0.0` and a `table_name`, the VRF/Table Name from its Peer Up. The default instance is `global`, as RFC 9069 §5.2.1 names it, whether or not its Peer Up carries the name.
 
 **Routes.** `raven routes` has a `RIB` column, and a Loc-RIB route shows
 `-` as its peer, since it is the router's own selection:
@@ -87,15 +75,7 @@ for every field.
 
 ## Origin validation of your own routes
 
-The Loc-RIB holds routes no eBGP peer sent you: prefixes the router
-originates, and routes it learned over iBGP from routers in its own AS.
-Their AS_PATH is empty, so RFC 6811 §2 makes their origin the router's own
-AS, and RAVEN validates them against your ROAs like any other route. RAVEN
-takes the router's AS from the Loc-RIB per-peer header's Peer AS, which RFC
-9069 sets to it, so this works with or without a Peer Up, and after a
-restart from a snapshot. Inside a confederation, RAVEN uses the
-confederation identifier when it can tell it; see
-[The origin AS](../architecture/validation-engine.md#the-origin-as).
+The Loc-RIB also holds routes that no eBGP peer sent to this router: prefixes the router originates, and routes it learned over iBGP from routers in its own AS. A locally originated route has an empty AS_PATH, so RFC 6811 §2 makes its origin the router's own AS. An iBGP-learned route normally keeps the AS_PATH from the border router that learned it, and its origin is the last AS in that path; if that path is empty, the origin is the router's own AS. RAVEN validates both against your ROAs like any other route. RAVEN takes the router's AS from the Loc-RIB per-peer header's Peer AS, which RFC 9069 sets to it, so a locally originated route works with or without a Peer Up, and after a restart from a snapshot. Inside a confederation, RAVEN uses the confederation identifier when it can tell it; see [The origin AS](../architecture/validation-engine.md#the-origin-as).
 
 In the example above, `2001:db8:100::/48` is a prefix `rr1` originates,
 `Valid` under its ROA for `2001:db8::/32` (maxLength 48):
@@ -182,18 +162,15 @@ router bgp 64499
 exit
 ```
 
-Add `bmp monitor ipv4 unicast pre-policy` (and IPv6) to the same target to
-export both. This syntax was checked against FRR 10.7.1, which the
-[Loc-RIB lab](../lab/loc-rib.md) runs. FRR's Loc-RIB behavior differs
-between releases:
+Add `bmp monitor ipv4 unicast pre-policy` (and IPv6) to the same target to export both. The lab covers IPv4 unicast only. This syntax was checked against FRR 10.7.1, which the lab's `rr1` runs (see the [Loc-RIB lab](../lab/loc-rib.md)). FRR's Loc-RIB behavior differs between releases:
 
 | | FRR 10.2.5 | FRR 10.7.1 |
 |---|---|---|
 | Loc-RIB Peer Up | Not sent | Sent, and a Peer Up for each BGP neighbor too |
 | AS_PATH of Loc-RIB routes | The router's own AS first | As received |
 | Loc-RIB update after a best-path change | Not sent | Sent |
-| Loc-RIB withdrawal when a prefix is withdrawn | Not checked | Sent |
-| Loc-RIB withdrawal when a BGP session on the router goes down | Not checked | Not checked |
+| Loc-RIB withdrawal when a prefix is withdrawn | Not tested | Sent |
+| Loc-RIB withdrawal when a BGP session on the router goes down | Not tested | Not tested |
 
 FRR 10.7.1's Peer Ups for its BGP neighbors make RAVEN list them as peers
 (type `global`) with 0 routes, since only the Loc-RIB is monitored. With
@@ -244,5 +221,4 @@ every peer's `raven_bmp_peer_state` goes to 0.
   and Loc-RIB fires a rule once per RIB; the cooldown is per route and
   RIB, and webhooks carry `rib`. Use a
   [`rib` trigger](active-response.md#rib-trigger) to alert on one RIB.
-- `raven audit --router <router address> --rib loc-rib` audits a router's
-  Loc-RIB. See [`raven audit`](cli-reference.md#raven-audit).
+- `raven audit --router <router address> --rib loc-rib` audits a router's Loc-RIB. For `--rib loc-rib`, `--router` is the monitored router's address, since a Loc-RIB route's peer address is the zero address. See [`raven audit`](cli-reference.md#raven-audit).
