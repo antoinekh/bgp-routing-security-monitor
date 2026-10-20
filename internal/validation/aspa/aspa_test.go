@@ -153,6 +153,19 @@ func TestValidateProcedure(t *testing.T) {
 			wantFail: &[2]uint32{64502, 64501},
 		},
 		{
+			// §5.3/§5.4: from the origin, 13335→7738 and 7738→53072 are No
+			// Attestation; AS53072's ASPA omits AS262504, so
+			// authorized(53072, 262504) is Not Provider+ and max_up_ramp =
+			// 3 < N=5 → Invalid. The failing hop is customer 53072 (the AS
+			// whose ASPA was checked) → provider 262504 (the next AS).
+			name:     "upstream route leak at AS53072",
+			aspas:    map[uint32][]uint32{53072: {16735, 23106, 270735}},
+			path:     []uint32{1031, 262504, 53072, 7738, 13335},
+			proc:     types.ASPAUpstream,
+			want:     types.ASPAInvalid,
+			wantFail: &[2]uint32{53072, 262504},
+		},
+		{
 			// AS_SET: RAVEN reports Unverifiable (the draft §5.4 step 3 says
 			// Invalid; RAVEN keeps these separate).
 			name: "upstream AS_SET unverifiable",

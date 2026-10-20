@@ -462,8 +462,11 @@ only `--posture` to the daemon and ignored the other filters.
 ```text
 watching for route events... (Ctrl+C to stop)
 
-[path-suspect] 203.0.113.0/24 via 198.51.100.1 origin:AS64502 AS_PATH:[64500 64501 64502] rov:Valid posture:path-suspect
+[path-suspect] 203.0.113.0/24 via 198.51.100.1 origin:AS64502 AS_PATH:[64500 64501 64502] rov:Valid ASPA:Invalid hop(64501→64500) posture:path-suspect
 ```
+
+An ASPA Invalid shows the hop that failed as `hop(C→P)`: AS C, nearer the
+origin, has an ASPA that does not list P, the next AS toward you.
 
 !!! tip
     Run `raven watch --posture path-suspect` in a spare terminal during an
