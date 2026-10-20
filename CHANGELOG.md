@@ -6,6 +6,9 @@ All notable changes to RAVEN are recorded here.
 
 ### Changed
 - Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
+- `raven watch` now shows each route's ASPA state and, for an ASPA
+  Invalid, the failing hop as `hop(C→P)`: AS C's ASPA does not list the
+  next AS P. The protobuf `RouteEntry` gains `aspa_failing_hop` (field 14).
 
 ## v0.4.0 (2026-10-19)
 

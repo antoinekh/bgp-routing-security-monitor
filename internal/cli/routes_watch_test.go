@@ -48,6 +48,36 @@ func TestWatchSendsAllFilters(t *testing.T) {
 	runCLI(t, srv, "watch", "--prefix", "", "--origin-asn", "0", "--peer", "", "--posture", "", "--router", "")
 }
 
+// raven watch shows each route's ASPA state and, for an ASPA Invalid, the
+// failing hop as hop(customer→provider); a route with no failing hop has none.
+func TestWatchShowsFailingHop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `data: {"prefix":"104.16.0.0/13","peer":"192.0.2.1","origin_asn":13335,`+
+			`"as_path":[1031,262504,53072,7738,13335],"rov":"NotFound","aspa":"Invalid",`+
+			`"aspa_failing_hop":{"customer_asn":53072,"provider_asn":262504},"posture":"path-suspect"}`+"\n\n")
+		io.WriteString(w, `data: {"prefix":"1.1.1.0/24","peer":"192.0.2.1","origin_asn":13335,`+
+			`"as_path":[174,13335],"rov":"Valid","aspa":"Unknown","posture":"origin-only"}`+"\n\n")
+	}))
+	defer srv.Close()
+	out := runCLI(t, srv, "watch")
+	want := []string{
+		"[path-suspect] 104.16.0.0/13 via 192.0.2.1 origin:AS13335 AS_PATH:[1031 262504 53072 7738 13335] " +
+			"rov:NotFound ASPA:Invalid hop(53072→262504) posture:path-suspect",
+		"[origin-only] 1.1.1.0/24 via 192.0.2.1 origin:AS13335 AS_PATH:[174 13335] " +
+			"rov:Valid ASPA:Unknown posture:origin-only",
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < len(want) {
+		t.Fatalf("watch output:\n%s", out)
+	}
+	got := lines[len(lines)-len(want):]
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("watch line %d:\n got %q\nwant %q", i, got[i], want[i])
+		}
+	}
+}
+
 // raven routes sends --peer with --prefix, and --format wide shows the
 // failing ASPA hop as C->P, or "-" when there is none.
 func TestRoutesPeerAndFailingHop(t *testing.T) {

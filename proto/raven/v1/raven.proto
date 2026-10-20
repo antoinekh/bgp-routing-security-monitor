@@ -54,6 +54,10 @@ message RouteEntry {
   repeated VRPEntry matched_vrps = 11;
   ASPADetail aspa_detail = 12;
   int64 timestamp_unix = 13;
+  // The customer→provider hop that made ASPA Invalid: customer_asn's ASPA
+  // does not list provider_asn. Set only when aspa_state is "Invalid" and a
+  // hop accounts for it (a neighbor-AS check failure has none).
+  ASPAHopEntry aspa_failing_hop = 14;
 }
 
 message VRPEntry {
