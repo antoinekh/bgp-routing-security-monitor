@@ -274,6 +274,16 @@ func TestLocRIBRegisteredWithoutPeerUp(t *testing.T) {
 		}
 		return
 	}
+	// locRIBPeer is the Loc-RIB instance with the given peer distinguisher,
+	// nil if there is none.
+	locRIBPeer := func(rd uint64) *Peer {
+		for _, pr := range h.l.GetPeers() {
+			if pr.PeerType == PeerTypeLocRIB && pr.Distinguisher == rd {
+				return &pr
+			}
+		}
+		return nil
+	}
 
 	// An End-of-RIB alone registers nothing. The global peer's route after
 	// it orders the check.
@@ -293,6 +303,15 @@ func TestLocRIBRegisteredWithoutPeerUp(t *testing.T) {
 	}
 	if n, up, local := locRIBs(); n != 1 || !up || local != 65000 {
 		t.Fatalf("Loc-RIB peers %d (up %v, local AS %d), want 1, up, 65000", n, up, local)
+	}
+	// A VRF instance registered without a Peer Up has no name: only the
+	// default instance has one (RFC 9069 §5.2.1).
+	pr := locRIBPeer(rd)
+	if pr == nil {
+		t.Fatal("the 65000:100 Loc-RIB is not registered")
+	}
+	if pr.TableName != "" {
+		t.Errorf("Loc-RIB 65000:100 table name %q, want none", pr.TableName)
 	}
 	waitPeerState(t, sys, zeroAddr, "65000:100", 1)
 	if !hasLogLine(h.logs.String(), `level=INFO`, `msg="BMP Loc-RIB registered"`, `peer_up=false`) {
@@ -314,13 +333,32 @@ func TestLocRIBRegisteredWithoutPeerUp(t *testing.T) {
 	}
 	waitPeerState(t, sys, zeroAddr, "65000:100", 1)
 
+	// The default instance, registered without a Peer Up as well, is named
+	// "global" (RFC 9069 §5.2.1).
+	send(t, client, locRIBRouteMonitoring(0, 0, 65000,
+		updateBody(false, false, nil, []pathNLRI{{0, netip.MustParsePrefix("203.0.113.0/24")}}, nil)))
+	if ev := h.next(t); ev.Route == nil || ev.Route.RIBType != types.LocRIB {
+		t.Fatalf("got %+v, want a Loc-RIB route", ev)
+	}
+	pr = locRIBPeer(0)
+	if pr == nil {
+		t.Fatal("the default Loc-RIB is not registered")
+	}
+	if pr.TableName != "global" {
+		t.Errorf("default Loc-RIB table name %q, want global", pr.TableName)
+	}
+	if !hasLogLine(h.logs.String(), `level=INFO`, `msg="BMP Loc-RIB registered"`, `peer_up=false`, `table_name=global`) {
+		t.Errorf("no log of the default Loc-RIB registration with its name; logs:\n%s", h.logs)
+	}
+	waitPeerState(t, sys, zeroAddr, "", 1)
+
 	// The session ends with no Peer Down: every peer's state goes to 0.
 	client.Close()
 	<-done
 	for _, pk := range []struct {
 		addr netip.Addr
 		rd   string
-	}{{zeroAddr, "65000:100"}, {global, ""}} {
+	}{{zeroAddr, "65000:100"}, {zeroAddr, ""}, {global, ""}} {
 		if v, ok := peerState(t, sys, pk.addr, pk.rd); !ok || v != 0 {
 			t.Errorf("raven_bmp_peer_state{peer=%v, rd=%q} = %v (exists %v) after the session ended, want 0",
 				pk.addr, pk.rd, v, ok)

@@ -706,6 +706,7 @@ func (l *Listener) registerLocRIB(log *slog.Logger, sess *bmpSession, sysName st
 		return
 	}
 	now := time.Now()
+	tableName := locRIBTableName(pph)
 	l.peers[key] = &Peer{
 		Router:        key.RouterAddr,
 		Distinguisher: key.Distinguisher,
@@ -714,6 +715,7 @@ func (l *Listener) registerLocRIB(log *slog.Logger, sess *bmpSession, sysName st
 		ASN:           pph.PeerASN,
 		LocalASN:      pph.PeerASN,
 		RouterID:      pph.PeerBGPID,
+		TableName:     tableName,
 		SysName:       sysName,
 		State:         "up",
 		UpSince:       now,
@@ -722,7 +724,7 @@ func (l *Listener) registerLocRIB(log *slog.Logger, sess *bmpSession, sysName st
 	}
 	l.peerMu.Unlock()
 	setPeerState(sysName, key, 1)
-	logLocRIBRegistered(log, key, pph, false, "")
+	logLocRIBRegistered(log, key, pph, false, tableName)
 }
 
 // logLocRIBRegistered logs, at INFO, a Loc-RIB instance becoming a peer:
