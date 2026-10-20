@@ -6,6 +6,7 @@ All notable changes to RAVEN are recorded here.
 
 ### Added
 - Multi-arch container images (`linux/amd64`, `linux/arm64`) are published on every `v*` tag to GHCR and, when a Docker Hub namespace and token are configured, to Docker Hub. The image runs as a non-root user, and pre-release tags do not update `latest`.
+- The `Docker image` workflow rebuilds any existing tag when run from the `Actions` tab with the `tag` input set. A tag published before the `Dockerfile` existed borrows it from the branch the workflow runs on, so a backfill needs no local build.
 
 ### Changed
 - Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.

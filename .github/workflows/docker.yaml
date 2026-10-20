@@ -4,8 +4,9 @@ name: Docker image
 # to Docker Hub when a namespace and credentials are configured. Pull requests
 # build the image without pushing so a broken Dockerfile fails before a tag.
 # A tag v0.5.0 is published as :0.5.0; release tags also move :latest.
-# workflow_dispatch rebuilds an existing tag. The tag must contain this
-# Dockerfile.
+# workflow_dispatch rebuilds an existing tag from its own source. A tag
+# published before this Dockerfile existed borrows the Dockerfile from the ref
+# the workflow was dispatched on.
 
 on:
   push:
@@ -48,6 +49,25 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
           fetch-depth: 0
+
+      # A tag published before this workflow existed has no Dockerfile. Take it
+      # from the ref the workflow was dispatched on, so the backfill builds the
+      # tag's own source with the current Dockerfile.
+      - name: Take the Dockerfile from the dispatch ref
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          git fetch --no-tags origin "$DISPATCH_REF"
+          for file in Dockerfile .dockerignore; do
+            if [[ ! -f $file ]] && git cat-file -e "FETCH_HEAD:$file"; then
+              git show "FETCH_HEAD:$file" > "$file"
+            fi
+          done
+          if [[ ! -f Dockerfile ]]; then
+            echo "No Dockerfile in the tag nor in $DISPATCH_REF" >&2
+            exit 1
+          fi
 
       # version keeps the tag as is for internal/buildinfo; release is the
       # Docker tag, without the leading "v".

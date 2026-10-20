@@ -27,6 +27,8 @@ Images are published on every `v*` tag to `ghcr.io/<owner>/bgp-routing-security-
 
 The previous image at `ghcr.io/antoinekh/raven-bgp-routing-security-monitor` is replaced by this project-owned image.
 
+An existing tag is rebuilt by running the `Docker image` workflow on the `Actions` tab with the `tag` input set to it, for example `v0.4.0`. A tag published before the `Dockerfile` existed borrows it from the branch the workflow is run on.
+
 The entrypoint is `raven`, so pass normal subcommands:
 
 ```bash
