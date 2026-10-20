@@ -335,6 +335,8 @@ The webhook payload is compatible with:
 ## Flowspec Lifecycle
 
 The Flowspec action automates the full mitigation lifecycle:
+
+```text
 detect origin-invalid route
 ↓
 generate Flowspec drop rule (dry-run)
@@ -344,6 +346,7 @@ raven flowspec list     ← review
 raven flowspec toggle   ← inject live into GoBGP
 ↓
 auto-expire after TTL   ← or toggle again to withdraw early
+```
 
 ### Prerequisites
 
@@ -447,6 +450,8 @@ raven audit --router 10.0.0.1 --format markdown
 ```
 
 ### Example Output
+
+```text
 Router: 10.0.0.1
 Total Routes: 6
 ROV Coverage:  83.3%
@@ -463,6 +468,7 @@ RECOMMENDATIONS
 2 origin-invalid routes: run raven what-if --reject-invalid
 ASPA coverage 0%: register ASPA objects at your RIR
 Consider enabling reject-invalid after reviewing what-if output
+```
 
 
 ### Automation

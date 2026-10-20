@@ -82,6 +82,8 @@ Once Routinator has data, RAVEN logs `RTR session established`, then
 Point your router's BMP configuration at RAVEN's BMP listener.
 
 **FRR example:**
+
+```text
 router bgp 65000
 bmp targets raven
 address 192.0.2.10 port 11019
@@ -89,8 +91,11 @@ monitor ipv4 unicast pre-policy
 monitor ipv6 unicast pre-policy
 exit
 exit
+```
 
 **SR Linux example:**
+
+```text
 network-instance default {
 protocols {
 bgp {
@@ -106,6 +111,7 @@ local-address 0.0.0.0
 }
 }
 }
+```
 
 ## Step 4 — Check Peer Status
 

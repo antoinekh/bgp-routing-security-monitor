@@ -4,20 +4,14 @@ This guide covers deploying RAVEN in a production environment against real
 routers and a production RPKI validator.
 
 ## Architecture
-```
-┌─────────────────┐     BMP      ┌─────────────────────┐
-│  Edge Router 1 │─────────────▶│                     │
-├─────────────────┤              │       RAVEN         │
-│  Edge Router 2 │─────────────▶│   BMP  :11019       │
-└─────────────────┘              │   API  :11020       │
-│   Prom :9595                   │                     │
-┌─────────────────┐     RTR      │                     │
-│   Routinator   │◀─────────────│                     │
-└─────────────────┘              └──────────┬──────────┘
-│ /metrics
-┌──────────▼──────────┐
-│  Prometheus+Grafana │
-└─────────────────────┘
+
+```text
+Edge Router 1 ──BMP──┐
+                     ├──▶ RAVEN ──/metrics──▶ Prometheus ──▶ Grafana
+Edge Router 2 ──BMP──┘      │
+                            │ RTR
+                            ▼
+                       Routinator
 ```
 
 ## Step 1 — Install RAVEN

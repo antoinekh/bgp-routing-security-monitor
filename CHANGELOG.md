@@ -10,6 +10,9 @@ All notable changes to RAVEN are recorded here.
   Invalid, the failing hop as `hop(C→P)`: AS C's ASPA does not list the
   next AS P. The protobuf `RouteEntry` gains `aspa_failing_hop` (field 14).
 
+### Fixed
+- Documentation pages now fence command output, router configuration and metric examples, so they render as code. The production architecture diagram was redrawn, and the observability note keeps its example inside the note.
+
 ## v0.4.0 (2026-10-19)
 
 ### Security

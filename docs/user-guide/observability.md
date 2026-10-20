@@ -35,24 +35,25 @@ scrape_configs:
 ```
 
 !!! note
-    If RAVEN is running in a container or WSL and Prometheus is running in
-    Docker, use the Docker bridge gateway IP instead of localhost.
-    Typically `172.17.0.1` on Linux:
+    If RAVEN is running in a container or WSL and Prometheus is running in Docker, use the Docker bridge gateway IP instead of localhost. Typically `172.17.0.1` on Linux.
 
-```yaml
+    ```yaml
     static_configs:
       - targets: ["172.17.0.1:9595"]
-```
+    ```
 
 ### Available Metrics
 
 **Route counts by security posture:**
+
+```text
 raven_routes_total{posture="secured", afi="ipv4"}
 raven_routes_total{posture="origin-only", afi="ipv4"}
 raven_routes_total{posture="path-suspect", afi="ipv4"}
 raven_routes_total{posture="path-only", afi="ipv4"}
 raven_routes_total{posture="unverified", afi="ipv4"}
 raven_routes_total{posture="origin-invalid", afi="ipv4"}
+```
 
 Same metrics available with `afi="ipv6"`.
 
@@ -62,12 +63,18 @@ separately (see [Adj-RIB-Out routes](#adj-rib-out-routes)), so a sum over
 `raven_routes_total` never mixes the two directions.
 
 **Total route table size:**
+
+```text
 raven_route_table_size                           # Total Adj-RIB-In pre-policy routes in the table
+```
 
 **BMP session health:**
+
+```text
 raven_bmp_session_state{router="edge1"}                                   # 1=up, 0=down
 raven_bmp_messages_total{router="edge1", msg_type="route_monitoring"}
 raven_bmp_peer_state{router="edge1", router_addr="192.0.2.1", peer="198.51.100.1", peer_distinguisher=""}   # 1=established, 0=down
+```
 
 `router` is the router's BMP sysName, or its address when it sent none.
 
@@ -83,6 +90,8 @@ raven_bmp_peer_state{router="edge1", router_addr="192.0.2.1", peer="198.51.100.1
     that match on the exact label set need updating.
 
 **RTR cache health:**
+
+```text
 raven_rtr_session_state{cache="localhost:3323"}               # 1=connected, 0=disconnected
 raven_rtr_vrp_count{cache="localhost:3323"}                   # VRPs loaded
 raven_rtr_aspa_count{cache="localhost:3323"}                  # ASPA records loaded
@@ -90,10 +99,13 @@ raven_rtr_last_sync_seconds{cache="localhost:3323"}           # Unix time of the
 raven_rtr_last_serial_change_seconds{cache="localhost:3323"}  # Unix time of the last sync that changed the serial
 raven_rtr_data_expired{cache="localhost:3323"}                # 1 if no sync completed within the Expire Interval
 raven_rtr_protocol_version{cache="localhost:3323"}            # Negotiated RTR version (ASPA needs 2)
+```
 
 #### ASPA verification
 
+```text
 raven_aspa_validations_total{procedure="upstream", source="config-asn", state="Invalid"}
+```
 
 A counter of ASPA verifications, incremented each time RAVEN verifies a
 route: on ingest and again on every revalidation pass. Labels:
@@ -122,9 +134,11 @@ When an RTR sync changes VRPs or ASPA records, RAVEN revalidates the routes
 the change can affect (see
 [Validation Engine](../architecture/validation-engine.md#incremental-revalidation)).
 
+```text
 raven_revalidation_duration_seconds{mode="incremental"}            # Histogram: wall time of each pass
 raven_revalidation_routes_total{mode="incremental", result="checked"}
 raven_revalidation_routes_total{mode="incremental", result="changed"}
+```
 
 `mode` is `incremental` for a pass driven by an RTR delta and `full` for a
 pass over the whole table, which happens after a Cache Reset, a new RTR
@@ -145,9 +159,11 @@ histogram_quantile(0.95, sum by (le, mode) (rate(raven_revalidation_duration_sec
 
 #### BMP ingest health
 
+```text
 raven_bmp_rejected_connections_total{reason="not_allowed"}       # Source outside bmp.allowed-routers
 raven_bmp_rejected_connections_total{reason="bad_remote_addr"}   # Source address could not be read
 raven_bmp_unsupported_nlri_total{afi="25", safi="70"}            # MP_REACH/MP_UNREACH not decoded, by AFI/SAFI
+```
 
 `raven_bmp_rejected_connections_total` counts BMP connections RAVEN closed
 at accept, before reading anything, because of
@@ -165,7 +181,9 @@ counts them so they are not dropped silently. `afi` and `safi` are decimal.
 
 #### Malformed UPDATEs
 
+```text
 raven_bmp_malformed_updates_total{action="treat_as_withdraw", reason="origin"}
+```
 
 A counter of malformed BGP UPDATEs received over BMP, which RAVEN handles
 under RFC 7606 the way your router does (see
@@ -193,7 +211,9 @@ sum by (action, reason) (increase(raven_bmp_malformed_updates_total[1h]))
 
 #### Adj-RIB-Out routes
 
+```text
 raven_adj_rib_out_routes_total{posture="origin-only", afi="ipv4"}
+```
 
 The number of Adj-RIB-Out pre-policy routes (RFC 8671): what your routers
 send their peers, before outbound policy, by posture and address family.
@@ -222,8 +242,10 @@ Emitted by the adaptive anomaly detector in `raven rtr monitor` when it is run
 with `--prometheus`. `severity` is `high` or `medium`. See
 [CLI Reference → raven rtr monitor](cli-reference.md#raven-rtr-monitor).
 
+```text
 raven_rtr_anomaly_total{cache="localhost:3323", severity="high"}     # Count of anomalies, by severity
 raven_rtr_anomaly_last_timestamp{cache="localhost:3323"}             # Unix timestamp of most recent anomaly
+```
 
 **External global-visibility correlation:**
 
@@ -232,10 +254,12 @@ Emitted when the Event Engine's `global-correlate` action runs, which requires
 `match`, `divergent`, `local_only` or `inconclusive`. See
 [Configuration → External Correlation](configuration.md#external-correlation-ripestat).
 
+```text
 raven_global_check_total{source="ripestat", result="match"}          # Count of correlations, by source and verdict
 raven_global_check_latency_seconds                                   # Histogram of correlation latency (live lookups only)
 raven_global_check_cache_hits_total{source="ripestat"}               # Correlations served from the in-process cache
 raven_global_check_rate_limited_total{source="ripestat"}             # Lookups suppressed by the local rate limiter
+```
 
 When a provider is enabled, RAVEN exports every `result` series of
 `raven_global_check_total`, and the cache-hit and rate-limited counters, at

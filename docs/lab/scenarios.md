@@ -32,12 +32,15 @@ bash lab/demo-master.sh baseline
 ```
 
 Expected output:
+
+```text
 BASELINE CHECK
 origin-invalid routes: 0
 path-suspect routes:   0
 secured routes:        6
 origin-only routes:    4
 Baseline is clean. Ready for demo.
+```
 
 Open Grafana at [http://localhost:3000](http://localhost:3000) and keep it
 visible alongside your terminal. You will see the panels update in real time
@@ -74,9 +77,12 @@ What happens:
 - RAVEN marks the route `origin-invalid`
 
 **What you will see in `raven watch`:**
+
+```text
 [14:23:01] NEW  192.0.2.0/24  via 10.0.0.1  AS64496  ROV:Invalid  posture:origin-invalid
 Matched VRP: ROA{192.0.2.0/24, AS65000, maxLength=/24}
 Reason: Origin AS64496 not authorized — ROA authorizes AS65000
+```
 
 **What you will see in Grafana:**
 
@@ -88,8 +94,11 @@ Reason: Origin AS64496 not authorized — ROA authorizes AS65000
 ```bash
 raven routes --posture origin-invalid
 ```
+
+```text
 PREFIX          PEER          ORIGIN   ROV      ASPA     POSTURE
 192.0.2.0/24    10.0.0.1   AS64496  Invalid  Unknown  origin-invalid
+```
 
 **Clean up:**
 
@@ -123,9 +132,12 @@ What happens:
 - RAVEN marks the route `path-suspect`
 
 **What you will see in `raven watch`:**
+
+```text
 [14:24:15] NEW  145.102.136.0/22  via 10.0.0.1  AS1199  ROV:Valid  ASPA:Invalid  posture:path-suspect
 AS_PATH: [65000 1199]
 Failing hop: AS1199→AS65000 — AS65000 not in AS1199 ASPA provider set (only AS1103)
+```
 
 **What you will see in Grafana:**
 
@@ -137,8 +149,11 @@ Failing hop: AS1199→AS65000 — AS65000 not in AS1199 ASPA provider set (only 
 ```bash
 raven routes --posture path-suspect
 ```
+
+```text
 PREFIX       PEER          ORIGIN  ROV    ASPA     POSTURE
 145.102.136.0/22   10.0.0.1   AS1199  Valid  Invalid  path-suspect
+```
 
 ```bash
 raven routes --posture path-suspect --format json
@@ -177,17 +192,23 @@ What happens:
 - RAVEN marks the route `origin-invalid`
 
 **What you will see in `raven watch`:**
+
+```text
 [14:25:30] NEW  2001:db8:2121::/48  via 2001:db8:10:2::1  AS65099  ROV:Invalid  posture:origin-invalid
 Matched VRP: ROA{2001:db8:2121::/48, AS64496, maxLength=/48}
 Reason: Origin AS65099 not authorized — ROA authorizes AS64496
+```
 
 **CLI investigation:**
 
 ```bash
 raven routes --posture origin-invalid --afi v6
 ```
+
+```text
 PREFIX               PEER                 ORIGIN   ROV      ASPA     POSTURE
 2001:db8:2121::/48   2001:db8:10:2::1  AS65099  Invalid  Unknown  origin-invalid
+```
 
 **Clean up:**
 
@@ -215,6 +236,8 @@ plane looks clean. Only `raven check stealthy` reveals the divergence.
 ```
 
 **What RAVEN shows:**
+
+```text
 Control plane (BMP/RIB):
   Route    : 203.0.113.0/24 via AS65000 (origin-only)
   RIB state: CLEAN — ROV Valid, no path violations
@@ -226,6 +249,7 @@ Data plane probe (traceroute from clab-raven-demo-edge):
 ║ STEALTHY HIJACK DETECTED: control/data-plane divergence ║
 ║ RIB says: AS65000 │ Traffic goes to: AS65099            ║
 ╚═════════════════════════════════════════════════════════╝
+```
 
 **Why this matters:** This is the attack class documented in NDSS 2026
 research and confirmed in the AS37100 incident (February 2025). BGP looking
@@ -259,9 +283,12 @@ automatically.
 **What RAVEN shows:**
 
 After Routinator goes offline:
+
+```text
 raven_rtr_session_state{cache="localhost:3323"} 0
 raven_rtr_last_sync_seconds{cache="localhost:3323"} 1747600000
 raven_rtr_vrp_count{cache="localhost:3323"} 870026
+```
 
 The route table continues to show correct validation results based on the
 last known VRP and ASPA state. No routes are incorrectly accepted during
@@ -383,6 +410,8 @@ bash lab/demo-master.sh hijack
 ```
 
 **What you will see in the webhook listener terminal:**
+
+```text
 ─── Alert: 2026-05-06 14:23:01 ───
 {
 "type": "new_route",
@@ -391,6 +420,7 @@ bash lab/demo-master.sh hijack
 "rov_state": "Invalid",
 "router_id": "10.0.0.1"
 }
+```
 
 The webhook fires within milliseconds of BMP arrival — before any human
 could have noticed the Grafana dashboard change.
@@ -550,9 +580,11 @@ tail -f <monitor --log-file> | grep '"event_type":"anomaly"'
 bash lab/04-rtr-anomaly.sh
 ```
 
-Within a few seconds of Routinator publishing the new data, RAVEN's next sync
-emits an anomaly record on the monitor's NDJSON log:
+Within a few seconds of Routinator publishing the new data, RAVEN's next sync emits an anomaly record on the monitor's NDJSON log:
+
+```json
 {"timestamp":"2026-07-16T14:23:07Z","cache":"localhost:3323","event_type":"anomaly","category":"statistical","trigger":"vrp_announced","severity":"high","z_scores":{"vrp_announced":9.4},"raw":{"vrp_announced":1200}}
+```
 
 **What you will see in Grafana:**
 
