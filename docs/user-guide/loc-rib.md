@@ -48,7 +48,7 @@ raven watch --rib loc-rib --posture origin-invalid
 curl -s 'http://127.0.0.1:11020/api/v1/routes?rib=loc-rib'
 ```
 
-**The Loc-RIB instance as a peer.** RFC 9069 sends Loc-RIB routes under a per-peer header of peer type 3 with the zero peer address, so RAVEN lists each Loc-RIB instance as a peer of type `loc-rib`. `raven peers` and `raven status` have a `TYPE` column and show the instance as `loc-rib` in `PEER`. In `raven peers`, its `ASN` and `ROUTER ID` are the router's own:
+**The Loc-RIB instance as a peer.** RFC 9069 sends Loc-RIB routes under a per-peer header of peer type 3 with the zero peer address, so RAVEN lists each Loc-RIB instance as a peer of type `loc-rib`. `raven peers` and `raven status` have a `TYPE` column and show the instance as `loc-rib` in `PEER`. Both show its `ASN`; `raven peers` also shows its `ROUTER ID`. Both values are the router's own:
 
 ```text
 ROUTER  PEER          TYPE     ASN    ROUTER ID     STATE  ROUTES  UP SINCE
