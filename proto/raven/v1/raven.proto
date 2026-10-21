@@ -58,9 +58,13 @@ message RouteEntry {
   repeated VRPEntry matched_vrps = 11;
   ASPADetail aspa_detail = 12;
   int64 timestamp_unix = 13;
-  string rib = 14;                // "adj-rib-in-pre", "adj-rib-in-post", "loc-rib", "adj-rib-out-pre", "adj-rib-out-post"
-  string peer_type = 15;          // BMP peer type: "global", "rd", "local", "loc-rib"
-  string peer_distinguisher = 16; // the peer's VRF RD ("65000:1", "192.0.2.1:7", "65000L:1"); empty for a global peer
+  // The customer→provider hop that made ASPA Invalid: customer_asn's ASPA
+  // does not list provider_asn. Set only when aspa_state is "Invalid" and a
+  // hop accounts for it (a neighbor-AS check failure has none).
+  ASPAHopEntry aspa_failing_hop = 14;
+  string rib = 15;                // "adj-rib-in-pre", "adj-rib-in-post", "loc-rib", "adj-rib-out-pre", "adj-rib-out-post"
+  string peer_type = 16;          // BMP peer type: "global", "rd", "local", "loc-rib"
+  string peer_distinguisher = 17; // the peer's VRF RD ("65000:1", "192.0.2.1:7", "65000L:1"); empty for a global peer
 }
 
 message VRPEntry {

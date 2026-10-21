@@ -410,6 +410,8 @@ The webhook payload is compatible with:
 ## Flowspec Lifecycle
 
 The Flowspec action automates the full mitigation lifecycle:
+
+```text
 detect origin-invalid route
 ↓
 generate Flowspec drop rule (dry-run)
@@ -419,6 +421,7 @@ raven flowspec list     ← review
 raven flowspec toggle   ← inject live into GoBGP
 ↓
 auto-expire after TTL   ← or toggle again to withdraw early
+```
 
 ### Prerequisites
 
@@ -522,6 +525,8 @@ raven audit --router 10.0.0.1 --format markdown
 ```
 
 ### Example Output
+
+```text
 Router: 10.0.0.1
 Total Routes: 6
 ROV Coverage:  83.3%
@@ -538,6 +543,7 @@ RECOMMENDATIONS
 2 origin-invalid routes: run raven what-if --reject-invalid
 ASPA coverage 0%: register ASPA objects at your RIR
 Consider enabling reject-invalid after reviewing what-if output
+```
 
 
 ### Automation
@@ -555,23 +561,18 @@ Pipe audit output to your ticketing or reporting pipeline:
 
 ## Warm-start Persistence
 
-On clean shutdown, RAVEN saves the route table and RPKI cache to a
-snapshot file. On restart, it restores from the snapshot before
-reconnecting to BMP and RTR, eliminating the 30–90 second blind
-window of a cold start.
+On clean shutdown, RAVEN saves the route table and RPKI cache to `routes.snap` and `rpki.snap` in the snapshot directory. On restart, it restores from the snapshots before reconnecting to BMP and RTR, eliminating the 30–90 second blind window of a cold start.
 
 Enable in config:
 
 ```yaml
-snapshot:
+persistence:
   enabled: true
-  path: "/var/lib/raven/snapshot.json"
-  stale_timeout: 5m
+  snapshot_dir: "/var/lib/raven/snapshots"   # directory, not a file
+  stale_eviction_timeout: 5m
 ```
 
-Restored routes are marked stale. If BMP doesn't refresh a route within
-`stale_timeout`, it is evicted. This prevents stale routes from persisting
-if the topology changed during the downtime.
+Restored routes are marked stale. If BMP doesn't refresh a route within `stale_eviction_timeout`, it is evicted. This prevents stale routes from persisting if the topology changed during the downtime.
 
 !!! note
     The snapshot uses JSON serialisation. When buf/protoc become available

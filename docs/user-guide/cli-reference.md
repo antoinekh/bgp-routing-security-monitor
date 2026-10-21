@@ -585,12 +585,15 @@ Adj-RIB-Out included, when no RIB was given.
 ```text
 watching for route events... (Ctrl+C to stop)
 
-[path-suspect] 203.0.113.0/24 via 198.51.100.1 rib:adj-rib-in-pre origin:AS64502 AS_PATH:[64500 64501 64502] rov:Valid posture:path-suspect
-[origin-invalid] 2001:db8:ffff::1/128 via loc-rib rib:loc-rib origin:AS64499 AS_PATH:[] rov:Invalid posture:origin-invalid
+[path-suspect] 203.0.113.0/24 via 198.51.100.1 rib:adj-rib-in-pre origin:AS64502 AS_PATH:[64500 64501 64502] rov:Valid ASPA:Invalid hop(64501→64500) posture:path-suspect
+[origin-invalid] 2001:db8:ffff::1/128 via loc-rib rib:loc-rib origin:AS64499 AS_PATH:[] rov:Invalid ASPA:Unknown posture:origin-invalid
 ```
 
 `rib:` is the route's RIB. A Loc-RIB route shows `via loc-rib`, since it
 has no peer.
+
+An ASPA Invalid shows the hop that failed as `hop(C→P)`: AS C, nearer the
+origin, has an ASPA that does not list P, the next AS toward you.
 
 !!! tip
     Run `raven watch --posture path-suspect` in a spare terminal during an
@@ -615,12 +618,15 @@ raven aspa --asn 13335 --format json
 | `--format` | Output format: `table` or `json` |
 
 **Example output:**
+
+```text
 ASPA RECORD — AS13335
 ─────────────────────────────────
 Provider set (3):
 AS174
 AS1299
 AS3356
+```
 
 If the ASN has no ASPA record in the current RTR cache, RAVEN will say so.
 
@@ -653,6 +659,8 @@ raven aspa recommend --format json
 | `--format` | Output format: `table` or `json` |
 
 **Example output:**
+
+```text
 ASPA OBJECT RECOMMENDATIONS (3)
 Note: heuristic — based on observed AS_PATHs only. Verify with your peers.
 ┌─ AS64500  [no ASPA record]  confidence: 80%  observations: 1423
@@ -665,6 +673,7 @@ Note: heuristic — based on observed AS_PATHs only. Verify with your peers.
 │  AS174                 203 routes    ✗ MISSING
 │  AS1299                203 routes    ✓ in ASPA
 └──────────────────────────────────────────────────
+```
 
 **Confidence score** is a heuristic based on observation count and provider
 count. Higher is more reliable. Scores above 70% are generally trustworthy.
@@ -688,6 +697,8 @@ raven what-if --reject-invalid --format json
 ```
 
 **Example output:**
+
+```text
 REJECT-INVALID IMPACT SUMMARY
 ─────────────────────────────────────────────────
 Routes currently received:     1,044,293
@@ -699,6 +710,7 @@ ORIGIN ASN   ROUTES  PREFIXES  REASON
 AS64666      142     142       Origin AS mismatch
 AS64667      89      89        maxLength exceeded
 AS64668      71      71        Origin AS mismatch
+```
 
 ### --aspa-enforce
 
@@ -710,6 +722,8 @@ raven what-if --aspa-enforce --format json
 ```
 
 **Example output:**
+
+```text
 ASPA ENFORCEMENT IMPACT SUMMARY
 ─────────────────────────────────────────────────
 Routes currently received:     1,044,293
@@ -721,6 +735,7 @@ TOP FAILING AS_PATH HOPS
 CUSTOMER ASN    UNAUTH PROVIDER  ROUTES AFFECTED
 AS3356          AS7018           8
 AS1299          AS3257           4
+```
 
 **Flags:**
 
@@ -740,7 +755,10 @@ Show RAVEN version and build information.
 ```bash
 raven version
 ```
+
+```text
 raven version v0.1.0 (commit: abc1234, built: 2026-04-15T00:00:00Z)
+```
 
 ---
 
@@ -884,6 +902,8 @@ instance is never matched as the BGP neighbor a probe reached.
 `raven check global` reports a Loc-RIB route's neighbor AS the same way.
 
 **Example — clean baseline:**
+
+```text
 $ raven check stealthy --prefix 203.0.113.0/24 --probe-via clab-raven-demo-edge
 Checking control/data-plane divergence for 203.0.113.0/24...
 Control plane (BMP/RIB):
@@ -897,8 +917,11 @@ Data plane probe (traceroute from clab-raven-demo-edge to 203.0.113.1):
 ║ CLEAN: Data-plane path matches BMP RIB               ║
 ║ RIB says: AS65000 │ Traffic goes to: AS65000         ║
 ╚══════════════════════════════════════════════════════╝
+```
 
 **Example — stealthy hijack detected:**
+
+```text
 $ raven check stealthy --prefix 203.0.113.0/24 --probe-via clab-raven-demo-edge
 Checking control/data-plane divergence for 203.0.113.0/24...
 Control plane (BMP/RIB):
@@ -912,6 +935,7 @@ Data plane probe (traceroute from clab-raven-demo-edge to 203.0.113.1):
 ║ STEALTHY HIJACK DETECTED: control/data-plane divergence ║
 ║ RIB says: AS65000 │ Traffic goes to: AS65099            ║
 ╚═════════════════════════════════════════════════════════╝
+```
 
 **Note on permissions:** Raw ICMP requires `CAP_NET_RAW` or root. Grant it
 without sudo:
@@ -966,7 +990,7 @@ visibility still warrants a look.
 
 **Example — global match:**
 
-```
+```text
 $ raven check global --prefix 8.8.8.0/24
 Correlating global visibility for 8.8.8.0/24...
 
@@ -988,7 +1012,7 @@ Global view (RIPEstat looking-glass, https://stat.ripe.net):
 
 **Example — global divergence (the hijack is real and propagated):**
 
-```
+```text
 $ raven check global --prefix 203.0.113.0/24
 Correlating global visibility for 203.0.113.0/24...
 
@@ -1011,7 +1035,7 @@ Global view (RIPEstat looking-glass, https://stat.ripe.net):
 
 **Example — local-only route (a leak, not a hijack):**
 
-```
+```text
 $ raven check global --prefix 203.0.113.0/24 --origin-asn 64511
 Global view (RIPEstat looking-glass, https://stat.ripe.net):
   no observations — no route collector carries this prefix
@@ -1062,12 +1086,15 @@ raven flowspec list --format json
 | `--format` | Output format: `table` or `json` |
 
 **Example output:**
+
+```text
 RAVEN Flowspec Rules
 ════════════════════════════════════════════════════════
 KEY                            ACTION  DRY-RUN  TTL        INSERTED
 192.0.2.0/24|drop              drop    yes      4m50s      2026-05-06 14:23:01
 10.10.0.0/24|drop              drop    yes      3m55s      2026-05-06 14:24:23
 2 active rules  (dry-run mode — no live injection)
+```
 
 Rules are created automatically by the Event Engine when a route matches
 a configured `flowspec` action. Rules in `dry-run` mode are tracked but
@@ -1092,15 +1119,21 @@ raven flowspec toggle "192.0.2.0/24|drop"
 | `<key>` | Rule key as shown in `raven flowspec list` (required) |
 
 **Example — toggling to live:**
+
+```text
 Rule: 192.0.2.0/24|drop
 Dry-run: yes → LIVE
 ⚠  Live injection enabled. Flowspec rule is now active in GoBGP.
 Run 'raven flowspec toggle "192.0.2.0/24|drop"' again to
 withdraw and return to dry-run mode.
+```
 
 **Example — withdrawing:**
+
+```text
 Rule: 192.0.2.0/24|drop
 Dry-run: LIVE → yes (withdrawn from GoBGP)
+```
 
 !!! warning
     Live injection sends a Flowspec route to GoBGP which will propagate
@@ -1211,6 +1244,8 @@ seeding.
 | `--output` | `~/.raven/anomaly-baseline.json` | Path to write the baseline snapshot to |
 
 **Example output:**
+
+```text
 lines processed: 40320
 sync records:    1342 (7 full syncs skipped)
 window fill levels for localhost:3323:
@@ -1221,6 +1256,7 @@ window fill levels for localhost:3323:
   aspa_announced:    500/500 (full)
   aspa_withdrawn:    500/500 (full)
 output: /home/user/.raven/anomaly-baseline.json
+```
 
 A window that reaches its cap (500 samples) reports `(full)` — the detector has
 a complete baseline for that metric. Partially-filled windows still work but

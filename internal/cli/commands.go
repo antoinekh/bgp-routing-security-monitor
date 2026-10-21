@@ -562,34 +562,54 @@ var watchCmd = &cobra.Command{
 			}
 			data := line[6:]
 
-			var r struct {
-				Prefix    string   `json:"prefix"`
-				PeerAddr  string   `json:"peer"`
-				PeerType  string   `json:"peer_type"`
-				RIB       string   `json:"rib"`
-				OriginASN uint32   `json:"origin_asn"`
-				ASPath    []uint32 `json:"as_path"`
-				ROV       string   `json:"rov"`
-				Posture   string   `json:"posture"`
-			}
+			var r watchRoute
 			if err := json.Unmarshal([]byte(data), &r); err != nil {
 				continue
 			}
-
-			origin := fmt.Sprintf("AS%d", r.OriginASN)
-			if r.OriginASN == 0 {
-				origin = "-"
-			}
-			via := r.PeerAddr
-			if r.PeerType == "loc-rib" {
-				via = "loc-rib"
-			}
-			fmt.Printf("[%s] %s via %s rib:%s origin:%s AS_PATH:%v rov:%s posture:%s\n",
-				r.Posture, r.Prefix, via, r.RIB, origin,
-				r.ASPath, r.ROV, r.Posture)
+			fmt.Println(r.line())
 		}
 		return scanner.Err()
 	},
+}
+
+// watchRoute is the part of a watch event's route that raven watch shows.
+type watchRoute struct {
+	Prefix         string   `json:"prefix"`
+	PeerAddr       string   `json:"peer"`
+	PeerType       string   `json:"peer_type"`
+	RIB            string   `json:"rib"`
+	OriginASN      uint32   `json:"origin_asn"`
+	ASPath         []uint32 `json:"as_path"`
+	ROV            string   `json:"rov"`
+	ASPA           string   `json:"aspa"`
+	ASPAFailingHop *struct {
+		CustomerASN uint32 `json:"customer_asn"`
+		ProviderASN uint32 `json:"provider_asn"`
+	} `json:"aspa_failing_hop"`
+	Posture string `json:"posture"`
+}
+
+// line is r as one raven watch line. An ASPA Invalid shows its failing hop
+// as hop(C→P): C's ASPA does not list P.
+func (r watchRoute) line() string {
+	origin := fmt.Sprintf("AS%d", r.OriginASN)
+	if r.OriginASN == 0 {
+		origin = "-"
+	}
+	aspa := "ASPA:" + r.ASPA
+	if h := r.ASPAFailingHop; h != nil {
+		aspa += fmt.Sprintf(" hop(%d→%d)", h.CustomerASN, h.ProviderASN)
+	}
+	via := r.PeerAddr
+	if r.PeerType == "loc-rib" {
+		via = "loc-rib"
+	}
+	rib := ""
+	if r.RIB != "" {
+		rib = " rib:" + r.RIB
+	}
+	return fmt.Sprintf("[%s] %s via %s%s origin:%s AS_PATH:%v rov:%s %s posture:%s",
+		r.Posture, r.Prefix, via, rib, origin, r.ASPath, r.ROV, aspa, r.Posture)
 }
 
 // ─── helpers ───

@@ -18,6 +18,7 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/routetable"
 	"github.com/nokia/bgp-routing-security-monitor/internal/rtr/store"
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
+	"github.com/nokia/bgp-routing-security-monitor/internal/validation"
 )
 
 // filterFixture is the production report's shape: 1.1.1.0/24 held by four
@@ -171,6 +172,55 @@ func TestRouteJSONFailingHop(t *testing.T) {
 	b, _ = json.Marshal(routeToResponse(r, ""))
 	if !strings.Contains(string(b), `"aspa_failing_hop":{"customer_asn":1199,"provider_asn":65000}`) {
 		t.Errorf("JSON %s lacks the failing hop", b)
+	}
+}
+
+// A route the engine finds ASPA Invalid carries its failing hop to the watch
+// stream's JSON; once it is no longer Invalid the hop is gone.
+func TestWatchJSONFailingHopFromEngine(t *testing.T) {
+	aspas := store.NewASPAStore()
+	for _, p := range []uint32{16735, 23106, 270735} {
+		aspas.AddProvider(53072, p)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e := validation.NewEngine(store.NewVRPStore(), aspas, nil, routetable.New(), log)
+	r := &types.Route{
+		PeerAddr: netip.MustParseAddr("192.0.2.1"),
+		PeerASN:  1031,
+		Prefix:   netip.MustParsePrefix("104.16.0.0/13"),
+		NextHop:  netip.MustParseAddr("192.0.2.1"),
+		ASPath:   []uint32{1031, 262504, 53072, 7738, 13335},
+	}
+	e.ValidateRoute(r)
+	if r.ASPA.State != types.ASPAInvalid || r.SecurityPosture != types.PosturePathSuspect {
+		t.Fatalf("ASPA %s posture %s, want Invalid path-suspect", r.ASPA.State, r.SecurityPosture)
+	}
+	if h := r.ASPA.FailingHop; h == nil || h.CustomerASN != 53072 || h.ProviderASN != 262504 {
+		t.Fatalf("failing hop = %+v, want 53072→262504", h)
+	}
+
+	s := NewServer(routetable.New(), nil, store.NewVRPStore(), log, "test")
+	ch := make(chan RouteResponse, 1)
+	s.watchMu.Lock()
+	s.watchSubs[ch] = &routeFilter{}
+	s.watchMu.Unlock()
+	s.NotifyRoute(r)
+	b, _ := json.Marshal(<-ch)
+	for _, want := range []string{`"aspa":"Invalid"`,
+		`"aspa_failing_hop":{"customer_asn":53072,"provider_asn":262504}`, `"posture":"path-suspect"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("watch JSON %s lacks %s", b, want)
+		}
+	}
+
+	aspas.AddProvider(53072, 262504) // the leak is now an authorized provider
+	e.ValidateRoute(r)
+	if r.ASPA.State == types.ASPAInvalid {
+		t.Fatalf("ASPA still Invalid with 262504 authorized")
+	}
+	s.NotifyRoute(r)
+	if b, _ := json.Marshal(<-ch); strings.Contains(string(b), "aspa_failing_hop") {
+		t.Errorf("watch JSON %s has aspa_failing_hop when ASPA is %s", b, r.ASPA.State)
 	}
 }
 

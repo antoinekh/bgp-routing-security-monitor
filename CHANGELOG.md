@@ -4,6 +4,54 @@ All notable changes to RAVEN are recorded here.
 
 ## Unreleased
 
+### Added
+- Multi-arch container images (`linux/amd64`, `linux/arm64`) are published on every `v*` tag to GHCR and, when a Docker Hub namespace and token are configured, to Docker Hub. The image runs as a non-root user, and pre-release tags do not update `latest`.
+- The `Docker image` workflow rebuilds any existing tag when run from the `Actions` tab with the `tag` input set. A tag published before the `Dockerfile` existed borrows it from the branch the workflow runs on, so a backfill needs no local build.
+- `raven watch --rib`, and `--rib` (API `rib` parameter) on `raven routes`
+  and `raven watch` takes one or more RIBs, comma-separated; without it,
+  the default view (see Changed).
+- BMP Loc-RIB monitoring (RFC 9069, peer type 3). Loc-RIB routes are stored
+  as `loc-rib`, keyed like any route by router, peer distinguisher (VRF
+  Loc-RIBs stay apart), the zero peer address, path ID and RIB. The 0x80
+  flag of a Loc-RIB header is its F (filtered) flag, not V: a filtered
+  Loc-RIB was read as an IPv6 peer; no other Adj-RIB flag (L, A, O) applies
+  to it. The router's own AS is the Loc-RIB header's Peer AS, with or
+  without a Peer Up, and after a restart from a snapshot; it is the RFC
+  6811 §2 origin of an empty Loc-RIB AS_PATH and of one holding only that
+  AS (a locally originated route as FRR 10.2 sends it, its own AS first),
+  or the confederation identifier when known, in ROV, `origin_asn` and the
+  origin index alike. A Loc-RIB instance that sends routes or withdrawals
+  without a Peer Up (FRR 10.2), or after its Peer Down, is registered as a
+  peer; an End-of-RIB alone does not register it. A Loc-RIB Peer Down
+  clears that Loc-RIB only, and a BGP peer's Peer Down its Adj-RIBs only.
+  The Peer Up's VRF/Table Name TLV is shown (`table_name` in
+  `/api/v1/peers` and `/api/v1/status`); `raven peers` shows a Loc-RIB
+  instance as `loc-rib`, with the RD of a VRF instance. Its registration is
+  logged at INFO (`BMP Loc-RIB registered`, `peer_up` true or false). Routes and peers in the API have a `peer_type` (`global`, `rd`,
+  `local`, `loc-rib`).
+- ASPA verification of Loc-RIB routes, which have no neighbor address: the
+  procedure comes from an `aspa-peers` `asn` entry for the neighbor AS, the
+  first AS of the path, then `aspa-default-procedure` (source `config-asn`
+  or `default`); `address` entries never match them, and the neighbor-AS
+  check does not apply. A leading copy of the router's own AS (FRR 10.2
+  puts it first in Loc-RIB paths) is removed before choosing the procedure
+  and verifying. Limitation: for a best path learned over iBGP, the first
+  AS is the neighbor of the border router that learned it, not of the
+  monitored router, and the procedure is chosen for that AS all the same.
+- `rib` event trigger (`ribs: ["loc-rib"]`), for a `compound` trigger that
+  keeps a rule to some RIBs; example in `raven.yaml`.
+- `raven check stealthy` and `raven check global` take a Loc-RIB route's
+  expected neighbor AS from its path (after any leading copy of the
+  router's own AS), and never take a Loc-RIB instance for a BGP neighbor.
+- `lab/loc-rib/`: a Containerlab lab that checks Loc-RIB monitoring live
+  (`lab/loc-rib/run.sh all`, needs root), including a prefix rr1 originates
+  itself, Valid under a ROA for its own AS.
+- `proto/raven/v1/raven.proto`: `rib`, `peer_type` and `peer_distinguisher`
+  on routes, `peer_type`, `peer_distinguisher` and `table_name` on peers,
+  the default view and per-RIB counts in the route table stats, `rib` in
+  the route filter and the audit; the snapshot schema matches the snapshot
+  file (router, peer distinguisher, peer type, path ID, format version).
+
 ### Changed
 - The Loc-RIB user guide now links RFC 9069 and matches the implementation: origin AS, Loc-RIB peer and table fields, FRR 10.7.1 BMP syntax, and audit `--router` behavior.
 - Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
@@ -64,52 +112,10 @@ All notable changes to RAVEN are recorded here.
   origin-only, unverified, path-suspect, origin-invalid), then RIBs; the
   order changed from run to run. `raven status` and `raven peers` show each
   peer's TYPE; `raven routes` shows each route's RIB.
-
-### Added
-- `raven watch --rib`, and `--rib` (API `rib` parameter) on `raven routes`
-  and `raven watch` takes one or more RIBs, comma-separated; without it,
-  the default view (see Changed).
-- BMP Loc-RIB monitoring (RFC 9069, peer type 3). Loc-RIB routes are stored
-  as `loc-rib`, keyed like any route by router, peer distinguisher (VRF
-  Loc-RIBs stay apart), the zero peer address, path ID and RIB. The 0x80
-  flag of a Loc-RIB header is its F (filtered) flag, not V: a filtered
-  Loc-RIB was read as an IPv6 peer; no other Adj-RIB flag (L, A, O) applies
-  to it. The router's own AS is the Loc-RIB header's Peer AS, with or
-  without a Peer Up, and after a restart from a snapshot; it is the RFC
-  6811 §2 origin of an empty Loc-RIB AS_PATH and of one holding only that
-  AS (a locally originated route as FRR 10.2 sends it, its own AS first),
-  or the confederation identifier when known, in ROV, `origin_asn` and the
-  origin index alike. A Loc-RIB instance that sends routes or withdrawals
-  without a Peer Up (FRR 10.2), or after its Peer Down, is registered as a
-  peer; an End-of-RIB alone does not register it. A Loc-RIB Peer Down
-  clears that Loc-RIB only, and a BGP peer's Peer Down its Adj-RIBs only.
-  The Peer Up's VRF/Table Name TLV is shown (`table_name` in
-  `/api/v1/peers` and `/api/v1/status`); `raven peers` shows a Loc-RIB
-  instance as `loc-rib`, with the RD of a VRF instance. Its registration is
-  logged at INFO (`BMP Loc-RIB registered`, `peer_up` true or false). Routes and peers in the API have a `peer_type` (`global`, `rd`,
-  `local`, `loc-rib`).
-- ASPA verification of Loc-RIB routes, which have no neighbor address: the
-  procedure comes from an `aspa-peers` `asn` entry for the neighbor AS, the
-  first AS of the path, then `aspa-default-procedure` (source `config-asn`
-  or `default`); `address` entries never match them, and the neighbor-AS
-  check does not apply. A leading copy of the router's own AS (FRR 10.2
-  puts it first in Loc-RIB paths) is removed before choosing the procedure
-  and verifying. Limitation: for a best path learned over iBGP, the first
-  AS is the neighbor of the border router that learned it, not of the
-  monitored router, and the procedure is chosen for that AS all the same.
-- `rib` event trigger (`ribs: ["loc-rib"]`), for a `compound` trigger that
-  keeps a rule to some RIBs; example in `raven.yaml`.
-- `raven check stealthy` and `raven check global` take a Loc-RIB route's
-  expected neighbor AS from its path (after any leading copy of the
-  router's own AS), and never take a Loc-RIB instance for a BGP neighbor.
-- `lab/loc-rib/`: a Containerlab lab that checks Loc-RIB monitoring live
-  (`lab/loc-rib/run.sh all`, needs root), including a prefix rr1 originates
-  itself, Valid under a ROA for its own AS.
-- `proto/raven/v1/raven.proto`: `rib`, `peer_type` and `peer_distinguisher`
-  on routes, `peer_type`, `peer_distinguisher` and `table_name` on peers,
-  the default view and per-RIB counts in the route table stats, `rib` in
-  the route filter and the audit; the snapshot schema matches the snapshot
-  file (router, peer distinguisher, peer type, path ID, format version).
+- `raven watch` now shows each route's ASPA state and, for an ASPA
+  Invalid, the failing hop as `hop(C→P)`: AS C's ASPA does not list the
+  next AS P. The protobuf `RouteEntry` gains `aspa_failing_hop` (field 14).
+- The documentation site now has a light and dark theme toggle. The first visit follows the operating system preference.
 
 ### Fixed
 - The default Loc-RIB instance (zero distinguisher) is named `global` in the peer data, as RFC 9069 §5.2.1 requires, whether or not its Peer Up carries a VRF/Table Name TLV and whether or not a Peer Up arrives at all; `/api/v1/peers`, `raven peers` and the BMP registration log showed no table name.
@@ -124,6 +130,9 @@ All notable changes to RAVEN are recorded here.
 - `raven_bmp_peer_state` goes to 0 for every peer of a BMP session that
   ends; it stayed at 1 for peers without a Peer Down before the end, until
   RAVEN restarted.
+- Documentation pages now fence command output, router configuration and metric examples, so they render as code. The production architecture diagram was redrawn, and the observability note keeps its example inside the note.
+- The warm-start example on the active-response page uses the real configuration keys (`persistence`, `snapshot_dir`, `stale_eviction_timeout`) instead of the removed `snapshot` block.
+- CI build artifacts report the version, commit and date from `internal/buildinfo`. The linker flags named the removed `internal/cli` variables and were silently ignored.
 
 ## v0.4.0 (2026-10-19)
 

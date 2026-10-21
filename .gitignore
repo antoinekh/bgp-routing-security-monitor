@@ -46,3 +46,9 @@ site/
 .DS_Store
 *.swp
 __pycache__/
+
+# dns-oarc lab: built binary, runtime state, local env, containerlab output
+lab/dns-oarc/bin/
+lab/dns-oarc/runtime/
+lab/dns-oarc/.env
+lab/dns-oarc/clab-dnsoarc/

@@ -99,6 +99,8 @@ received, monitor its Loc-RIB instead of, or as well as, pre-policy
 [Loc-RIB Monitoring](../user-guide/loc-rib.md).
 
 **SR Linux example:**
+
+```text
 network-instance default {
 protocols {
 bgp {
@@ -114,6 +116,7 @@ local-address 0.0.0.0
 }
 }
 }
+```
 
 ## Step 4 — Check Peer Status
 
