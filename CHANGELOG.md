@@ -54,6 +54,7 @@ All notable changes to RAVEN are recorded here.
 
 ### Changed
 - The Loc-RIB user guide now links RFC 9069 and matches the implementation: origin AS, Loc-RIB peer and table fields, FRR 10.7.1 BMP syntax, and audit `--router` behavior.
+- The documentation site now builds with Zensical instead of MkDocs. The CI docs gate stays strict, so a broken link or anchor still fails the build.
 - Repository guidance for coding agents now lives in `AGENTS.md`, the shared convention read by both OpenCode and Claude Code, instead of `CLAUDE.md`.
 - **Breaking for dashboards and alerts:** `raven_routes_total` gains a `rib`
   label: `adj-rib-in-pre`, `adj-rib-in-post` and `loc-rib` are counted
