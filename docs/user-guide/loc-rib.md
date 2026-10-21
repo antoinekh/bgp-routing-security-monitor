@@ -20,7 +20,7 @@ Use the Loc-RIB when you want to know whether the routes in use are secure, for 
 
 **RIBs.** RAVEN names each RIB the same way everywhere (CLI, API, metrics, audit, event triggers): `adj-rib-in-pre`, `adj-rib-in-post`, `loc-rib`, `adj-rib-out-pre`, `adj-rib-out-post`. Where you name a RIB, `pre-policy` and `post-policy` are accepted as aliases of `adj-rib-in-pre` and `adj-rib-in-post`.
 
-**The default view.** Without a RIB, route queries return the default view, `adj-rib-in-pre` plus `loc-rib`: `raven routes`, `raven watch`, `raven validate`, `/api/v1/routes`, `/api/v1/watch`, the what-if simulator and the ASPA recommender. So does `raven status`, whose header names the view. A router that sends only its Loc-RIB shows its routes, and a prefix a router reports in both RIBs is listed once per RIB.
+**The default view.** Without a RIB, route queries return the default view, `adj-rib-in-pre` plus `loc-rib`: `raven routes`, `raven watch`, `raven validate`, `/api/v1/routes`, `/api/v1/watch`. So does `raven status`, whose header names the view. A router that sends only its Loc-RIB shows its routes, and a prefix a router reports in both RIBs is listed once per RIB. `raven what-if` and `raven aspa recommend` use Adj-RIB-In pre-policy routes only: they answer a question about what neighbors sent, and a route in both RIBs would otherwise count twice.
 
 **Choosing RIBs.** `--rib` on [`raven routes`](cli-reference.md#raven-routes) and [`raven watch`](cli-reference.md#raven-watch), and the API's `rib` parameter, take one or more RIBs, comma-separated:
 

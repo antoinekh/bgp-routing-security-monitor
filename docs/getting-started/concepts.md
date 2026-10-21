@@ -53,13 +53,15 @@ Expect some of your own routes to be ROV `Invalid` once RAVEN sees the
 Loc-RIB. See [Internal routes show as Invalid](../troubleshooting.md#internal-routes-show-as-invalid).
 
 **The default view.** Route queries (`raven routes`, `raven watch`,
-`raven validate`, `/api/v1/routes`, `/api/v1/watch`), the status totals,
-the what-if simulator and the ASPA recommender use the **default view**
-unless you name RIBs: Adj-RIB-In pre-policy plus Loc-RIB. A router that
-sends only its Loc-RIB shows its routes, and a router that sends both shows
-each prefix once per RIB. Post-policy stays out because a router that sends
-it usually sends the same routes pre-policy as well; Adj-RIB-Out stays out
-because those routes are sent, not received. See
+`raven validate`, `/api/v1/routes`, `/api/v1/watch`) and the status totals
+use the **default view** unless you name RIBs: Adj-RIB-In pre-policy plus
+Loc-RIB. A router that sends only its Loc-RIB shows its routes, and a
+router that sends both shows each prefix once per RIB. Post-policy stays
+out because a router that sends it usually sends the same routes
+pre-policy as well; Adj-RIB-Out stays out because those routes are sent,
+not received. `raven what-if` and `raven aspa recommend` use Adj-RIB-In
+pre-policy routes only: they answer a question about what neighbors sent,
+and a route in both RIBs would otherwise count twice. See
 [Loc-RIB monitoring](../user-guide/loc-rib.md) for setup.
 
 ## RPKI — Resource Public Key Infrastructure

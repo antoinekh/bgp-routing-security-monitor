@@ -73,11 +73,10 @@ All notable changes to RAVEN are recorded here.
 - Route queries default to the default view, Adj-RIB-In pre-policy **and**
   Loc-RIB: `/api/v1/routes`, `/api/v1/watch`, `raven routes`, `raven watch`
   and every filter with them (`prefix`, `origin-asn`, `peer`, `posture`,
-  `router`), as do the what-if simulator and the ASPA recommender. A router
-  that sends only its Loc-RIB no longer shows an empty table. `rib` (one or
-  more RIBs, comma-separated) still selects others. `/api/v1/watch` without
-  `rib` used to stream every RIB, Adj-RIB-Out included; `raven routes`
-  without `--rib` listed Adj-RIB-In pre-policy only.
+  `router`). A router that sends only its Loc-RIB no longer shows an empty
+  table. `rib` (one or more RIBs, comma-separated) still selects others.
+  `/api/v1/watch` without `rib` used to stream every RIB, Adj-RIB-Out
+  included; `raven routes` without `--rib` listed Adj-RIB-In pre-policy only.
 - Status totals (`raven status`, `/api/v1/status` `total_routes` and
   `by_posture`) count the default view, named in the new `default_view`
   field and in `raven status`'s header; per-peer `route_count` counts a BGP
@@ -112,6 +111,7 @@ All notable changes to RAVEN are recorded here.
   origin-only, unverified, path-suspect, origin-invalid), then RIBs; the
   order changed from run to run. `raven status` and `raven peers` show each
   peer's TYPE; `raven routes` shows each route's RIB.
+- `raven what-if` and `raven aspa recommend` use Adj-RIB-In pre-policy routes only, not the Loc-RIB.
 - `raven watch` now shows each route's ASPA state and, for an ASPA
   Invalid, the failing hop as `hop(C→P)`: AS C's ASPA does not list the
   next AS P. The protobuf `RouteEntry` gains `aspa_failing_hop` (field 14).

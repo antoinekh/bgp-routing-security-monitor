@@ -9,10 +9,9 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/types"
 )
 
-// ListRoutes, for what-if and the ASPA recommender, lists the default view
-// (Adj-RIB-In pre-policy and Loc-RIB) unless RIBs says otherwise, whatever
-// the filter: a route a router reports in several RIBs used to be listed,
-// and counted, once per RIB.
+// ListRoutes lists the default view (Adj-RIB-In pre-policy and Loc-RIB)
+// unless RIBs says otherwise, whatever the filter: a route a router reports
+// in several RIBs used to be listed, and counted, once per RIB.
 func TestListRoutesByRIB(t *testing.T) {
 	tbl := New()
 	peer := netip.MustParseAddr("192.0.2.9")

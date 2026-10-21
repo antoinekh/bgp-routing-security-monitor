@@ -58,7 +58,11 @@ func defaultOpts(o *RecommendOptions) *RecommendOptions {
 func (r *Recommender) Recommend(ctx context.Context, opts *RecommendOptions) ([]ASPASuggestion, error) {
 	opts = defaultOpts(opts)
 
-	filter := routetable.Filter{}
+	// Adj-RIB-In pre-policy only, not the default view: relationships are
+	// inferred from paths as neighbors sent them. A Loc-RIB path is not
+	// one: FRR 10.2 puts the router's own AS first, and a path learned
+	// over iBGP starts at a border router's neighbor.
+	filter := routetable.Filter{RIBs: types.RIBSetOf(types.AdjRIBInPre)}
 	if opts.FilterPeer != "" {
 		if _, err := netip.ParseAddr(opts.FilterPeer); err != nil {
 			return nil, fmt.Errorf("recommender: invalid peer address %q: %w", opts.FilterPeer, err)
