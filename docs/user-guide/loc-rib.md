@@ -191,7 +191,7 @@ router's documentation for BMP Loc-RIB (RFC 9069), then confirm with
 RFC 9069 has the router send a Peer Up for its Loc-RIB instance, but some routers, FRR 10.2 among them, send routes without one. RAVEN registers a Loc-RIB instance from its first Route Monitoring message that carries routes or withdrawals; an End-of-RIB alone does not register it. It does the same for an instance that sends routes after its Peer Down. Each registration is logged at INFO, here with `logging.format: text`:
 
 ```text
-time=2026-10-18T09:12:44.047Z level=INFO msg="BMP Loc-RIB registered" subsystem=bmp router=192.0.2.3:51775 session=1 peer_up=false asn=64499 router_id=192.0.2.3 peer_distinguisher="" table_name="global" filtered=false
+time=2026-10-18T09:12:44.047Z level=INFO msg="BMP Loc-RIB registered" subsystem=bmp router=192.0.2.3:51775 session=1 peer_up=false asn=64499 router_id=192.0.2.3 peer_distinguisher="" table_name=global filtered=false
 ```
 
 `peer_up` is `true` when the instance registered from its Peer Up, and `filtered` reports the Loc-RIB's F flag (RFC 9069 §4.2: the router sends a filtered, not complete, Loc-RIB). The default instance is named `global` whether or not it sent a Peer Up; a VRF instance has no name without one.
