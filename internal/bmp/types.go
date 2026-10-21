@@ -197,8 +197,8 @@ type Peer struct {
 	LocalASN      uint32 // monitoring router's own AS on this session (from Peer Up's Sent OPEN, or a Loc-RIB header's Peer AS); 0 if unknown
 	RouterID      netip.Addr
 	// TableName is a Loc-RIB instance's VRF/Table Name, from its Peer Up;
-	// the default instance is "global" (RFC 9069 §5.2.1). Empty if none
-	// was sent, or for a Loc-RIB registered without a Peer Up.
+	// the default instance is "global" (RFC 9069 §5.2.1), with or
+	// without one. Empty for a VRF instance with no name.
 	TableName string
 	SysName   string
 	SysDescr  string
