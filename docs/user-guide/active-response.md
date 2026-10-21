@@ -48,6 +48,12 @@ except Adj-RIB-Out. A router that exports both its pre-policy Adj-RIB-In
 and its Loc-RIB reports a hijacked route in both, so a rule fires once for
 each RIB, and each firing carries its `rib`. Add a [`rib`
 trigger](#rib-trigger) to keep a rule to the RIBs you want alerts from.
+A Flowspec action is injected once per prefix and action even when the rule
+fires for several RIBs, because the Flowspec registry dedupes on that key;
+the injected rule, and the approval webhook if one is configured, carry the
+peer of whichever event came first, which for a Loc-RIB event is `0.0.0.0`.
+To limit a rule to one RIB, add a `rib` trigger, but note that a router that
+exports only its Loc-RIB then never matches `adj-rib-in-pre`.
 
 **Actions**: what happens when the rule fires. Multiple actions can be
 listed; they execute in order. If one action fails, subsequent actions

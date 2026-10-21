@@ -60,3 +60,21 @@ func TestAnalyzeOneRIB(t *testing.T) {
 		t.Errorf("pre-policy audit output:\n%s\n%s", FormatTable(pre), FormatMarkdown(pre))
 	}
 }
+
+// Addresses are compared with IPv4-mapped forms unmapped, as the API filter
+// does: a Loc-RIB route whose router is ::ffff:192.0.2.3, and a peer route
+// from ::ffff:192.0.2.1, are found by the plain IPv4 address.
+func TestAnalyzeUnmapsAddresses(t *testing.T) {
+	peer := makeRoute("10.0.0.1", "::ffff:192.0.2.1", 65001, "1.0.0.0/24", []uint32{65001}, types.ROVValid, types.ASPAValid)
+	peer.RIBType = types.AdjRIBInPre
+	loc := makeRoute("10.0.0.1", "0.0.0.0", 65001, "1.0.0.0/24", []uint32{65001}, types.ROVValid, types.ASPAValid)
+	loc.Router, loc.PeerType, loc.RIBType = netip.MustParseAddr("::ffff:192.0.2.3"), types.PeerTypeLocRIB, types.LocRIB
+	routes := []*types.Route{peer, loc}
+
+	if got := Analyze("192.0.2.1", types.AdjRIBInPre, routes); got.TotalRoutes != 1 {
+		t.Errorf("adj-rib-in-pre audit of 192.0.2.1: %d routes, want 1 (peer ::ffff:192.0.2.1)", got.TotalRoutes)
+	}
+	if got := Analyze("192.0.2.3", types.LocRIB, routes); got.TotalRoutes != 1 {
+		t.Errorf("Loc-RIB audit of 192.0.2.3: %d routes, want 1 (router ::ffff:192.0.2.3)", got.TotalRoutes)
+	}
+}

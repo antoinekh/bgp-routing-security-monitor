@@ -26,7 +26,8 @@ var postureOrder = map[string]int{
 //
 // A route matches the address by its peer address. A Loc-RIB route has the
 // zero peer address (RFC 9069), so it matches by its monitored router's
-// address instead. An empty address matches all routes. It is a pure
+// address instead. Both are compared with IPv4-mapped forms unmapped, as
+// the API filter does. An empty address matches all routes. It is a pure
 // function: no I/O, no side-effects, safe to call from tests.
 func Analyze(addr string, rib types.RIBType, routes []*types.Route) *RouterAuditReport {
 	var local []*types.Route
@@ -34,9 +35,9 @@ func Analyze(addr string, rib types.RIBType, routes []*types.Route) *RouterAudit
 		if r.RIBType != rib {
 			continue
 		}
-		match := r.PeerAddr.String()
+		match := r.PeerAddr.Unmap().String()
 		if rib == types.LocRIB {
-			match = r.Router.String()
+			match = r.Router.Unmap().String()
 		}
 		if addr == "" || match == addr {
 			local = append(local, r)

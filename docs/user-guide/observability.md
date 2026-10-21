@@ -95,6 +95,10 @@ raven_route_table_size{rib="loc-rib"}
     sum(raven_route_table_size{rib=~"adj-rib-in-pre|loc-rib"})
     ```
 
+    To keep pre-upgrade history visible, match an empty `rib` too
+    (`rib=~"adj-rib-in-pre|"`, or `rib=~"adj-rib-in-pre|loc-rib|"` for the
+    default view), since series from before the upgrade have no `rib` label.
+
     The Grafana dashboard in the code repository
     (`lab/grafana-dashboard.json`) uses these queries. The OpenTelemetry
     gauge `raven.routes.total` has the same `rib` attribute.

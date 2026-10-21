@@ -82,14 +82,17 @@ All notable changes to RAVEN are recorded here.
   field and in `raven status`'s header; per-peer `route_count` counts a BGP
   peer's Adj-RIB-In pre-policy routes and a Loc-RIB instance's Loc-RIB
   routes. They counted Adj-RIB-In pre-policy routes only, so a router
-  sending only its Loc-RIB showed 0 routes.
+  sending only its Loc-RIB showed 0 routes. `by_rib`, and each peer's
+  `routes_by_rib`, still count every RIB apart.
 - RIB names are the same everywhere: `adj-rib-in-pre`, `adj-rib-in-post`,
   `loc-rib`, `adj-rib-out-pre`, `adj-rib-out-post`. `pre-policy` and
   `post-policy` are accepted as aliases of the Adj-RIB-In ones in the CLI,
   the API, the audit and the `rib` event trigger. Route snapshots are
   written with these names; older ones, with `pre-policy`/`post-policy`,
   still load, and a snapshot with an unknown RIB is an error (it was loaded
-  as Adj-RIB-In pre-policy).
+  as Adj-RIB-In pre-policy). Before rolling back to an earlier release,
+  delete `routes.snap`: an earlier release reads the new names wrongly,
+  `adj-rib-in-post` routes as Adj-RIB-In pre-policy.
 - A type 2 route distinguisher has an `L` after its AS number (`65000L:1`),
   in the API, metric labels, audit rows and event fields, so it is no
   longer written like the type 0 RD `65000:1`.
