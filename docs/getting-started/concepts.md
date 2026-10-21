@@ -16,10 +16,53 @@ listener and send a full table dump on startup, followed by incremental updates
 as routes change. RAVEN sees every route your router receives, from every peer,
 in real time.
 
-**Why Adj-RIB-In Pre-Policy?**
-RAVEN focuses on Adj-RIB-In Pre-Policy — what the router received before import
-policy filtered it. This is where security analysis belongs. If a hijacked route
-is being received and your import policy isn't filtering it, you want to know.
+### Which RIB to monitor
+
+A router can export several of its tables over BMP, and RAVEN stores each
+one apart:
+
+| RIB | RAVEN name | What it holds |
+|---|---|---|
+| Adj-RIB-In pre-policy | `adj-rib-in-pre` | Every route each peer sent, before your import policy (RFC 7854) |
+| Adj-RIB-In post-policy | `adj-rib-in-post` | The routes your import policy accepted, as it changed them (RFC 7854) |
+| Loc-RIB | `loc-rib` | The routes the router selected as best, from every peer and from itself (RFC 9069) |
+| Adj-RIB-Out pre-policy | `adj-rib-out-pre` | What the router sends each peer, before export policy (RFC 8671) |
+| Adj-RIB-Out post-policy | `adj-rib-out-post` | What the router sends each peer, after export policy (RFC 8671) |
+
+The CLI, the API, the audit and the `rib` event trigger also accept
+`pre-policy` and `post-policy` as names for `adj-rib-in-pre` and
+`adj-rib-in-post`.
+
+**Adj-RIB-In pre-policy** shows what your peers sent before your import
+policy filtered it. If a hijacked route is being received and your import
+policy isn't filtering it, you want to know, and pre-policy shows you even
+the routes your policy dropped.
+
+**Loc-RIB** shows what the router accepted and selected: the best path
+for each prefix, the one it installs and advertises. Validating the Loc-RIB
+answers a different question, whether the routes your network actually
+uses are secure, and it includes what pre-policy never shows: routes the
+router originates itself and routes it learned over iBGP. It is also one
+table per router instead of one per peer, so it is smaller to export and
+store. Use Loc-RIB when you want posture for the paths in use, or when
+exporting every peer's pre-policy table is too much; use pre-policy when
+you want to see attacks your import policy is already stopping. Many
+networks export both.
+
+Expect some of your own routes to be ROV `Invalid` once RAVEN sees the
+Loc-RIB. See [Internal routes show as Invalid](../troubleshooting.md#internal-routes-show-as-invalid).
+
+**The default view.** Route queries (`raven routes`, `raven watch`,
+`raven validate`, `/api/v1/routes`, `/api/v1/watch`) and the status totals
+use the **default view** unless you name RIBs: Adj-RIB-In pre-policy plus
+Loc-RIB. A router that sends only its Loc-RIB shows its routes, and a
+router that sends both shows each prefix once per RIB. Post-policy stays
+out because a router that sends it usually sends the same routes
+pre-policy as well; Adj-RIB-Out stays out because those routes are sent,
+not received. `raven what-if` and `raven aspa recommend` use Adj-RIB-In
+pre-policy routes only: they answer a question about what neighbors sent,
+and a route in both RIBs would otherwise count twice. See
+[Loc-RIB monitoring](../user-guide/loc-rib.md) for setup.
 
 ## RPKI — Resource Public Key Infrastructure
 
@@ -48,11 +91,14 @@ The result is one of three states:
 | **Invalid** | A ROA exists but it does not authorise this origin ASN, or the prefix is too specific |
 | **NotFound** | No ROA covers this prefix — no RPKI data available |
 
-The origin ASN is the last AS of the AS_PATH. When the path ends in an
-AS_SET, as an aggregate's can, RFC 6811 says the origin is NONE, which no
-ROA authorises: RAVEN marks such a route `Invalid` if a ROA covers the
-prefix and `NotFound` otherwise. See
-[The origin AS](../architecture/validation-engine.md#the-origin-as) for
+The origin ASN is the last AS of the AS_PATH. A route with an empty
+AS_PATH, one your router originated or learned over iBGP from a router in
+its own AS, has your router's own AS as its origin (RFC 6811 §2), and RAVEN
+validates it like any other; so does a route whose path ends in a
+confederation segment. When the path ends in an AS_SET, as an aggregate's
+can, RFC 6811 says the origin is NONE, which no ROA authorises: RAVEN marks
+such a route `Invalid` if a ROA covers the prefix and `NotFound` otherwise.
+See [The origin AS](../architecture/validation-engine.md#the-origin-as) for
 every case.
 
 ROV catches **origin hijacks** — where an attacker announces your prefix from
@@ -155,6 +201,12 @@ neighbor's role. Every route reports the procedure it got and where it came
 from in `aspa_procedure` and `aspa_procedure_source`; see
 [`raven routes --format wide`](../user-guide/cli-reference.md#raven-routes).
 
+A Loc-RIB route has no BMP peer to match: it is the router's best path,
+whichever neighbor it came from. RAVEN takes the neighbor AS from the
+route's AS_PATH instead and picks the procedure from an `aspa-peers` `asn`
+entry for it, then the default; see
+[ASPA on Loc-RIB routes](../user-guide/loc-rib.md#aspa-on-loc-rib-routes).
+
 ### The neighbor-AS check
 
 When a peer's role comes from an `aspa-peers` entry, RAVEN also runs the
@@ -179,7 +231,7 @@ would mark every route from the route server `Invalid`.
 |---|---|
 | **Valid** | The ASPA records attest the whole path from the origin to your neighbor |
 | **Invalid** | A published ASPA record contradicts the path under the selected procedure, or the neighbor-AS check failed: a likely route leak |
-| **Unknown** | No record contradicts the path, but some ASes in it have no ASPA record, so RAVEN cannot confirm it. Routes with an empty AS_PATH are also `Unknown` |
+| **Unknown** | No record contradicts the path, but some ASes in it have no ASPA record, so RAVEN cannot confirm it. Routes with an empty AS_PATH are also `Unknown`, and so is every route while RAVEN has no ASPA data (no RTR version 2 cache) or `validation.aspa` is `false` |
 | **Unverifiable** | The AS_PATH contains an AS_SET, so it has no single order to verify, or confederation segments, meaning the route came from inside your own AS confederation, where the draft does not recommend verification (§6.2) |
 
 ASPA adoption is early, so expect most of your routes to show `Unknown`.
@@ -208,6 +260,9 @@ and keeps a local copy of all VRP and ASPA data, updated incrementally as
 the validator's data changes.
 
 RTR v2 adds ASPA PDU support. Routinator with `--enable-aspa` speaks RTR v2.
+RAVEN verifies ASPA only once a cache has synced at version 2; behind a
+version 1 cache every route's ASPA state is `Unknown`, with the reason
+`no ASPA data (no RTR v2 session)`.
 
 ## The Security Posture Model
 

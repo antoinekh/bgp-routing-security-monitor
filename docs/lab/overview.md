@@ -39,6 +39,12 @@ Containerlab:
 | edge | AS65001 | Edge router, sends pre-policy BMP to RAVEN |
 | attacker | AS65099 | Peered with upstream and edge; used for stealthy hijack and IPv6 origin hijack |
 
+Route queries without `--rib` show the
+[default view](../getting-started/concepts.md#which-rib-to-monitor),
+pre-policy Adj-RIB-In and Loc-RIB, so upstream's post-policy routes appear
+only with `raven routes --rib adj-rib-in-post` (or `--rib post-policy`).
+For Loc-RIB monitoring, see the separate [Loc-RIB Lab](loc-rib.md).
+
 AS64496 is from RFC 5398's documentation/private range — chosen so the lab
 never collides with real-world RPKI records. The route-leak scenario uses
 real-world RPKI data: upstream (AS65000) re-originates `145.102.136.0/22`

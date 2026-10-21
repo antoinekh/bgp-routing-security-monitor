@@ -72,3 +72,20 @@ func (s *Selector) Select(peerAddr netip.Addr, peerASN uint32) Selection {
 	}
 	return s.def
 }
+
+// SelectASN returns the procedure for a route learned from a neighbor known
+// by its AS alone: an aspa-peers entry for the ASN, then the default. A
+// Loc-RIB route has no neighbor address (RFC 9069), only the first AS of
+// its path. The neighbor-AS check is never selected: the neighbor AS is
+// that first AS, so the check could not fail.
+func (s *Selector) SelectASN(neighborASN uint32) Selection {
+	if s == nil {
+		return Selection{}
+	}
+	sel, ok := s.byASN[neighborASN]
+	if !ok {
+		sel = s.def
+	}
+	sel.NeighborCheck = false
+	return sel
+}

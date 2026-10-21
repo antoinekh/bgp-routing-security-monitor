@@ -350,9 +350,10 @@ This runs:
 raven aspa recommend --min-observations 1
 ```
 
-The recommender analyses every AS_PATH RAVEN has seen via BMP and infers
-customer-provider relationships. It then cross-references these against the
-ASPA store to identify which ASes could benefit from creating ASPA objects.
+The recommender analyses every Adj-RIB-In pre-policy AS_PATH RAVEN has seen
+via BMP and infers customer-provider relationships. It then cross-references
+these against the ASPA store to identify which ASes could benefit from
+creating ASPA objects.
 
 In the lab the output will reflect the small set of routes in the topology.
 Against a production BMP feed with hundreds of thousands of routes, this

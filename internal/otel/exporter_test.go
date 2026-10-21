@@ -14,7 +14,7 @@ import (
 // ── mock StateReader ──────────────────────────────────────────────────────────
 
 type mockReader struct {
-	routeCounts    map[string]map[string]int64
+	routeCounts    []ravenotel.RouteCount
 	peerCounts     []ravenotel.PeerRouteCount
 	bmpSessions    []ravenotel.BMPSessionState
 	bmpMessages    []ravenotel.BMPMessageCount
@@ -22,9 +22,7 @@ type mockReader struct {
 	rtrCacheCounts []ravenotel.RTRCacheCount
 }
 
-func (m *mockReader) RouteCountsByPosture() map[string]map[string]int64 {
-	return m.routeCounts
-}
+func (m *mockReader) RouteCounts() []ravenotel.RouteCount           { return m.routeCounts }
 func (m *mockReader) PeerRouteCounts() []ravenotel.PeerRouteCount   { return m.peerCounts }
 func (m *mockReader) BMPSessionStates() []ravenotel.BMPSessionState { return m.bmpSessions }
 func (m *mockReader) BMPMessageCounts() []ravenotel.BMPMessageCount { return m.bmpMessages }
@@ -81,8 +79,8 @@ func TestNewExporter_Disabled(t *testing.T) {
 // first collection pass.
 func TestExporter_MetricNames(t *testing.T) {
 	sr := &mockReader{
-		routeCounts: map[string]map[string]int64{
-			"secured": {"ipv4": 5},
+		routeCounts: []ravenotel.RouteCount{
+			{RIB: "adj-rib-in-pre", Posture: "secured", AFI: "ipv4", Count: 5},
 		},
 		rtrCacheCounts: []ravenotel.RTRCacheCount{
 			{CacheName: "cache1", VRPCount: 100, ASPACount: 10, LastSync: 1_700_000_000},
@@ -112,19 +110,22 @@ func TestExporter_MetricNames(t *testing.T) {
 }
 
 // TestStateReader_Interface wires a mock StateReader to an in-memory exporter,
-// produces one collection, and verifies attribute values on raven.routes.total.
+// produces one collection, and verifies attribute values on raven.routes.total:
+// one series per RIB, so the same posture and family in two RIBs stay apart.
 func TestStateReader_Interface(t *testing.T) {
 	sr := &mockReader{
-		routeCounts: map[string]map[string]int64{
-			"secured":        {"ipv4": 10, "ipv6": 3},
-			"origin-invalid": {"ipv4": 2},
+		routeCounts: []ravenotel.RouteCount{
+			{RIB: "adj-rib-in-pre", Posture: "secured", AFI: "ipv4", Count: 10},
+			{RIB: "adj-rib-in-pre", Posture: "secured", AFI: "ipv6", Count: 3},
+			{RIB: "adj-rib-in-pre", Posture: "origin-invalid", AFI: "ipv4", Count: 2},
+			{RIB: "loc-rib", Posture: "secured", AFI: "ipv4", Count: 4},
 		},
 	}
 	exp, _ := newTestExporter(t, sr)
 	rm := collectMetrics(t, exp)
 
-	// Find raven.routes.total and build a map of {posture+afi → count}.
-	type labelKey struct{ posture, afi string }
+	// Find raven.routes.total and build a map of {posture+afi+rib → count}.
+	type labelKey struct{ posture, afi, rib string }
 	observed := make(map[labelKey]int64)
 
 	for _, sm := range rm.ScopeMetrics {
@@ -137,16 +138,18 @@ func TestStateReader_Interface(t *testing.T) {
 				t.Fatalf("raven.routes.total: unexpected data type %T", m.Data)
 			}
 			for _, dp := range gauge.DataPoints {
-				var posture, afi string
+				var posture, afi, rib string
 				for _, kv := range dp.Attributes.ToSlice() {
 					switch string(kv.Key) {
 					case "posture":
 						posture = kv.Value.AsString()
 					case "afi":
 						afi = kv.Value.AsString()
+					case "rib":
+						rib = kv.Value.AsString()
 					}
 				}
-				observed[labelKey{posture, afi}] = dp.Value
+				observed[labelKey{posture, afi, rib}] = dp.Value
 			}
 		}
 	}
@@ -154,18 +157,23 @@ func TestStateReader_Interface(t *testing.T) {
 	cases := []struct {
 		posture string
 		afi     string
+		rib     string
 		want    int64
 	}{
-		{"secured", "ipv4", 10},
-		{"secured", "ipv6", 3},
-		{"origin-invalid", "ipv4", 2},
+		{"secured", "ipv4", "adj-rib-in-pre", 10},
+		{"secured", "ipv6", "adj-rib-in-pre", 3},
+		{"origin-invalid", "ipv4", "adj-rib-in-pre", 2},
+		{"secured", "ipv4", "loc-rib", 4},
 	}
 	for _, tc := range cases {
-		got := observed[labelKey{tc.posture, tc.afi}]
+		got := observed[labelKey{tc.posture, tc.afi, tc.rib}]
 		if got != tc.want {
-			t.Errorf("routes.total{posture=%q,afi=%q} = %d, want %d",
-				tc.posture, tc.afi, got, tc.want)
+			t.Errorf("routes.total{posture=%q,afi=%q,rib=%q} = %d, want %d",
+				tc.posture, tc.afi, tc.rib, got, tc.want)
 		}
+	}
+	if len(observed) != len(cases) {
+		t.Errorf("routes.total has %d series, want %d: %v", len(observed), len(cases), observed)
 	}
 }
 

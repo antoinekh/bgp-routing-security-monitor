@@ -2,6 +2,7 @@ package validation
 
 import (
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,6 +28,42 @@ type Engine struct {
 	// aspaCount holds raven_aspa_validations_total's series, indexed by
 	// procedure, source and state, resolved once so counting allocates nothing.
 	aspaCount [2][3][4]prometheus.Counter
+
+	// aspaOff, when set, is why ASPA verification is not run: every route
+	// gets ASPA Unknown with this reason (see SetASPAUnavailable). Nil runs
+	// it. Set from the RTR goroutines, read on validation.
+	aspaOff atomic.Pointer[string]
+}
+
+// Reasons ASPA verification is not run (ASPAResult.Reason).
+const (
+	// ASPAReasonDisabled: validation.aspa is false.
+	ASPAReasonDisabled = "ASPA disabled"
+	// ASPAReasonNoData: no RTR cache has synced at protocol version 2,
+	// the first with ASPA. Without ASPA data a path of one AS would still
+	// verify as Valid and make its posture path-only or secured.
+	ASPAReasonNoData = "no ASPA data (no RTR v2 session)"
+)
+
+// SetASPAUnavailable stops ASPA verification, every route then getting ASPA
+// Unknown with reason, or with reason "" runs it again. It reports whether
+// that changed anything; the caller revalidates the table if so. Safe from
+// any goroutine.
+func (e *Engine) SetASPAUnavailable(reason string) (changed bool) {
+	var next *string
+	if reason != "" {
+		next = &reason
+	}
+	prev := e.aspaOff.Swap(next)
+	return (prev == nil) != (next == nil) || (prev != nil && *prev != reason)
+}
+
+// ASPAUnavailable returns why ASPA verification is not run, or "" if it is.
+func (e *Engine) ASPAUnavailable() string {
+	if p := e.aspaOff.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // NewEngine creates a validation engine. sel picks each route's ASPA
@@ -77,14 +114,100 @@ func (e *Engine) annotate(route *types.Route) (types.ROVResult, types.ASPAResult
 		a := types.ASPAResult{State: types.ASPAUnverifiable, Reason: aspaNotVerifiedOutbound}
 		return rovRes, a, types.ComputePosture(rovRes.State, a.State)
 	}
+	if why := e.ASPAUnavailable(); why != "" {
+		// Nothing to verify against: Unknown, as for a path no ASPA
+		// covers, rather than Valid paths of one AS. Not counted in
+		// raven_aspa_validations_total: no verification ran.
+		a := types.ASPAResult{State: types.ASPAUnknown, Reason: why}
+		return rovRes, a, types.ComputePosture(rovRes.State, a.State)
+	}
 	// ASPA, with the procedure for the peer the route was learned from
-	sel := e.aspaSelector.Select(route.PeerAddr, route.PeerASN)
-	a := e.aspaAnnotator.ValidateSelection(route, sel)
+	var a types.ASPAResult
+	if route.RIBType == types.LocRIB {
+		a = e.validateLocRIB(route)
+	} else {
+		sel := e.aspaSelector.Select(route.PeerAddr, route.PeerASN)
+		a = e.aspaAnnotator.ValidateSelection(route, sel)
+	}
 	if int(a.Procedure) < 2 && int(a.ProcedureSource) < 3 && int(a.State) < 4 {
 		e.aspaCount[a.Procedure][a.ProcedureSource][a.State].Inc()
 	}
 	// Combined posture
 	return rovRes, a, types.ComputePosture(rovRes.State, a.State)
+}
+
+// validateLocRIB verifies a Loc-RIB route's AS_PATH. A Loc-RIB route has no
+// neighbor address (RFC 9069), so its procedure comes from the neighbor AS,
+// the first AS of the path: an aspa-peers asn entry, then
+// aspa-default-procedure. The neighbor-AS check does not apply.
+//
+// Some routers (FRR 10.2) put their own AS first in a Loc-RIB AS_PATH. The
+// route's LocalASN is the router's AS (the Loc-RIB header's Peer AS), and a
+// path starting with it would have verification check the router against
+// itself, so those leading copies are removed before choosing the procedure
+// and verifying. The stored route keeps its path as received.
+//
+// For a best path learned over iBGP the first AS is the neighbor of the
+// border router that learned it, not of this router; the procedure is chosen
+// for that AS all the same.
+func (e *Engine) validateLocRIB(route *types.Route) types.ASPAResult {
+	v := route
+	if stripped, ok := withoutLeadingAS(route, route.LocalASN); ok {
+		v = stripped
+	}
+	var neighbor uint32
+	if len(v.ASPath) > 0 {
+		neighbor = v.ASPath[0]
+	}
+	return e.aspaAnnotator.ValidateSelection(v, e.aspaSelector.SelectASN(neighbor))
+}
+
+// withoutLeadingAS returns a copy of route whose AS_PATH no longer starts
+// with asn, and true; or route's own pointer and false if the path does not
+// start with asn in an AS_SEQUENCE (or asn is 0). Every leading copy is
+// removed: one would remain a hop of its own after prepends are collapsed.
+func withoutLeadingAS(route *types.Route, asn uint32) (*types.Route, bool) {
+	if asn == 0 || len(route.ASPath) == 0 || route.ASPath[0] != asn {
+		return route, false
+	}
+	raw := route.ASPathRaw
+	if len(raw) == 0 {
+		// No segments (a route restored from a snapshot): the flattened
+		// path alone.
+		cp := *route
+		for len(cp.ASPath) > 0 && cp.ASPath[0] == asn {
+			cp.ASPath = cp.ASPath[1:]
+		}
+		return &cp, true
+	}
+	// The copies counted are in the leading AS_SEQUENCE segments only, so
+	// the flattened path, which lists the segments' ASes in order, loses
+	// exactly as many.
+	var stripped []types.ASSegment
+	n := 0
+	for i, seg := range raw {
+		if seg.Type != types.ASSegmentSequence {
+			stripped = append(stripped, raw[i:]...)
+			break
+		}
+		k := 0
+		for k < len(seg.ASNs) && seg.ASNs[k] == asn {
+			k++
+		}
+		n += k
+		if k < len(seg.ASNs) {
+			stripped = append(stripped, types.ASSegment{Type: seg.Type, ASNs: seg.ASNs[k:]})
+			stripped = append(stripped, raw[i+1:]...)
+			break
+		}
+	}
+	if n == 0 {
+		return route, false
+	}
+	cp := *route
+	cp.ASPath = cp.ASPath[n:]
+	cp.ASPathRaw = stripped
+	return &cp, true
 }
 
 // Revalidated re-runs validation on route against the current VRP and ASPA

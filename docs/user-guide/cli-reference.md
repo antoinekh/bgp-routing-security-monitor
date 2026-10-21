@@ -77,43 +77,61 @@ curl -s http://127.0.0.1:11020/api/v1/status
 ```text
 RAVEN dev  uptime 2h14m5s
 
-Route Table: 5 routes received (Adj-RIB-In pre-policy)
-  path-suspect         2
-  path-only            1
-  secured              1
-  unverified           1
+Route Table: 4 routes in the default view (adj-rib-in-pre + loc-rib)
+  origin-only          3
+  origin-invalid       1
 By RIB:
-  adj-rib-in-pre       5
-  adj-rib-out-pre      41
+  adj-rib-in-pre       1
+  loc-rib              3
 
-RPKI: 1 VRPs (serial 4821)
+RPKI: 2 VRPs (serial 4821)
 
-BMP Peers: 4
-  ROUTER     PEER                      ASN    STATE  ROUTES  OUT
-  edge1      198.51.100.1              64500  up     2       41
-  edge1      198.51.100.2              64496  up     1       0
-  edge1      192.0.2.250               64510  up     1       0
-  192.0.2.2  2001:db8::2 rd 65000:100  64505  up     1       0
+BMP Peers: 2
+  ROUTER  PEER          TYPE     ASN    STATE  ROUTES
+  rr1     198.51.100.7  global   64500  up     1
+  rr1     loc-rib       loc-rib  64499  up     3
 ```
 
-**Route Table** and its posture breakdown count Adj-RIB-In pre-policy
-routes only: what your routers received, before import policy, comparable
-to the received-routes count on the router itself. Earlier releases added
-every RIB together, so a router that also sent post-policy or Adj-RIB-Out
-data inflated the total. The posture lines appear in no fixed
-order. **By RIB** appears when the table holds more than one RIB type and
-lists each one separately.
+Here `rr1` (AS64499, at 192.0.2.3) exports both its pre-policy Adj-RIB-In and its
+Loc-RIB; see [Loc-RIB Monitoring](loc-rib.md).
+
+**Route Table** and its posture breakdown count the
+[default view](../getting-started/concepts.md#which-rib-to-monitor):
+Adj-RIB-In pre-policy plus Loc-RIB, the RIBs the header names, which are
+the routes `raven routes` lists without `--rib`. A router that sends both
+counts most of its routes twice, once per RIB; a router that sends only its
+Loc-RIB no longer shows 0. v0.4.0 counted Adj-RIB-In pre-policy only. The
+postures are listed in a fixed order: `secured`, `path-only`,
+`origin-only`, `unverified`, `path-suspect`, `origin-invalid`, each only
+when it has routes. **By RIB** lists every RIB that has routes, in the
+order `adj-rib-in-pre`, `adj-rib-in-post`, `loc-rib`, `adj-rib-out-pre`,
+`adj-rib-out-post`.
 
 **BMP Peers** columns:
 
 | Column | Meaning |
 |---|---|
 | `ROUTER` | The monitored router: its BMP sysName, or its BMP source address when it sent none |
-| `PEER` | The BGP peer's address. A peer in a VRF shows the VRF's route distinguisher, as in `2001:db8::2 rd 65000:100` |
-| `ASN` | The peer's ASN |
+| `PEER` | The BGP peer's address. A peer in a VRF shows the VRF's route distinguisher, as in `2001:db8::2 rd 65000:100`. A Loc-RIB instance shows `loc-rib`, with the RD of a VRF instance, as in `loc-rib rd 64499:100` |
+| `TYPE` | The BMP peer type: `global`, `rd` (a VRF peer), `local`, or `loc-rib` (the router's Loc-RIB instance, RFC 9069) |
+| `ASN` | The peer's ASN; for a Loc-RIB instance, the router's own AS |
 | `STATE` | `up` or `down` |
-| `ROUTES` | The peer's Adj-RIB-In pre-policy routes now in the table |
+| `ROUTES` | A BGP peer's Adj-RIB-In pre-policy routes, or a Loc-RIB instance's Loc-RIB routes, now in the table |
 | `OUT` | The peer's Adj-RIB-Out pre-policy routes: what your router sends that peer (RFC 8671). Shown only when some peer has Adj-RIB-Out routes |
+
+The API's `/api/v1/status` and `/api/v1/peers` give each peer a
+`peer_type` and, for a Loc-RIB instance that sent a Peer Up, a
+`table_name`: its VRF/Table Name, `global` for the default instance.
+`/api/v1/status` also names the default view's RIBs in `route_table`:
+
+```json
+"route_table": {
+  "total_routes": 4,
+  "default_view": ["adj-rib-in-pre", "loc-rib"],
+  "by_posture": {"origin-invalid": 1, "origin-only": 3},
+  "by_rib": {"adj-rib-in-pre": 1, "loc-rib": 3}
+}
+```
 
 The same peer address on two routers, or in two VRFs of one router, is two
 rows, because RAVEN keys peers by router, peer distinguisher and address.
@@ -143,16 +161,41 @@ raven peers --router edge1
 **Example output:**
 
 ```text
-ROUTER     PEER                      ASN    ROUTER ID     STATE  ROUTES  OUT  UP SINCE
-edge1      198.51.100.1              64500  198.51.100.1  up     2       41   2026-10-18T09:12:44Z
-edge1      198.51.100.2              64496  198.51.100.2  up     1       0    2026-10-18T09:12:44Z
-edge1      192.0.2.250               64510  192.0.2.250   up     1       0    2026-10-18T09:12:45Z
-192.0.2.2  2001:db8::2 rd 65000:100  64505  203.0.113.5   up     1       0    2026-10-18T09:13:02Z
+ROUTER  PEER          TYPE     ASN    ROUTER ID     STATE  ROUTES  UP SINCE
+rr1     198.51.100.7  global   64500  198.51.100.7  up     1       2026-10-18T09:12:44Z
+rr1     loc-rib       loc-rib  64499  192.0.2.3     up     3       2026-10-18T09:12:44Z
 ```
 
-The `ROUTER`, `PEER`, `ROUTES` and `OUT` columns mean the same as in
-[`raven status`](#raven-status). `ROUTER ID` is the peer's BGP identifier and
-`UP SINCE` the time its session came up (RFC 3339, UTC).
+The `ROUTER`, `PEER`, `TYPE`, `ASN`, `ROUTES` and `OUT` columns mean the
+same as in [`raven status`](#raven-status). `ROUTER ID` is the peer's BGP
+identifier (for a Loc-RIB instance, the router's own) and `UP SINCE` the
+time its session came up (RFC 3339, UTC); for a Loc-RIB instance that sent
+no Peer Up, the time RAVEN registered it from its first routes.
+
+The API's `/api/v1/peers` output for a Loc-RIB instance:
+
+```json
+{
+  "router": "192.0.2.3",
+  "router_name": "rr1",
+  "peer_type": "loc-rib",
+  "table_name": "global",
+  "addr": "0.0.0.0",
+  "asn": 64499,
+  "router_id": "192.0.2.3",
+  "state": "up",
+  "route_count": 3,
+  "routes_by_rib": {
+    "loc-rib": 3
+  },
+  "up_since": "2026-10-18T09:12:44Z",
+  "last_msg": "2026-10-18T09:12:44Z"
+}
+```
+
+`table_name` is omitted for a VRF instance that sent no Peer Up (FRR 10.2
+sends none for its Loc-RIB); the default instance is `global` either way.
+`peer_distinguisher` is omitted for the default instance.
 
 ### The MALFORMED column
 
@@ -161,9 +204,9 @@ session reset, `raven peers` adds a `MALFORMED` column. It shows the reason
 for that peer and `-` for every other peer:
 
 ```text
-ROUTER  PEER          ASN    ROUTER ID     STATE  ROUTES  UP SINCE              MALFORMED
-edge1   198.51.100.1  64500  198.51.100.1  up     2       2026-10-18T09:12:44Z  mp_reach_next_hop
-edge1   198.51.100.2  64496  198.51.100.2  up     1       2026-10-18T09:12:44Z  -
+ROUTER  PEER          TYPE    ASN    ROUTER ID     STATE  ROUTES  UP SINCE              MALFORMED
+edge1   198.51.100.1  global  64500  198.51.100.1  up     2       2026-10-18T09:12:44Z  mp_reach_next_hop
+edge1   198.51.100.2  global  64496  198.51.100.2  up     1       2026-10-18T09:12:44Z  -
 ```
 
 A marked peer's routes in RAVEN may be incomplete: RAVEN withdrew what it
@@ -178,8 +221,9 @@ the API's `/api/v1/peers` output carries it as `malformed_input`,
 
 ## raven routes
 
-Query the route table. Without filters, RAVEN returns every Adj-RIB-In
-pre-policy route.
+Query the route table. Without filters, RAVEN returns every route in the
+[default view](../getting-started/concepts.md#which-rib-to-monitor):
+Adj-RIB-In pre-policy and Loc-RIB.
 
 ```bash
 raven routes
@@ -191,6 +235,8 @@ raven routes --posture path-suspect
 raven routes --prefix 203.0.113.0/24 --peer 198.51.100.1
 raven routes --posture path-suspect --format wide
 raven routes --rib adj-rib-out-pre --posture origin-invalid
+raven routes --rib loc-rib
+raven routes --rib pre-policy,post-policy --prefix 203.0.113.0/24
 raven routes --format json
 ```
 
@@ -203,7 +249,7 @@ raven routes --format json
 | `--peer` | Filter by BMP peer address. An IPv4 peer matches in plain or IPv4-mapped form |
 | `--router` | Filter by monitored router: its BMP source address or its BMP sysName |
 | `--posture` | Filter by security posture |
-| `--rib` | The RIB to list: `adj-rib-in-pre` (default), `adj-rib-in-post`, `adj-rib-out-pre` or `adj-rib-out-post` |
+| `--rib` | The RIBs to list, comma-separated: `adj-rib-in-pre` (or `pre-policy`), `adj-rib-in-post` (or `post-policy`), `loc-rib`, `adj-rib-out-pre`, `adj-rib-out-post`. Default: the default view, `adj-rib-in-pre` and `loc-rib` |
 | `--format` | Output format: `table` (default), `wide` or `json` |
 
 Every filter you give applies, so `--prefix 203.0.113.0/24 --peer
@@ -211,19 +257,30 @@ Every filter you give applies, so `--prefix 203.0.113.0/24 --peer
 honored only the first filter present and silently ignored the rest.
 `--router` with a sysName matches every router that reported that name.
 
-`raven routes` lists one RIB at a time, Adj-RIB-In pre-policy unless you
-pass `--rib`, and every other filter applies within it. Adj-RIB-In
-pre-policy is the default because it is what your peers actually sent,
-before your import policy changed or filtered it. Use `--rib
-adj-rib-in-post` to see what survived your import policy, and `--rib
-adj-rib-out-pre` to check what your router advertises, for example
-`origin-invalid` routes your network is sending to its peers. A RIB shows
-routes only if your routers export it over BMP.
+Without `--rib`, `raven routes` lists the default view: Adj-RIB-In
+pre-policy, what your peers actually sent before your import policy
+changed or filtered it, and Loc-RIB, the best paths your routers selected.
+A router that sends only its Loc-RIB still shows its routes, and a router
+that sends both shows a prefix once per RIB; the `RIB` column tells them
+apart. `--rib` names the RIBs to list instead, one or several separated by
+commas, and every other filter applies within them. Use `--rib loc-rib` for
+the routes your routers use, `--rib adj-rib-in-post` to see what survived
+your import policy, and `--rib adj-rib-out-pre` to check what your router
+advertises, for example `origin-invalid` routes your network is sending to
+its peers. A RIB shows routes only if your routers export it over BMP.
+
+v0.4.0 listed Adj-RIB-In pre-policy only without `--rib`, and took one RIB
+per query.
 
 The API takes the same filter as the `rib` query parameter on
-`/api/v1/routes` and `/api/v1/watch`, with the same values. On
-`/api/v1/routes` it defaults to `adj-rib-in-pre`; on `/api/v1/watch`, a
-stream without `rib` includes every RIB. An unknown value returns HTTP 400.
+`/api/v1/routes` and `/api/v1/watch`, with the same values, comma-separated
+or repeated (`rib=loc-rib,adj-rib-in-post` or
+`rib=loc-rib&rib=adj-rib-in-post`). Without it, both return the default
+view. An unknown value returns HTTP 400, for example for `rib=adj-rib-in`:
+
+```text
+invalid rib: unknown RIB "adj-rib-in": want adj-rib-in-pre (or pre-policy), adj-rib-in-post (or post-policy), loc-rib, adj-rib-out-pre or adj-rib-out-post
+```
 
 **Posture values for `--posture`:**
 
@@ -232,36 +289,57 @@ stream without `rib` includes every RIB. An unknown value returns HTTP 400.
 **Example output:**
 
 ```text
-PREFIX                    ROUTER     PEER                ORIGIN   ROV       ASPA     POSTURE
-203.0.113.0/24            edge1      198.51.100.1        AS64502  Valid     Invalid  path-suspect
-198.51.100.0/24           edge1      192.0.2.250         AS64503  NotFound  Valid    path-only
-2001:db8:2000::/36        edge1      198.51.100.1        AS64503  NotFound  Invalid  path-suspect
-203.0.113.0/24            edge1      198.51.100.2        AS64502  Valid     Valid    secured
-2001:db8:3000::/36        192.0.2.2  2001:db8::2 path 2  AS64504  NotFound  Unknown  unverified
+PREFIX                    ROUTER     PEER                             RIB             ORIGIN   ROV       ASPA     POSTURE
+203.0.113.0/24            edge1      198.51.100.1                     adj-rib-in-pre  AS64502  Valid     Invalid  path-suspect
+198.51.100.0/24           edge1      192.0.2.250                      adj-rib-in-pre  AS64503  NotFound  Valid    path-only
+2001:db8:2000::/36        edge1      198.51.100.1                     adj-rib-in-pre  AS64503  NotFound  Invalid  path-suspect
+203.0.113.0/24            edge1      198.51.100.2                     adj-rib-in-pre  AS64502  Valid     Valid    secured
+2001:db8:3000::/36        192.0.2.2  2001:db8::2 rd 65000:100 path 2  adj-rib-in-pre  AS64504  NotFound  Unknown  unverified
 ```
 
-`ROUTER` is the router's sysName, or its address when it sent none. When the
-peer uses ADD-PATH (RFC 7911), `PEER` adds the path ID, as in
-`2001:db8::2 path 2`, because the peer can send several paths for one
-prefix and RAVEN keeps each one.
+`ROUTER` is the router's sysName, or its address when it sent none. `PEER`
+adds the VRF's route distinguisher for a peer in a VRF, and the path ID
+when the peer uses ADD-PATH (RFC 7911), as in
+`2001:db8::2 rd 65000:100 path 2`, because the peer can send several paths
+for one prefix and RAVEN keeps each one. `RIB` is the route's RIB.
+
+A Loc-RIB route has no peer, so `PEER` shows `-` (followed by `rd` and the
+RD for a VRF's Loc-RIB). Here `rr1` (AS64499, at 192.0.2.3) sends its
+pre-policy Adj-RIB-In and its Loc-RIB, which holds two routes of its own:
+
+```text
+PREFIX                    ROUTER  PEER          RIB             ORIGIN   ROV      ASPA     POSTURE
+203.0.113.0/24            rr1     198.51.100.7  adj-rib-in-pre  AS64502  Valid    Unknown  origin-only
+2001:db8:ffff::1/128      rr1     -             loc-rib         AS64499  Invalid  Unknown  origin-invalid
+2001:db8:100::/48         rr1     -             loc-rib         AS64499  Valid    Unknown  origin-only
+203.0.113.0/24            rr1     -             loc-rib         AS64502  Valid    Unknown  origin-only
+```
+
+`2001:db8:100::/48` is a prefix `rr1` originates, and `2001:db8:ffff::1/128`
+a loopback it learned over iBGP. Both have an empty AS_PATH, so their
+origin is `rr1`'s own AS (see
+[The origin AS](../architecture/validation-engine.md#the-origin-as)). The
+loopback is `Invalid` because it is more specific than the maxLength (/48)
+of the ROA for `2001:db8::/32`; see
+[Internal routes show as Invalid](../troubleshooting.md#internal-routes-show-as-invalid).
 
 ### --format wide
 
 `--format wide` adds three columns that explain each route's ASPA result:
 
 ```text
-PREFIX                    ROUTER     PEER                ORIGIN   ROV       ASPA     POSTURE       ASPA PROCEDURE  PROCEDURE SOURCE  FAILING HOP
-203.0.113.0/24            edge1      198.51.100.1        AS64502  Valid     Invalid  path-suspect  upstream        config-asn        64501->64500
-198.51.100.0/24           edge1      192.0.2.250         AS64503  NotFound  Valid    path-only     upstream        config-address    -
-2001:db8:2000::/36        edge1      198.51.100.1        AS64503  NotFound  Invalid  path-suspect  upstream        config-asn        -
-203.0.113.0/24            edge1      198.51.100.2        AS64502  Valid     Valid    secured       downstream      config-address    -
-2001:db8:3000::/36        192.0.2.2  2001:db8::2 path 2  AS64504  NotFound  Unknown  unverified    upstream        default           -
+PREFIX                    ROUTER     PEER                             RIB             ORIGIN   ROV       ASPA     POSTURE       ASPA PROCEDURE  PROCEDURE SOURCE  FAILING HOP
+203.0.113.0/24            edge1      198.51.100.1                     adj-rib-in-pre  AS64502  Valid     Invalid  path-suspect  upstream        config-asn        64501->64500
+198.51.100.0/24           edge1      192.0.2.250                      adj-rib-in-pre  AS64503  NotFound  Valid    path-only     upstream        config-address    -
+2001:db8:2000::/36        edge1      198.51.100.1                     adj-rib-in-pre  AS64503  NotFound  Invalid  path-suspect  upstream        config-asn        -
+203.0.113.0/24            edge1      198.51.100.2                     adj-rib-in-pre  AS64502  Valid     Valid    secured       downstream      config-address    -
+2001:db8:3000::/36        192.0.2.2  2001:db8::2 rd 65000:100 path 2  adj-rib-in-pre  AS64504  NotFound  Unknown  unverified    upstream        default           -
 ```
 
 | Column | Meaning |
 |---|---|
 | `ASPA PROCEDURE` | `upstream` or `downstream`: the verification procedure RAVEN used for this route |
-| `PROCEDURE SOURCE` | Where the procedure came from: `config-address` (an `aspa-peers` entry for the peer address), `config-asn` (an `aspa-peers` entry for the peer ASN) or `default` (`aspa-default-procedure`) |
+| `PROCEDURE SOURCE` | Where the procedure came from: `config-address` (an `aspa-peers` entry for the peer address), `config-asn` (an `aspa-peers` entry for the peer ASN; for a Loc-RIB route, for the neighbor AS in its path) or `default` (`aspa-default-procedure`) |
 | `FAILING HOP` | For an ASPA `Invalid`, the hop that failed, as `customer->provider`: the customer AS's ASPA record does not list that provider. `-` when no hop failed |
 
 In the example, the first route is a leak: AS64501's ASPA record does not
@@ -284,6 +362,7 @@ objects. This is the leaking route from the examples above:
     "prefix": "203.0.113.0/24",
     "router": "192.0.2.1",
     "router_name": "edge1",
+    "peer_type": "global",
     "peer": "198.51.100.1",
     "peer_asn": 64500,
     "rib": "adj-rib-in-pre",
@@ -317,10 +396,38 @@ A route from a VRF peer with ADD-PATH carries `peer_distinguisher` and
   "prefix": "2001:db8:3000::/36",
   "router": "192.0.2.2",
   "peer_distinguisher": "65000:100",
+  "peer_type": "rd",
   "peer": "2001:db8::2",
   "peer_asn": 64505,
   "path_id": 2,
   "rib": "adj-rib-in-pre",
+  ...
+}
+```
+
+A Loc-RIB route has `peer_type` `loc-rib`, the zero peer address, and the
+router's own AS as `peer_asn`. This is `rr1`'s loopback from the example
+above, from `raven routes --rib loc-rib --format json`:
+
+```json
+{
+  "prefix": "2001:db8:ffff::1/128",
+  "router": "192.0.2.3",
+  "router_name": "rr1",
+  "peer_type": "loc-rib",
+  "peer": "0.0.0.0",
+  "peer_asn": 64499,
+  "rib": "loc-rib",
+  "origin_asn": 64499,
+  "as_path": null,
+  ...
+  "rov": "Invalid",
+  "rov_reason": "origin AS64499 not authorized by any covering VRP; origin is the router's own AS: empty AS_PATH (RFC 6811 §2)",
+  "aspa": "Unknown",
+  "aspa_procedure": "upstream",
+  "aspa_procedure_source": "default",
+  "aspa_reason": "not ASPA-verified: empty AS_PATH; the route is locally originated or iBGP-learned without an AS_PATH",
+  "posture": "origin-invalid",
   ...
 }
 ```
@@ -345,11 +452,12 @@ A route from a VRF peer with ADD-PATH carries `peer_distinguisher` and
 | `router` | The monitored router: the source address of its BMP session |
 | `router_name` | The router's BMP Initiation sysName. Omitted when the router sent none |
 | `peer_distinguisher` | The peer's VRF route distinguisher, from the BMP per-peer header. Omitted for peers in the global instance |
-| `peer` | The BGP peer's address |
-| `peer_asn` | The BGP peer's ASN |
+| `peer_type` | The BMP peer type: `global`, `rd`, `local`, or `loc-rib` for a Loc-RIB route (RFC 9069) |
+| `peer` | The BGP peer's address; `0.0.0.0` for a Loc-RIB route |
+| `peer_asn` | The BGP peer's ASN; the router's own AS for a Loc-RIB route |
 | `path_id` | The ADD-PATH path identifier (RFC 7911). Omitted when ADD-PATH is not in effect for that peer and address family |
-| `rib` | The RIB the route is in: `adj-rib-in-pre`, `adj-rib-in-post`, `adj-rib-out-pre` or `adj-rib-out-post`. Every route in one response has the RIB you asked for with `--rib` |
-| `origin_asn` | The origin AS: the last AS of the AS_PATH's final AS_SEQUENCE (RFC 6811 §2). `0` when the route has no origin: an empty AS_PATH, a path ending in an AS_SET (origin NONE), or a path ending in a confederation segment. The table shows `-` |
+| `rib` | The RIB the route is in: `adj-rib-in-pre`, `adj-rib-in-post`, `loc-rib`, `adj-rib-out-pre` or `adj-rib-out-post`, always one of the RIBs you asked for with `--rib` (the default view's without it) |
+| `origin_asn` | The origin AS (RFC 6811 §2): the last AS of the AS_PATH's final AS_SEQUENCE, or the router's own AS for an empty AS_PATH or one ending in a confederation segment (see [The origin AS](../architecture/validation-engine.md#the-origin-as)). `0` when the route has no origin (a path ending in an AS_SET, origin NONE) or RAVEN does not know the router's AS. The table shows `-` |
 | `as_path` | The AS_PATH, neighbor first, origin last |
 | `next_hop` | The BGP next hop |
 | `rov` | `Valid`, `Invalid` or `NotFound` |
@@ -357,7 +465,7 @@ A route from a VRF peer with ADD-PATH carries `peer_distinguisher` and
 | `aspa` | `Valid`, `Invalid`, `Unknown` or `Unverifiable` |
 | `aspa_procedure` | `upstream` or `downstream` |
 | `aspa_procedure_source` | `config-address`, `config-asn` or `default` |
-| `aspa_reason` | Why ASPA reached its result when no hop explains it: the neighbor-AS check failed, the route is an Adj-RIB-Out route, or its AS_PATH has confederation segments. RAVEN does not ASPA-verify the last two. Omitted otherwise |
+| `aspa_reason` | Why ASPA reached its result when no hop explains it: the neighbor-AS check failed; or RAVEN did not verify the route because it is an Adj-RIB-Out route, its AS_PATH has confederation segments or is empty, RAVEN has no ASPA data yet (`no ASPA data (no RTR v2 session)`) or ASPA is disabled (`ASPA disabled`). Omitted otherwise |
 | `aspa_failing_hop` | `{customer_asn, provider_asn}`: the hop that made ASPA `Invalid`. Omitted when no hop failed |
 | `posture` | The combined [security posture](security-postures.md) |
 | `timestamp` | When the monitored router received the route, from the BMP per-peer header, in RFC 3339 UTC. If the router sends a zero timestamp, RAVEN uses the time it received the BMP message instead |
@@ -426,8 +534,19 @@ PREFIX                    PEER          ORIGIN   ROV      POSTURE         REASON
 There is one row per route RAVEN holds for the prefix: one per peer, per
 router and per ADD-PATH path. `REASON` is the ROV reason: the VRP that
 matched, the origin AS that no covering VRP authorizes, or
-`no covering VRPs found`. Like `raven routes`, it lists Adj-RIB-In
-pre-policy routes.
+`no covering VRPs found`, followed for a route whose origin is the
+router's own AS by why it is (see
+[The origin AS](../architecture/validation-engine.md#the-origin-as)).
+Like `raven routes` without `--rib`, it lists the default view, Adj-RIB-In
+pre-policy and Loc-RIB. It has no `RIB` column: a Loc-RIB route shows the
+peer `0.0.0.0`, as the second row here, `rr1`'s Loc-RIB route for the
+prefix:
+
+```text
+PREFIX                    PEER          ORIGIN   ROV    POSTURE      REASON
+203.0.113.0/24            198.51.100.7  AS64502  Valid  origin-only  matches VRP {203.0.113.0/24, AS64502, /24}
+203.0.113.0/24            0.0.0.0       AS64502  Valid  origin-only  matches VRP {203.0.113.0/24, AS64502, /24}
+```
 
 ---
 
@@ -442,6 +561,7 @@ raven watch --posture path-suspect
 raven watch --router edge1 --posture origin-invalid
 raven watch --peer 198.51.100.1
 raven watch --prefix 203.0.113.0/24 --origin-asn 64502
+raven watch --rib loc-rib --posture origin-invalid
 ```
 
 **Flags:**
@@ -453,17 +573,24 @@ raven watch --prefix 203.0.113.0/24 --origin-asn 64502
 | `--peer` | Only stream routes from this BMP peer |
 | `--router` | Only stream routes from this monitored router: its address or BMP sysName |
 | `--posture` | Only stream routes with this posture |
+| `--rib` | Only stream routes of these RIBs, comma-separated, with the same names as [`raven routes --rib`](#raven-routes). Default: the default view, `adj-rib-in-pre` and `loc-rib` |
 
 Every filter you give applies, as with `raven routes`. Earlier releases sent
-only `--posture` to the daemon and ignored the other filters.
+only `--posture` to the daemon and ignored the other filters. Without
+`--rib`, the stream carries the default view; v0.4.0 streamed every RIB,
+Adj-RIB-Out included, when no RIB was given.
 
 **Example output:**
 
 ```text
 watching for route events... (Ctrl+C to stop)
 
-[path-suspect] 203.0.113.0/24 via 198.51.100.1 origin:AS64502 AS_PATH:[64500 64501 64502] rov:Valid ASPA:Invalid hop(64501→64500) posture:path-suspect
+[path-suspect] 203.0.113.0/24 via 198.51.100.1 rib:adj-rib-in-pre origin:AS64502 AS_PATH:[64500 64501 64502] rov:Valid ASPA:Invalid hop(64501→64500) posture:path-suspect
+[origin-invalid] 2001:db8:ffff::1/128 via loc-rib rib:loc-rib origin:AS64499 AS_PATH:[] rov:Invalid ASPA:Unknown posture:origin-invalid
 ```
+
+`rib:` is the route's RIB. A Loc-RIB route shows `via loc-rib`, since it
+has no peer.
 
 An ASPA Invalid shows the hop that failed as `hop(C→P)`: AS C, nearer the
 origin, has an ASPA that does not list P, the next AS toward you.
@@ -642,36 +769,91 @@ coverage, per-peer posture breakdown, top offending ASNs, and actionable
 recommendations.
 
 ```bash
-raven audit --router 10.0.0.1
-raven audit --router 10.0.0.1 --format json
-raven audit --router 10.0.0.1 --format markdown
+raven audit --router 198.51.100.1
+raven audit --router 198.51.100.1 --format json
+raven audit --router 198.51.100.1 --format markdown
+raven audit --router 192.0.2.3 --rib loc-rib
 ```
 
 **Flags:**
 
 | Flag | Description |
 |---|---|
-| `--router` | Peer IP address to audit (required) |
+| `--router` | The address to audit (required): a BGP peer's address, or for `--rib loc-rib`, the monitored router's address, since a Loc-RIB has no peer address |
+| `--rib` | The one RIB to audit: `adj-rib-in-pre` (default, or `pre-policy`), `adj-rib-in-post` (or `post-policy`), `loc-rib`, `adj-rib-out-pre` or `adj-rib-out-post` |
 | `--format` | Output format: `table`, `json`, or `markdown` |
 
-**Example output:**
+`raven audit` reports on one RIB, so a router that sends several RIBs never
+has its routes counted twice; v0.4.0 added every RIB up. The API takes the
+same parameters, `/api/v1/audit?router=192.0.2.3&rib=loc-rib`. An unknown
+RIB is an HTTP 400, which `raven audit` reports:
 
 ```text
-Router: 10.0.0.1
-Total Routes: 5
-ROV Coverage:  80.0%
-ASPA Coverage: 0.0%
-POSTURE          COUNT
-origin-only      3   (60%)
-unverified       1   (20%)
-origin-invalid   1   (20%)
-TOP OFFENDERS
-AS65001   1 route   origin-invalid   10.10.0.0/24
-RECOMMENDATIONS
-
-1 origin-invalid route — run raven what-if --reject-invalid
-ASPA coverage 0% — register ASPA objects at your RIR
+Error: audit: unknown RIB "bogus": want adj-rib-in-pre (or pre-policy), adj-rib-in-post (or post-policy), loc-rib, adj-rib-out-pre or adj-rib-out-post
 ```
+
+**Example output**, for the Loc-RIB of `rr1` in the
+[`raven routes`](#raven-routes) example:
+
+```text
+  ROUTER AUDIT REPORT
+  ─────────────────────────────────────────────────
+  Router ID:     192.0.2.3
+  RIB:           loc-rib
+  Generated At:  2026-10-20 01:55:01 UTC
+  Total Routes:  3
+  ROV Coverage:  100.0%
+  ASPA Coverage: 0.0%
+
+  POSTURE SUMMARY
+  POSTURE          COUNT   %
+  origin-only      2       66.7%
+  origin-invalid   1       33.3%
+
+  PEERS
+  PEER                   ASN       ROUTES   ROV    ASPA
+  loc-rib of 192.0.2.3   AS64499   3        100%   0%
+
+  TOP OFFENDERS
+  ORIGIN ASN   COUNT   WORST POSTURE    EXAMPLE PREFIXES
+  AS64499      1       origin-invalid   2001:db8:ffff::1/128
+
+  RECOMMENDATIONS
+  1. 1 origin-invalid route(s) detected — consider deploying a reject-invalid ROV policy to drop these.
+  2. No ASPA coverage detected — enable an RTR v2 cache to start AS Path Validation.
+```
+
+The `PEERS` table has one row per router, instance and peer address: a
+peer in a VRF adds ` rd ` and its route distinguisher, and a Loc-RIB row
+reads `loc-rib of` and the router's address. The JSON report names the
+RIB in `rib`, and each `peers` entry carries `router` and
+`peer_distinguisher` (always present, `""` for the global instance):
+
+```json
+{
+  "router_id": "192.0.2.3",
+  "rib": "loc-rib",
+  ...
+  "peers": [
+    {
+      "router": "192.0.2.3",
+      "peer_addr": "0.0.0.0",
+      "peer_distinguisher": "",
+      "peer_asn": 64499,
+      "total_routes": 3,
+      ...
+    }
+  ],
+  ...
+}
+```
+
+The top offender here is the router's own AS: the `origin-invalid` route
+is `rr1`'s loopback, which is more specific than its ROA allows. A Loc-RIB
+audit counts your internal routes, so read its `origin-invalid` routes and
+its recommendation to reject invalids with that in mind; see
+[Internal routes show as Invalid](../troubleshooting.md#internal-routes-show-as-invalid).
+
 
 !!! tip
     Run `raven audit` weekly in a cron job with `--format json` to track
@@ -712,6 +894,12 @@ raven check stealthy --prefix 203.0.113.0/24 --format json
 | `STEALTHY HIJACK DETECTED` | First hop AS differs from BMP RIB — traffic diverted |
 | `DIVERGENCE` | First hop not in BMP peer table — unconfirmed divergence |
 | `INCONCLUSIVE` | All probes timed out |
+
+The expected AS is the neighbor the router learned the route from: the
+BMP peer's AS, or for a Loc-RIB route, which has no peer, the first AS of
+its AS_PATH after any leading copy of the router's own AS. A Loc-RIB
+instance is never matched as the BGP neighbor a probe reached.
+`raven check global` reports a Loc-RIB route's neighbor AS the same way.
 
 **Example — clean baseline:**
 

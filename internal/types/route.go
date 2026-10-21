@@ -33,7 +33,8 @@ type Route struct {
 	// if unknown. Not used by ASPA verification: the draft never checks the
 	// neighbor-to-verifier edge. It is the origin AS of a route with an
 	// empty AS_PATH (see OriginAS). Whatever learns the route may set it;
-	// BMP sets it from Peer Up.
+	// BMP sets it from Peer Up, and on a Loc-RIB route from the Loc-RIB
+	// per-peer header's Peer AS (RFC 9069 §4.1).
 	LocalASN uint32
 	// ConfedID is the monitored router's AS confederation identifier
 	// (RFC 5065), the AS its confederation is known by outside it, when
@@ -77,8 +78,13 @@ type Withdrawal struct {
 	PeerAddr          netip.Addr
 	Prefix            netip.Prefix
 	PathID            uint32
-	RIBType           RIBType
-	WithdrawAll       bool // if true, withdraw all of the session's routes from the peer
+	// RIBType is the withdrawn route's RIB. On a WithdrawAll it is the
+	// scope: LocRIB withdraws the peer's Loc-RIB routes (a Loc-RIB
+	// instance's Peer Down), any other value the peer's Adj-RIB-In and
+	// Adj-RIB-Out routes (a BGP peer's Peer Down). Neither removes the
+	// other's routes.
+	RIBType     RIBType
+	WithdrawAll bool // if true, withdraw all of the session's routes from the peer
 	// SessionEnd withdraws every route the session owns, from any peer.
 	// PeerAddr and Prefix are ignored.
 	SessionEnd bool
@@ -146,7 +152,17 @@ const (
 // The AS is 0 when the router's own AS is needed but not known. A route
 // with no ASPathRaw (one built without segments) uses the last AS of ASPath,
 // or the local AS if that is empty too.
+//
+// A Loc-RIB path that holds only the router's own AS counts as empty (see
+// EmptyPath): some routers (FRR 10.2) put their AS first in a Loc-RIB
+// AS_PATH, so a locally originated route arrives as [LocalASN].
 func (r *Route) OriginAS() (uint32, OriginSource) {
+	if r.onlyLocalAS() {
+		if r.ConfedID != 0 {
+			return r.ConfedID, OriginLocalConfedID
+		}
+		return r.LocalASN, OriginLocalAS
+	}
 	if n := len(r.ASPathRaw); n > 0 {
 		last := r.ASPathRaw[n-1]
 		switch {
@@ -169,6 +185,33 @@ func (r *Route) OriginAS() (uint32, OriginSource) {
 		return r.LocalASN, OriginLocalAS
 	}
 	return r.ASPath[len(r.ASPath)-1], OriginFromPath
+}
+
+// EmptyPath reports whether the route's AS_PATH is empty for the origin
+// rule (OriginAS): it has no AS, or it is a Loc-RIB route's and holds only
+// the router's own AS (LocalASN), in AS_SEQUENCE segments, once or
+// prepended.
+func (r *Route) EmptyPath() bool {
+	return (len(r.ASPathRaw) == 0 && len(r.ASPath) == 0) || r.onlyLocalAS()
+}
+
+// onlyLocalAS reports whether the route is a Loc-RIB route whose AS_PATH
+// is not empty and holds only LocalASN, in AS_SEQUENCE segments.
+func (r *Route) onlyLocalAS() bool {
+	if r.RIBType != LocRIB || r.LocalASN == 0 || len(r.ASPath) == 0 {
+		return false
+	}
+	for _, seg := range r.ASPathRaw {
+		if seg.Type != ASSegmentSequence {
+			return false
+		}
+	}
+	for _, asn := range r.ASPath {
+		if asn != r.LocalASN {
+			return false
+		}
+	}
+	return true
 }
 
 // OriginASN returns the route's origin AS (see OriginAS), 0 if it is NONE
@@ -249,6 +292,29 @@ func (w *Withdrawal) Key() RouteKey {
 	return RouteKey{Peer: w.Peer(), Prefix: w.Prefix, PathID: w.PathID, RIBType: w.RIBType}
 }
 
+// BMP peer types (RFC 7854 §4.2, RFC 9069 §4.1), as Route.PeerType holds them.
+const (
+	PeerTypeGlobal uint8 = 0
+	PeerTypeRD     uint8 = 1
+	PeerTypeLocal  uint8 = 2
+	PeerTypeLocRIB uint8 = 3
+)
+
+// PeerTypeName names a BMP peer type: global, rd, local or loc-rib.
+func PeerTypeName(t uint8) string {
+	switch t {
+	case PeerTypeGlobal:
+		return "global"
+	case PeerTypeRD:
+		return "rd"
+	case PeerTypeLocal:
+		return "local"
+	case PeerTypeLocRIB:
+		return "loc-rib"
+	}
+	return fmt.Sprintf("unknown(%d)", t)
+}
+
 // ─── AS_PATH types ───
 
 type ASSegmentType uint8
@@ -322,6 +388,87 @@ var AllRIBTypes = []RIBType{AdjRIBInPre, AdjRIBInPost, LocRIB, AdjRIBOutPre, Adj
 
 // RIBCounts holds a route count per RIB type, indexed by RIBType.
 type RIBCounts [5]uint64
+
+// RIBSet is a set of RIB types.
+type RIBSet uint8
+
+// RIBSetOf returns the set of the given RIB types.
+func RIBSetOf(ribs ...RIBType) RIBSet {
+	var s RIBSet
+	for _, r := range ribs {
+		s |= 1 << r
+	}
+	return s
+}
+
+// Has reports whether rib is in the set.
+func (s RIBSet) Has(rib RIBType) bool { return rib < 8 && s&(1<<rib) != 0 }
+
+// RIBs lists the set's RIB types, in RIBType order.
+func (s RIBSet) RIBs() []RIBType {
+	var out []RIBType
+	for _, r := range AllRIBTypes {
+		if s.Has(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Names lists the set's RIB names, in RIBType order.
+func (s RIBSet) Names() []string {
+	var out []string
+	for _, r := range s.RIBs() {
+		out = append(out, r.String())
+	}
+	return out
+}
+
+// DefaultView is the RIBs route queries return when none is named: what the
+// routers received before import policy (Adj-RIB-In pre-policy) and what
+// they selected (Loc-RIB). A router that sends only its Loc-RIB still shows
+// its routes. Post-policy stays out: a router that sends it sends the same
+// routes pre-policy too, and each would be listed twice. Adj-RIB-Out routes
+// are sent, not received.
+var DefaultView = RIBSetOf(AdjRIBInPre, LocRIB)
+
+// ribAliases are other names ParseRIBType accepts: the pre-policy and
+// post-policy names of the BMP Adj-RIB-In.
+var ribAliases = map[string]RIBType{
+	"pre-policy":  AdjRIBInPre,
+	"post-policy": AdjRIBInPost,
+}
+
+// ParseRIBType returns the RIB type a name gives: a RIBType.String name, or
+// an alias, pre-policy (adj-rib-in-pre) or post-policy (adj-rib-in-post).
+func ParseRIBType(name string) (RIBType, error) {
+	for _, r := range AllRIBTypes {
+		if r.String() == name {
+			return r, nil
+		}
+	}
+	if r, ok := ribAliases[name]; ok {
+		return r, nil
+	}
+	return 0, fmt.Errorf("unknown RIB %q: want adj-rib-in-pre (or pre-policy), adj-rib-in-post (or post-policy), loc-rib, adj-rib-out-pre or adj-rib-out-post", name)
+}
+
+// ParseRIBSet returns the set of the RIBs named, each as ParseRIBType takes
+// it. No names is an error.
+func ParseRIBSet(names []string) (RIBSet, error) {
+	if len(names) == 0 {
+		return 0, fmt.Errorf("no RIB given")
+	}
+	var s RIBSet
+	for _, n := range names {
+		r, err := ParseRIBType(n)
+		if err != nil {
+			return 0, err
+		}
+		s |= RIBSetOf(r)
+	}
+	return s, nil
+}
 
 // IsAdjRIBOut reports whether routes of this RIB are outbound: sent to the
 // peer, not received from it.
@@ -510,8 +657,11 @@ func ComputePosture(rov ROVState, aspa ASPAState) SecurityPosture {
 }
 
 // FormatRD renders a Peer Distinguisher as a route distinguisher (RFC 4364
-// §4.2): type 0 "ASN:n", type 1 "IPv4:n", type 2 "ASN4:n"; any other value
-// in hex. Zero (a global-instance peer) renders as "".
+// §4.2): type 0 "ASN:n", type 1 "IPv4:n", type 2 "ASN4L:n"; any other value
+// in hex. Zero (a global-instance peer) renders as "". The L after a type 2
+// AS number keeps it apart from the type 0 RD with the same numbers:
+// 65000L:1 and 65000:1 are two instances, and the text is used as a key
+// (metric labels, event cooldown, audit rows).
 func FormatRD(rd uint64) string {
 	if rd == 0 {
 		return ""
@@ -523,7 +673,7 @@ func FormatRD(rd uint64) string {
 		ip := netip.AddrFrom4([4]byte{byte(rd >> 40), byte(rd >> 32), byte(rd >> 24), byte(rd >> 16)})
 		return fmt.Sprintf("%s:%d", ip, rd&0xffff)
 	case 2:
-		return fmt.Sprintf("%d:%d", (rd>>16)&0xffffffff, rd&0xffff)
+		return fmt.Sprintf("%dL:%d", (rd>>16)&0xffffffff, rd&0xffff)
 	}
 	return fmt.Sprintf("0x%016x", rd)
 }

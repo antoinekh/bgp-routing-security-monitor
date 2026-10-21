@@ -162,8 +162,9 @@ bash lab/demo-master.sh leak
 
 1. Check that the events block is present in `raven.yaml` — restart RAVEN if you
    edited the file after it started.
-2. The rule has a 30 s cooldown per prefix. If you run hijack twice quickly, the
-   second fire is suppressed. Wait 30 s between runs or restart RAVEN to reset cooldown state.
+2. The rule has a 30 s cooldown per route (router, peer, Peer Distinguisher,
+   prefix, path ID and RIB). If you run hijack twice quickly, the second fire is
+   suppressed. Wait 30 s between runs or restart RAVEN to reset cooldown state.
 3. Confirm the listener is running: `curl -X POST http://localhost:9999 -d '{}'`
 
 **GoBGP container not reachable**
@@ -175,18 +176,21 @@ Flowspec rules are logged but never sent, so the demo is unaffected even if the
 
 **audit returns zero routes**
 
-`raven audit` filters by router ID (`RouterID` field on each route, populated by the
-BMP peer's router-id advertisement). Make sure you are using the correct IP:
+`raven audit --router` matches the routes' BMP peer address (the PEER column of
+`raven peers`), not a router ID, and audits one RIB, `adj-rib-in-pre` unless
+`--rib` names another. `demo-master.sh` audits the peer `10.0.0.1`:
 
 ```bash
-raven peers   # check the router_id column
-raven audit --router <router_id_from_peers>
+raven peers   # check the PEER column
+raven audit --router <peer_address>
 ```
 
-The edge router's router-id in this lab is `172.20.20.3`.
+A Loc-RIB has no peer address: `raven audit --rib loc-rib --router <address>`
+matches the monitored router's BMP session address instead.
 
 **Cooldown confusion**
 
-Both rules have `cooldown: 30s`. This means a rule fires at most once per prefix
-per 30 s window. If you clean and re-inject a scenario within 30 s, the second
-injection will not trigger the webhook. Either wait 30 s or restart RAVEN.
+Both rules have `cooldown: 30s`. This means a rule fires at most once per route
+(router, peer, Peer Distinguisher, prefix, path ID and RIB) per 30 s window. If
+you clean and re-inject a scenario within 30 s, the second injection will not
+trigger the webhook. Either wait 30 s or restart RAVEN.

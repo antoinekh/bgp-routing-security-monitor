@@ -419,11 +419,14 @@ func (l *Listener) handleSession(ctx context.Context, sess, old *bmpSession) {
 		l.sessMu.Unlock()
 
 		// Clean up this session's peers. A newer session from the same
-		// router may have replaced some entries already; leave those.
+		// router may have replaced some entries already; leave those. Their
+		// raven_bmp_peer_state goes to 0: it stayed at 1 once the session
+		// was gone, for every peer without a Peer Down before the end.
 		l.peerMu.Lock()
 		for key, p := range l.peers {
 			if key.RouterAddr == sess.router && p.session == sess.id {
 				delete(l.peers, key)
+				setPeerState(p.SysName, key, 0)
 			}
 		}
 		for inst := range l.confedIDs {
@@ -534,6 +537,10 @@ func (l *Listener) processMessage(
 		if sysName == "" {
 			sysName = routerAddr.String()
 		}
+		localASN := pu.LocalASN
+		if pu.PerPeer.IsLocRIB() {
+			localASN = pu.PerPeer.PeerASN // its OPENs are fabricated (RFC 9069 §5.1)
+		}
 		l.peerMu.Lock()
 		l.peers[key] = &Peer{
 			Router:        routerAddr,
@@ -541,8 +548,9 @@ func (l *Listener) processMessage(
 			PeerType:      pu.PerPeer.PeerType,
 			Addr:          pu.PerPeer.PeerAddr,
 			ASN:           pu.PerPeer.PeerASN,
-			LocalASN:      pu.LocalASN,
+			LocalASN:      localASN,
 			RouterID:      pu.PerPeer.PeerBGPID,
+			TableName:     pu.TableName,
 			SysName:       sysName,
 			State:         "up",
 			UpSince:       time.Now(),
@@ -552,15 +560,19 @@ func (l *Listener) processMessage(
 		}
 		l.peersGen++
 		l.peerMu.Unlock()
-		metrics.BMPPeerState.WithLabelValues(sysName, routerAddr.String(), pu.PerPeer.PeerAddr.String(),
-			types.FormatRD(key.Distinguisher)).Set(1)
+		setPeerState(sysName, key, 1)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_up").Inc()
+		if pu.PerPeer.IsLocRIB() {
+			logLocRIBRegistered(log, key, pu.PerPeer, true, pu.TableName)
+		}
 		log.Info("BMP peer up",
 			"peer", pu.PerPeer.PeerAddr,
+			"peer_type", types.PeerTypeName(pu.PerPeer.PeerType),
 			"asn", pu.PerPeer.PeerASN,
-			"local_asn", pu.LocalASN,
+			"local_asn", localASN,
 			"router_id", pu.PerPeer.PeerBGPID,
 			"peer_distinguisher", key.Distinguisher,
+			"table_name", pu.TableName,
 			"add_path_in", pu.AddPath.In, "add_path_out", pu.AddPath.Out,
 		)
 
@@ -584,16 +596,18 @@ func (l *Listener) processMessage(
 		}
 		l.peersGen++
 		l.peerMu.Unlock()
-		metrics.BMPPeerState.WithLabelValues(sysName, routerAddr.String(), pd.PerPeer.PeerAddr.String(),
-			types.FormatRD(key.Distinguisher)).Set(0)
+		setPeerState(sysName, key, 0)
 		metrics.BMPMessagesTotal.WithLabelValues(sysName, "peer_down").Inc()
-		log.Info("BMP peer down", "peer", pd.PerPeer.PeerAddr, "reason", pd.Reason)
+		log.Info("BMP peer down", "peer", pd.PerPeer.PeerAddr,
+			"peer_type", types.PeerTypeName(pd.PerPeer.PeerType), "reason", pd.Reason)
 		// Implicitly withdraw everything the peer advertised, as a real BGP
-		// session going down would.
+		// session going down would. A Loc-RIB instance's Peer Down clears
+		// its Loc-RIB only, a BGP peer's its Adj-RIBs only.
 		l.emitFrom(ctx, sess, types.IngestEvent{Withdrawal: &types.Withdrawal{
 			Router:            routerAddr,
 			PeerDistinguisher: key.Distinguisher,
 			PeerAddr:          pd.PerPeer.PeerAddr,
+			RIBType:           ribTypeOf(pd.PerPeer),
 			WithdrawAll:       true,
 		}})
 
@@ -627,6 +641,9 @@ func (l *Listener) processMessage(
 				p.MalformedAt = time.Now()
 			}
 			l.peerMu.Unlock()
+		}
+		if rm.PerPeer.IsLocRIB() && len(routes)+len(withdrawals) > 0 {
+			l.registerLocRIB(log, sess, sysName, key, rm.PerPeer)
 		}
 		// A per-peer header timestamp of 0 means the router gave none (RFC
 		// 7854 §4.2); stamp RAVEN's receive time instead.
@@ -676,6 +693,60 @@ func (l *Listener) processMessage(
 // bmpNoTimestamp is a per-peer header timestamp of zero: none given.
 var bmpNoTimestamp = time.Unix(0, 0)
 
+// registerLocRIB records a Loc-RIB instance that sends routes or withdrawals
+// with no Peer Up from this session before them, as FRR 10.2 does, or after
+// its Peer Down: without it the instance was missing from the peers and its
+// raven_bmp_peer_state. An End-of-RIB alone does not register it. Its routes
+// are owned by the session either way, so they are withdrawn when the
+// session ends.
+func (l *Listener) registerLocRIB(log *slog.Logger, sess *bmpSession, sysName string, key PeerKey, pph BMPPerPeerHeader) {
+	l.peerMu.Lock()
+	if p, ok := l.peers[key]; ok && p.State == "up" && p.session == sess.id {
+		l.peerMu.Unlock()
+		return
+	}
+	now := time.Now()
+	tableName := locRIBTableName(pph)
+	l.peers[key] = &Peer{
+		Router:        key.RouterAddr,
+		Distinguisher: key.Distinguisher,
+		PeerType:      pph.PeerType,
+		Addr:          pph.PeerAddr,
+		ASN:           pph.PeerASN,
+		LocalASN:      pph.PeerASN,
+		RouterID:      pph.PeerBGPID,
+		TableName:     tableName,
+		SysName:       sysName,
+		State:         "up",
+		UpSince:       now,
+		LastMsg:       now,
+		session:       sess.id,
+	}
+	l.peerMu.Unlock()
+	setPeerState(sysName, key, 1)
+	logLocRIBRegistered(log, key, pph, false, tableName)
+}
+
+// logLocRIBRegistered logs, at INFO, a Loc-RIB instance becoming a peer:
+// from its Peer Up, or from routes sent without one.
+func logLocRIBRegistered(log *slog.Logger, key PeerKey, pph BMPPerPeerHeader, peerUp bool, tableName string) {
+	log.Info("BMP Loc-RIB registered",
+		"peer_up", peerUp,
+		"asn", pph.PeerASN,
+		"router_id", pph.PeerBGPID,
+		"peer_distinguisher", types.FormatRD(key.Distinguisher),
+		"table_name", tableName,
+		"filtered", pph.IsLocRIBFiltered(),
+	)
+}
+
+// setPeerState sets raven_bmp_peer_state for a peer of a router whose
+// sysName label is sysName.
+func setPeerState(sysName string, key PeerKey, state float64) {
+	metrics.BMPPeerState.WithLabelValues(sysName, key.RouterAddr.String(), key.PeerAddr.String(),
+		types.FormatRD(key.Distinguisher)).Set(state)
+}
+
 // peerKey is the peer a per-peer header describes on router.
 func peerKey(router netip.Addr, pph BMPPerPeerHeader) PeerKey {
 	return PeerKey{RouterAddr: router, Distinguisher: pph.Distinguisher(), PeerAddr: pph.PeerAddr}
@@ -696,16 +767,23 @@ func (l *Listener) parseRoutes(rm BMPRouteMonitoring, routerAddr netip.Addr) ([]
 		localASN, addPath = p.LocalASN, p.addPath
 	}
 	l.peerMu.RUnlock()
+	// A Loc-RIB header's Peer AS is the router's own AS (RFC 9069 §4.1),
+	// with or without a Peer Up: its OPENs are fabricated, and some
+	// routers send no Peer Up at all.
+	if rm.PerPeer.IsLocRIB() {
+		localASN = rm.PerPeer.PeerASN
+	}
 
 	routes, withdrawals, bad := decodeRouteMonitoring(rm, routerAddr, localASN, addPath.For(rm.PerPeer.IsAdjRIBOut()))
 	// The routes of one UPDATE share its AS_PATH. The confederation
-	// identifier is the origin of an empty one or one with confederation
-	// segments (types.Route.OriginAS).
+	// identifier is the origin of an empty one (a Loc-RIB path of only the
+	// router's AS counts as empty) or one with confederation segments
+	// (types.Route.OriginAS).
 	if len(routes) == 0 {
 		return routes, withdrawals, bad
 	}
 	confed := routes[0].HasConfedSegment()
-	if !confed && (len(routes[0].ASPathRaw) > 0 || len(routes[0].ASPath) > 0) {
+	if !confed && !routes[0].EmptyPath() {
 		return routes, withdrawals, bad
 	}
 	if id := l.confedID(key, localASN, confed); id != 0 {
@@ -889,7 +967,7 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localA
 	// treat-as-withdraw only from an internal peer (RFC 7606 §7.5, §7.9,
 	// §7.10). Unknown local AS counts as external.
 	internal := localASN != 0 && localASN == pph.PeerASN
-	attrs := parsePathAttributes(data[offset:pathAttrEnd], pph.Flags&PeerFlagAS2 != 0, internal, &m)
+	attrs := parsePathAttributes(data[offset:pathAttrEnd], pph.IsAS2(), internal, &m)
 
 	// The NLRI field is located by the Total Path Attribute Length even when
 	// an attribute inside overran (RFC 7606 §4).
@@ -966,10 +1044,13 @@ func parseBGPUpdate(data []byte, pph BMPPerPeerHeader, router netip.Addr, localA
 	return routes, withdrawals, m
 }
 
-// ribTypeOf is the RIB a Route Monitoring message reports (RFC 7854 L flag,
-// RFC 8671 O flag): Adj-RIB-In or Adj-RIB-Out, pre- or post-policy.
+// ribTypeOf is the RIB a Route Monitoring message reports: the Loc-RIB for
+// a Loc-RIB instance (RFC 9069), otherwise by the L flag (RFC 7854) and the
+// O flag (RFC 8671) Adj-RIB-In or Adj-RIB-Out, pre- or post-policy.
 func ribTypeOf(pph BMPPerPeerHeader) types.RIBType {
 	switch {
+	case pph.IsLocRIB():
+		return types.LocRIB
 	case pph.IsAdjRIBOut() && pph.IsPostPolicy():
 		return types.AdjRIBOutPost
 	case pph.IsAdjRIBOut():

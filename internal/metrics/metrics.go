@@ -100,11 +100,15 @@ var (
 		Help: "Unix timestamp of the most recent RTR anomaly detected.",
 	}, []string{"cache"})
 
-	// Route counts by security posture and AFI. Labels: posture, afi.
+	// Route counts by security posture, AFI and RIB: the routes the routers
+	// receive (rib adj-rib-in-pre, adj-rib-in-post) and select (loc-rib),
+	// each RIB apart, so that a route reported in two RIBs is never added
+	// up by accident: filter on rib. Adj-RIB-Out routes have their own
+	// gauge. Labels: posture, afi, rib (RouteRIBs).
 	RoutesTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_routes_total",
-		Help: "Number of routes by security posture and address family.",
-	}, []string{"posture", "afi"})
+		Help: "Number of routes by security posture, address family and RIB (adj-rib-in-pre, adj-rib-in-post, loc-rib).",
+	}, []string{"posture", "afi", "rib"})
 
 	// ASPA verifications run, on ingest and on revalidation. Labels:
 	// procedure (upstream, downstream), source (default, config-address,
@@ -147,11 +151,13 @@ var (
 		Help: "Number of Adj-RIB-Out pre-policy routes by security posture and address family.",
 	}, []string{"posture", "afi"})
 
-	// Total pre-policy routes in the route table.
-	RouteTableSize = promauto.NewGauge(prometheus.GaugeOpts{
+	// Routes in the route table by RIB, the RIBs raven_routes_total counts,
+	// each apart: sum over the RIBs of the default view (adj-rib-in-pre and
+	// loc-rib) for what route queries return. Label: rib (RouteRIBs).
+	RouteTableSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "raven_route_table_size",
-		Help: "Total number of pre-policy routes in the route table.",
-	})
+		Help: "Number of routes in the route table by RIB (adj-rib-in-pre, adj-rib-in-post, loc-rib).",
+	}, []string{"rib"})
 
 	// External global-visibility correlations. Labels: source (e.g.
 	// "ripestat"), result (match, divergent, local_only, inconclusive).
@@ -200,6 +206,16 @@ var (
 // Label values with a known, fixed set. Their series are created at 0 when
 // the package loads, so a scrape shows 0 rather than nothing before the first
 // increment and an alert can tell "none yet" from "not exported".
+var (
+	// RouteRIBs are the rib label values of raven_routes_total and
+	// raven_route_table_size.
+	RouteRIBs = []string{"adj-rib-in-pre", "adj-rib-in-post", "loc-rib"}
+	// Postures and AFIs are the posture and afi label values of
+	// raven_routes_total and raven_adj_rib_out_routes_total.
+	Postures = []string{"secured", "origin-only", "path-suspect", "path-only", "unverified", "origin-invalid"}
+	AFIs     = []string{"ipv4", "ipv6"}
+)
+
 const (
 	RejectReasonNotAllowed    = "not_allowed"
 	RejectReasonBadRemoteAddr = "bad_remote_addr"
@@ -269,6 +285,17 @@ func init() {
 		RevalidationDuration.WithLabelValues(mode)
 		for _, result := range []string{RevalidationResultChecked, RevalidationResultChanged} {
 			RevalidationRoutesTotal.WithLabelValues(mode, result)
+		}
+	}
+	for _, rib := range RouteRIBs {
+		RouteTableSize.WithLabelValues(rib)
+	}
+	for _, posture := range Postures {
+		for _, afi := range AFIs {
+			AdjRIBOutRoutesTotal.WithLabelValues(posture, afi)
+			for _, rib := range RouteRIBs {
+				RoutesTotal.WithLabelValues(posture, afi, rib)
+			}
 		}
 	}
 }

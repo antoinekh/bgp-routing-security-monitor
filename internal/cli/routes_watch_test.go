@@ -39,13 +39,13 @@ func TestWatchSendsAllFilters(t *testing.T) {
 	}))
 	defer srv.Close()
 	runCLI(t, srv, "watch", "--prefix", "1.1.1.0/24", "--origin-asn", "13335",
-		"--peer", "80.81.194.180", "--posture", "secured", "--router", "br1.nyc")
+		"--peer", "80.81.194.180", "--posture", "secured", "--router", "br1.nyc", "--rib", "loc-rib")
 	want := url.Values{"prefix": {"1.1.1.0/24"}, "origin-asn": {"13335"}, "peer": {"80.81.194.180"},
-		"posture": {"secured"}, "router": {"br1.nyc"}}
+		"posture": {"secured"}, "router": {"br1.nyc"}, "rib": {"loc-rib"}}
 	if got.Encode() != want.Encode() {
 		t.Errorf("watch query = %q, want %q", got.Encode(), want.Encode())
 	}
-	runCLI(t, srv, "watch", "--prefix", "", "--origin-asn", "0", "--peer", "", "--posture", "", "--router", "")
+	runCLI(t, srv, "watch", "--prefix", "", "--origin-asn", "0", "--peer", "", "--posture", "", "--router", "", "--rib", "")
 }
 
 // raven watch shows each route's ASPA state and, for an ASPA Invalid, the
@@ -138,7 +138,9 @@ func TestStatusAndPeersShowRouter(t *testing.T) {
 	}
 }
 
-// raven routes sends --rib, adj-rib-in-pre unless given.
+// raven routes and raven watch send --rib when given. Without it they send
+// none, and the daemon lists its default view (adj-rib-in-pre and loc-rib):
+// a router that sends only its Loc-RIB must not show an empty table.
 func TestRoutesRIBFlag(t *testing.T) {
 	var got url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,14 +149,18 @@ func TestRoutesRIBFlag(t *testing.T) {
 	}))
 	defer srv.Close()
 	runCLI(t, srv, "routes")
-	if got.Get("rib") != "adj-rib-in-pre" {
-		t.Errorf("default rib = %q, want adj-rib-in-pre", got.Get("rib"))
+	if _, ok := got["rib"]; ok {
+		t.Errorf("default rib = %q, want none sent", got.Get("rib"))
 	}
 	runCLI(t, srv, "routes", "--rib", "adj-rib-out-post")
 	if got.Get("rib") != "adj-rib-out-post" {
 		t.Errorf("rib = %q, want adj-rib-out-post", got.Get("rib"))
 	}
-	runCLI(t, srv, "routes", "--rib", "adj-rib-in-pre")
+	runCLI(t, srv, "routes", "--rib", "pre-policy,loc-rib")
+	if got.Get("rib") != "pre-policy,loc-rib" {
+		t.Errorf("rib = %q, want pre-policy,loc-rib", got.Get("rib"))
+	}
+	runCLI(t, srv, "routes", "--rib", "") // flags outlive a run
 }
 
 // raven peers shows a MALFORMED column, with the reason, only when a peer

@@ -51,7 +51,15 @@ exit
 ```
 
 Post-policy tables are significantly smaller than pre-policy since import
-policies filter out many routes before installation.
+policies filter out many routes before installation. RAVEN stores them, but
+route queries and status totals without `--rib` show the default view,
+pre-policy and Loc-RIB; use `raven routes --rib adj-rib-in-post` to list
+them.
+
+A router's Loc-RIB (RFC 9069) is smaller still: one best path per prefix,
+however many peers sent it, instead of one table per peer. RAVEN shows it
+in the default view, and it also covers the router's own and iBGP-learned
+routes. See [Loc-RIB Monitoring](../user-guide/loc-rib.md).
 
 ## Multiple Routers, Single RAVEN Instance
 

@@ -82,16 +82,34 @@ stabilises before expecting complete results.
 
 **If routes never appear:**
 
-Check whether the router is configured to send Adj-RIB-In Pre-Policy.
-Some router configurations only send Loc-RIB or post-policy by default.
-For FRR, configure pre-policy explicitly:
+Check which RIBs the router sends. `raven routes` without `--rib` lists
+Adj-RIB-In pre-policy and Loc-RIB only, so a router that sends only
+post-policy shows nothing there:
+
+```bash
+raven status            # By RIB lists every RIB with routes
+raven routes --rib adj-rib-in-post
+```
+
+To see pre-policy routes, configure the router to send them. FRR:
 
 ```text
-bmp targets raven
-monitor ipv4 unicast pre-policy
-monitor ipv6 unicast pre-policy
-exit
+router bgp 64496
+ bmp targets raven
+  bmp monitor ipv4 unicast pre-policy
+  bmp monitor ipv6 unicast pre-policy
+ exit
 ```
+
+For a Loc-RIB, see [Loc-RIB Monitoring](user-guide/loc-rib.md). A Loc-RIB
+instance appears in `raven peers` (type `loc-rib`) once it sends a Peer
+Up or its first routes; FRR 10.2 sends no Peer Up for it, so the instance
+is missing until the first route arrives. Look for the INFO log line
+`BMP Loc-RIB registered`.
+
+FRR in pre-policy mode needs `soft-reconfiguration inbound` on each
+neighbor: without it, FRR sends a new BMP session only End-of-RIB markers
+for those peers, not their routes.
 
 ---
 
@@ -230,11 +248,25 @@ Wait until `vrpsTotal` stabilises before proceeding.
 curl -s http://localhost:9595/metrics | grep raven_rtr_aspa_count
 ```
 
+Check `aspa_reason` first:
+
+```bash
+raven routes --format json | jq -r '.[].aspa_reason' | sort | uniq -c
+```
+
+`ASPA disabled` means `validation.aspa` is `false` in `raven.yaml`. `no ASPA
+data (no RTR v2 session)` means no RTR cache has synced at protocol version
+2, the first with ASPA, so RAVEN does not verify ASPA at all (see
+[ASPA without ASPA data](architecture/validation-engine.md#aspa-without-aspa-data)).
+RAVEN logs `ASPA verification on: an RTR cache synced at protocol version
+2` when that changes. Postures are then never `path-only` or `secured`.
+
 **Cause:** One of:
 
 1. Routinator is not started with `--enable-aspa`
 2. RAVEN negotiated RTR v1 instead of v2
 3. Routinator version does not support ASPA
+4. `validation.aspa` is `false`
 
 **Check 1 — Routinator ASPA support:**
 
@@ -327,6 +359,59 @@ Common causes:
 - ROA authorizes the wrong ASN (misconfiguration at the RIR)
 - ROA maxLength is too restrictive — the route is a more-specific
 - Legitimate route from a secondary origin ASN with no ROA
+- The route is one of your own internal routes (below)
+
+---
+
+### Internal Routes Show as Invalid
+
+**Symptom:** After you start exporting a Loc-RIB, or after an upgrade to
+v0.4.0 or later, some of your own routes are `origin-invalid`: loopbacks,
+point-to-point link subnets and other infrastructure prefixes, with your
+own AS as `origin_asn`.
+
+**What it means:** this is correct, and harmless as long as those routes
+are not announced outside your network. RAVEN now validates locally
+originated and iBGP-learned routes. Their AS_PATH is empty, so their
+origin is your router's own AS (RFC 6811 §2; see
+[The origin AS](architecture/validation-engine.md#the-origin-as)), and ROV
+compares them with your ROAs like any other route. A loopback such as a
+/32 or /128, or a /30 or /31 link, is usually far more specific than the
+covering ROA's maxLength, so no VRP matches it and it is `Invalid`. Earlier
+releases gave these routes no origin and reported them `NotFound`, and
+pre-policy Adj-RIB-In from eBGP peers never contains them.
+
+**Check:** the `rov_reason` names your own AS and says the origin is the
+router's own:
+
+```bash
+raven routes --rib loc-rib --posture origin-invalid --format json | \
+  jq '.[] | {prefix, origin_asn, rov_reason}'
+```
+
+```json
+{
+  "prefix": "2001:db8:ffff::1/128",
+  "origin_asn": 64499,
+  "rov_reason": "origin AS64499 not authorized by any covering VRP; origin is the router's own AS: empty AS_PATH (RFC 6811 §2)"
+}
+```
+
+**What to do:**
+
+- Make sure those prefixes are not exported to your eBGP neighbors. An
+  Invalid internal route that does leak out would be dropped by every
+  network that rejects ROV-Invalid routes, so it is worth fixing.
+- Leave ROAs alone for prefixes you never announce: raising a ROA's
+  maxLength to cover loopbacks also makes it easier to hijack your prefixes
+  with more-specifics (RFC 9319).
+- Keep these routes out of alerts and dashboards. Scope event rules with a
+  [`rib` trigger](user-guide/active-response.md#rib-trigger) or a `prefix`
+  trigger, and count `origin-invalid` on `rib="adj-rib-in-pre"` in PromQL
+  when you want received routes only.
+
+`raven audit --rib loc-rib` lists your own AS among the top offenders for
+the same reason.
 
 ---
 

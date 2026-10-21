@@ -213,8 +213,13 @@ func (s *Simulator) SimulateASPAEnforce(ctx context.Context, opts *Options) (*AS
 	return res, nil
 }
 
+// fetchRoutes lists the Adj-RIB-In pre-policy routes the simulations run
+// on: what an import policy would drop is a question about the routes
+// received, before policy. Not the default view: a Loc-RIB route is one
+// the router already selected, and a route reported in both RIBs would be
+// counted twice.
 func (s *Simulator) fetchRoutes(ctx context.Context, opts *Options) ([]types.Route, error) {
-	filter := routetable.Filter{}
+	filter := routetable.Filter{RIBs: types.RIBSetOf(types.AdjRIBInPre)}
 	if opts.FilterPeer != "" {
 		filter.PeerAddr = opts.FilterPeer
 	}

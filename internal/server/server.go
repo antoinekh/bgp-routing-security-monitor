@@ -34,7 +34,6 @@ import (
 	"github.com/nokia/bgp-routing-security-monitor/internal/validation"
 	"github.com/nokia/bgp-routing-security-monitor/internal/validation/aspa"
 	"github.com/nokia/bgp-routing-security-monitor/internal/whatif"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -76,6 +75,7 @@ type Server struct {
 	rtrMu       sync.RWMutex
 	rtrStates   map[string]int64 // cache address → 1 connected, 0 disconnected
 	rtrLastSync map[string]int64 // cache address → unix seconds of last sync
+	rtrASPA     map[string]bool  // cache address → its last sync was at RTR version 2 (has ASPA)
 
 	// Owned by ingestLoop.
 	removals []*pendingRemoval
@@ -143,6 +143,7 @@ type pendingRemoval struct {
 	rm      *routetable.Removal
 	session uint64
 	peer    types.PeerRef // zero for a session end
+	locRIB  bool          // a Loc-RIB instance's withdraw-all
 	stale   bool          // stale eviction rather than a withdraw-all
 	removed int
 	started time.Time
@@ -159,6 +160,13 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 	}
 	aspaSel := aspa.NewSelector(cfg.Validation.ASPADefaultProcedure, cfg.Validation.ASPAPeers)
 	engine := validation.NewEngine(vrpStore, aspaStore, aspaSel, table, log)
+	// No ASPA verification until an RTR cache syncs at version 2 (see
+	// noteASPASource), or at all if it is disabled.
+	if cfg.Validation.ASPA {
+		engine.SetASPAUnavailable(validation.ASPAReasonNoData)
+	} else {
+		engine.SetASPAUnavailable(validation.ASPAReasonDisabled)
+	}
 
 	allowed, err := config.ParseAllowedRouters(cfg.BMP.AllowedRouters)
 	if err != nil {
@@ -186,6 +194,7 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 		rtrReady:     make(chan struct{}),
 		rtrStates:    make(map[string]int64),
 		rtrLastSync:  make(map[string]int64),
+		rtrASPA:      make(map[string]bool),
 		retired:      make(map[uint64]int),
 		revalidateCh: make(chan struct{}, 1),
 		evictCh:      make(chan struct{}, 1),
@@ -555,7 +564,40 @@ func (s *Server) wireRTRClient(client *rtr.Client, addr string) {
 		s.rtrLastSync[addr] = time.Now().Unix()
 		s.rtrStates[addr] = 1
 		s.rtrMu.Unlock()
+		s.noteASPASource(addr, client.ProtocolVersion() >= 2)
 	})
+}
+
+// noteASPASource records whether cache addr's last sync was at RTR version 2,
+// with ASPA data. ASPA is verified while any cache's was; otherwise every
+// route's ASPA is Unknown (validation.ASPAReasonNoData). A change either way
+// revalidates the whole table: a first version 2 sync turns ASPA on for
+// routes validated without it, a cache falling back to version 1 (whose
+// session clears the ASPA data) turns it off. With validation.aspa false
+// nothing changes.
+func (s *Server) noteASPASource(addr string, v2 bool) {
+	if !s.cfg.Validation.ASPA {
+		return
+	}
+	s.rtrMu.Lock()
+	s.rtrASPA[addr] = v2
+	reason := validation.ASPAReasonNoData
+	for _, ok := range s.rtrASPA {
+		if ok {
+			reason = ""
+			break
+		}
+	}
+	s.rtrMu.Unlock()
+	if !s.engine.SetASPAUnavailable(reason) {
+		return
+	}
+	if reason == "" {
+		s.log.Info("ASPA verification on: an RTR cache synced at protocol version 2", "cache", addr)
+	} else {
+		s.log.Warn("ASPA verification off: no RTR cache has synced at protocol version 2", "cache", addr)
+	}
+	s.RequestRevalidation()
 }
 
 // RequestRevalidation asks ingestLoop to revalidate every route against the
@@ -728,7 +770,7 @@ func (s *Server) stepRemovals() {
 		case p.peer.Addr.IsValid():
 			s.log.Info("withdrew all routes from BMP peer", "peer", p.peer.Addr.String(),
 				"router", p.peer.Router.String(), "peer_distinguisher", p.peer.Distinguisher,
-				"session", p.session, "routes", p.removed, "took", time.Since(p.started))
+				"loc_rib", p.locRIB, "session", p.session, "routes", p.removed, "took", time.Since(p.started))
 		default:
 			s.log.Info("withdrew all routes of ended BMP session",
 				"session", p.session, "routes", p.removed, "took", time.Since(p.started))
@@ -810,7 +852,8 @@ func (s *Server) ingestWithdrawal(w types.Withdrawal, session uint64) {
 		s.queueRemoval(&pendingRemoval{rm: s.table.DetachSession(session), session: session})
 		return
 	case w.WithdrawAll:
-		s.queueRemoval(&pendingRemoval{rm: s.table.DetachPeer(w.Peer(), session), session: session, peer: w.Peer()})
+		s.queueRemoval(&pendingRemoval{rm: s.table.DetachPeer(w.Peer(), session, w.RIBType), session: session,
+			peer: w.Peer(), locRIB: w.RIBType == types.LocRIB})
 		return
 	}
 	// Capture route before removal so the event carries prefix/posture context.
@@ -840,49 +883,60 @@ func (s *Server) queueRemoval(p *pendingRemoval) {
 	s.removalsPending.Store(int64(len(s.removals)))
 }
 
-// updateRouteMetrics refreshes Prometheus gauges for route counts.
-func (s *Server) updateRouteMetrics() {
-	routes := s.table.AllPrePolicy()
-	metrics.RouteTableSize.Set(float64(len(routes)))
-	setPostureGauge(metrics.RoutesTotal, routes)
-	setPostureGauge(metrics.AdjRIBOutRoutesTotal, s.table.AllOfRIB(types.AdjRIBOutPre))
+// metricRIBs are the RIBs raven_routes_total counts, each with its own rib
+// label (metrics.RouteRIBs): the inbound RIBs and the Loc-RIB.
+var metricRIBs = []types.RIBType{types.AdjRIBInPre, types.AdjRIBInPost, types.LocRIB}
+
+// routeCountKey is a route count's RIB, posture and address family.
+type routeCountKey struct {
+	rib     types.RIBType
+	posture string
+	afi     string
 }
 
-// setPostureGauge sets a {posture, afi} gauge to the routes' counts.
-func setPostureGauge(g *prometheus.GaugeVec, routes []*types.Route) {
-
-	// Explicitly zero all known posture/AFI combinations before repopulating.
-	// Using Reset() removes the series entirely, which causes Grafana
-	// lastNotNull panels to show stale values. Set(0) keeps the series at 0.
-	for _, posture := range []string{
-		"secured", "origin-only", "path-suspect", "path-only",
-		"unverified", "origin-invalid",
-	} {
-		for _, afi := range []string{"ipv4", "ipv6"} {
-			g.WithLabelValues(posture, afi).Set(0)
+// routeCounts counts the table's routes by RIB, posture and address family,
+// in one pass that copies no route. A route without a posture counts as
+// unverified.
+func (s *Server) routeCounts() map[routeCountKey]int64 {
+	counts := make(map[routeCountKey]int64)
+	sc := s.table.NewScan()
+	for batch := sc.Next(4096); len(batch) > 0; batch = sc.Next(4096) {
+		for _, r := range batch {
+			posture := string(r.SecurityPosture)
+			if posture == "" {
+				posture = string(types.PostureUnverified)
+			}
+			afi := "ipv4"
+			if r.Prefix.Addr().Is6() {
+				afi = "ipv6"
+			}
+			counts[routeCountKey{r.RIBType, posture, afi}]++
 		}
 	}
+	return counts
+}
 
-	// Count by posture and AFI
-	counts := make(map[string]map[string]int)
-	for _, r := range routes {
-		posture := string(r.SecurityPosture)
-		if posture == "" {
-			posture = "unverified"
+// updateRouteMetrics refreshes Prometheus gauges for route counts.
+//
+// Every known label set is set, to 0 when it has no route: Reset() would
+// remove the series, and Grafana lastNotNull panels would keep showing
+// their last value.
+func (s *Server) updateRouteMetrics() {
+	counts := s.routeCounts()
+	var size types.RIBCounts
+	for _, posture := range metrics.Postures {
+		for _, afi := range metrics.AFIs {
+			for _, rib := range metricRIBs {
+				n := counts[routeCountKey{rib, posture, afi}]
+				metrics.RoutesTotal.WithLabelValues(posture, afi, rib.String()).Set(float64(n))
+				size[rib] += uint64(n)
+			}
+			metrics.AdjRIBOutRoutesTotal.WithLabelValues(posture, afi).Set(
+				float64(counts[routeCountKey{types.AdjRIBOutPre, posture, afi}]))
 		}
-		afi := "ipv4"
-		if r.Prefix.Addr().Is6() {
-			afi = "ipv6"
-		}
-		if counts[posture] == nil {
-			counts[posture] = make(map[string]int)
-		}
-		counts[posture][afi]++
 	}
-	for posture, afis := range counts {
-		for afi, n := range afis {
-			g.WithLabelValues(posture, afi).Set(float64(n))
-		}
+	for _, rib := range metricRIBs {
+		metrics.RouteTableSize.WithLabelValues(rib.String()).Set(float64(size[rib]))
 	}
 }
 

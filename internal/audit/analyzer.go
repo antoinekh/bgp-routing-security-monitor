@@ -20,20 +20,33 @@ var postureOrder = map[string]int{
 	"secured":        5,
 }
 
-// Analyze computes a RouterAuditReport for the given peer address from the supplied
-// route slice (typically routetable.Table.AllPrePolicy()).
-// An empty peerAddr matches all routes. It is a pure function: no I/O,
-// no side-effects, safe to call from tests.
-func Analyze(peerAddr string, routes []*types.Route) *RouterAuditReport {
+// Analyze computes a RouterAuditReport for the given address from the routes
+// of one RIB in the supplied route slice; a report that added up RIBs
+// counted a route once per RIB in its totals, coverage and offenders.
+//
+// A route matches the address by its peer address. A Loc-RIB route has the
+// zero peer address (RFC 9069), so it matches by its monitored router's
+// address instead. Both are compared with IPv4-mapped forms unmapped, as
+// the API filter does. An empty address matches all routes. It is a pure
+// function: no I/O, no side-effects, safe to call from tests.
+func Analyze(addr string, rib types.RIBType, routes []*types.Route) *RouterAuditReport {
 	var local []*types.Route
 	for _, r := range routes {
-		if peerAddr == "" || r.PeerAddr.String() == peerAddr {
+		if r.RIBType != rib {
+			continue
+		}
+		match := r.PeerAddr.Unmap().String()
+		if rib == types.LocRIB {
+			match = r.Router.Unmap().String()
+		}
+		if addr == "" || match == addr {
 			local = append(local, r)
 		}
 	}
 
 	report := &RouterAuditReport{
-		RouterID:       peerAddr,
+		RouterID:       addr,
+		RIB:            rib.String(),
 		GeneratedAt:    time.Now(),
 		TotalRoutes:    len(local),
 		PostureSummary: make(map[string]int),
@@ -51,7 +64,9 @@ func Analyze(peerAddr string, routes []*types.Route) *RouterAuditReport {
 		aspaCov  int
 		postures map[string]int
 	}
-	peers := make(map[string]*peerAccum)
+	// One row per peer on one router, in one instance: the same address on
+	// two routers or in two VRFs is two peers.
+	peers := make(map[types.PeerRef]*peerAccum)
 
 	type offenderAccum struct {
 		count    int
@@ -77,7 +92,7 @@ func Analyze(peerAddr string, routes []*types.Route) *RouterAuditReport {
 			aspaCovered++
 		}
 
-		peerKey := r.PeerAddr.String()
+		peerKey := r.Peer()
 		if peers[peerKey] == nil {
 			peers[peerKey] = &peerAccum{
 				peerASN:  r.PeerASN,
@@ -122,10 +137,12 @@ func Analyze(peerAddr string, routes []*types.Route) *RouterAuditReport {
 
 	for peerKey, pa := range peers {
 		pr := PeerAuditReport{
-			PeerAddr:       peerKey,
-			PeerASN:        pa.peerASN,
-			TotalRoutes:    pa.total,
-			PostureSummary: pa.postures,
+			Router:            peerKey.Router.String(),
+			PeerAddr:          peerKey.Addr.String(),
+			PeerDistinguisher: types.FormatRD(peerKey.Distinguisher),
+			PeerASN:           pa.peerASN,
+			TotalRoutes:       pa.total,
+			PostureSummary:    pa.postures,
 		}
 		if pa.total > 0 {
 			pr.ROVCoverage = float64(pa.rovCov) / float64(pa.total)
@@ -134,7 +151,17 @@ func Analyze(peerAddr string, routes []*types.Route) *RouterAuditReport {
 		report.Peers = append(report.Peers, pr)
 	}
 	sort.Slice(report.Peers, func(i, j int) bool {
-		return report.Peers[i].TotalRoutes > report.Peers[j].TotalRoutes
+		a, b := report.Peers[i], report.Peers[j]
+		if a.TotalRoutes != b.TotalRoutes {
+			return a.TotalRoutes > b.TotalRoutes
+		}
+		if a.Router != b.Router {
+			return a.Router < b.Router
+		}
+		if a.PeerAddr != b.PeerAddr {
+			return a.PeerAddr < b.PeerAddr
+		}
+		return a.PeerDistinguisher < b.PeerDistinguisher
 	})
 
 	type kv struct {

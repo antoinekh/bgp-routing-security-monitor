@@ -35,8 +35,25 @@ events:
 route transitions to one of the listed postures. The trigger also fires for
 new routes arriving with a matching posture.
 
-**Cooldown**: minimum time between firings for the same prefix+peer
-combination. Prevents alert storms during route flapping. Default: 60s.
+**Cooldown**: minimum time between firings of the rule for the same route:
+the same router, peer distinguisher, peer, prefix, ADD-PATH path ID and
+RIB. Prevents alert storms during route flapping. A Go duration such as
+`60s`; without one, the rule has no cooldown. Earlier
+releases kept the cooldown per prefix and peer address, so an event in one
+RIB, on one router or in one VRF suppressed the same prefix's event
+elsewhere.
+
+**One firing per RIB**: the Event Engine evaluates routes in every RIB
+except Adj-RIB-Out. A router that exports both its pre-policy Adj-RIB-In
+and its Loc-RIB reports a hijacked route in both, so a rule fires once for
+each RIB, and each firing carries its `rib`. Add a [`rib`
+trigger](#rib-trigger) to keep a rule to the RIBs you want alerts from.
+A Flowspec action is injected once per prefix and action even when the rule
+fires for several RIBs, because the Flowspec registry dedupes on that key;
+the injected rule, and the approval webhook if one is configured, carry the
+peer of whichever event came first, which for a Loc-RIB event is `0.0.0.0`.
+To limit a rule to one RIB, add a `rib` trigger, but note that a router that
+exports only its Loc-RIB then never matches `adj-rib-in-pre`.
 
 **Actions**: what happens when the rule fires. Multiple actions can be
 listed; they execute in order. If one action fails, subsequent actions
@@ -52,6 +69,7 @@ still run.
 | `asn` | `asns` | Route involves one of the listed ASNs |
 | `protected_asn` | `asns` | Origin-invalid route hijacks a prefix authorised for one of the listed ASNs |
 | `cache_unhealthy` | - | RTR cache becomes unreachable |
+| `rib` | `ribs` | Route is in one of the listed RIBs |
 | `compound` | - | AND/OR composition of any of the above trigger types |
 
 `posture` evaluates current state on every event; it fires even if the posture has not changed. `posture_change` fires only on transitions: when `old_posture != new_posture` and the new posture matches. Use `posture_change` for alerting (avoids re-firing on every update for a route that is already in a bad state); use `posture` inside compound triggers when you need to combine a steady-state check with another condition.
@@ -65,6 +83,35 @@ covering VRP names one of the listed ASNs as the authorised originator. This
 detects prefix hijacks targeting prefixes you own: the hijacking route does not
 contain your ASN in its path, but the RPKI record says only your ASN is allowed
 to originate it.
+
+<a id="rib-trigger"></a>
+**`rib` trigger** - fires when the event's route is in one of the RIBs in
+`ribs`: `adj-rib-in-pre` (or `pre-policy`), `adj-rib-in-post` (or
+`post-policy`), `loc-rib`, `adj-rib-out-pre`, `adj-rib-out-post`. On its own
+it matches every event of those RIBs, so use it inside a `compound` trigger
+to keep another trigger to some RIBs. An empty `ribs` or an unknown RIB name
+is a configuration error, and RAVEN does not start.
+
+```yaml
+- name: "alert-origin-invalid-loc-rib"
+  trigger:
+    type: compound
+    operator: and
+    triggers:
+      - type: posture
+        postures: ["origin-invalid"]
+      - type: rib
+        ribs: ["loc-rib"]
+  cooldown: 60s
+  actions:
+    - type: log
+      level: warn
+```
+
+This fires for `origin-invalid` routes your routers selected, once per
+route, however many other RIBs report the same route. Expect it to fire on
+some of your own routes too; see
+[Internal routes show as Invalid](../troubleshooting.md#internal-routes-show-as-invalid).
 
 ### Compound Triggers
 
@@ -276,25 +323,59 @@ The webhook action sends an HTTP POST to your endpoint when a rule fires.
 ```json
 {
   "id": "b65b80a6-1234-5678-abcd-ef0123456789",
-  "timestamp": "2026-05-06T14:23:01Z",
+  "timestamp": "2026-10-18T14:23:01Z",
   "type": "posture_change",
   "rule_name": "alert-my-prefix-hijacked",
-  "prefix": "192.0.2.0/24",
-  "peer_addr": "10.0.0.1",
-  "peer_asn": 65000,
+  "router_id": "192.0.2.1",
+  "prefix": "203.0.113.0/24",
+  "peer_addr": "198.51.100.1",
+  "peer_distinguisher": "",
+  "rib": "adj-rib-in-pre",
+  "peer_asn": 64500,
   "origin_asn": 64496,
   "protected_asns": [64511],
   "old_posture": "",
   "new_posture": "origin-invalid",
   "rov_state": "Invalid",
   "aspa_state": "Unknown",
-  "router_id": "10.0.0.1"
+  "cache_name": ""
 }
 ```
 
-`rule_name` identifies which rule fired the webhook. `protected_asns` lists the
+`rule_name` identifies which rule fired the webhook. `router_id` is the
+monitored router (its BMP source address). `protected_asns` lists the
 ASNs named as authorised originators in VRPs that cover the affected prefix — only
 present when covering VRPs exist.
+
+`rib` is the route's RIB and `peer_distinguisher` the peer's VRF route
+distinguisher, `""` for a peer in the global instance. Both are always
+present. Because a rule fires once per RIB, use `rib` to tell the firings
+for one route apart. For a Loc-RIB route, `peer_addr` is `0.0.0.0` and
+`peer_asn` the router's own AS:
+
+```json
+{
+  "id": "b65b80a6-1234-5678-abcd-ef0123456789",
+  "timestamp": "2026-10-18T14:23:01Z",
+  "type": "posture_change",
+  "rule_name": "alert-origin-invalid-loc-rib",
+  "router_id": "192.0.2.3",
+  "prefix": "203.0.113.0/24",
+  "peer_addr": "0.0.0.0",
+  "peer_distinguisher": "",
+  "rib": "loc-rib",
+  "peer_asn": 64499,
+  "origin_asn": 64511,
+  "old_posture": "origin-only",
+  "new_posture": "origin-invalid",
+  "rov_state": "Invalid",
+  "aspa_state": "Unknown",
+  "cache_name": ""
+}
+```
+
+The `log` action logs the route's `peer`, `peer_distinguisher` and `rib`
+with each firing, for the same reason.
 
 ### HMAC Signing
 

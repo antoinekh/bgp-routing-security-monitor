@@ -155,6 +155,9 @@ func ParsePeerUp(data []byte) (BMPPeerUp, error) {
 	}
 
 	pu := BMPPeerUp{PerPeer: pph}
+	if pph.IsLocRIB() {
+		pu.TableName = locRIBTableName(pph)
+	}
 
 	// Local address: 16 bytes
 	if pph.IsIPv6() {
@@ -195,7 +198,49 @@ func ParsePeerUp(data []byte) (BMPPeerUp, error) {
 		return pu, nil
 	}
 	pu.AddPath = negotiateAddPath(sent.addPath, recv.addPath)
+	if end := 20 + sent.length + recv.length; end < len(body) {
+		if name := peerUpTableName(body[end:]); name != "" {
+			pu.TableName = name
+		}
+	}
 	return pu, nil
+}
+
+// peerUpInfoTableName is the Peer Up information TLV type of a Loc-RIB
+// instance's VRF/Table Name (RFC 9069 §5.1).
+const peerUpInfoTableName = 3
+
+// locRIBDefaultTableName is the RFC 9069 §5.2.1 name of the default Loc-RIB
+// instance, the one with a zero-filled peer distinguisher.
+const locRIBDefaultTableName = "global"
+
+// locRIBTableName is the name of the Loc-RIB instance a per-peer header
+// describes, as far as it is known without a Peer Up: "global" for the
+// default instance, the one with a zero-filled peer distinguisher (RFC 9069
+// §5.2.1), and "" for a VRF instance, whose name only its Peer Up carries.
+func locRIBTableName(pph BMPPerPeerHeader) string {
+	if pph.Distinguisher() == 0 {
+		return locRIBDefaultTableName
+	}
+	return ""
+}
+
+// peerUpTableName returns the VRF/Table Name in a Peer Up's information
+// TLVs, or "" if there is none. A TLV running past the message ends the
+// search: the rest of the Peer Up has been used already.
+func peerUpTableName(tlvs []byte) string {
+	for len(tlvs) >= 4 {
+		typ := binary.BigEndian.Uint16(tlvs[0:2])
+		n := int(binary.BigEndian.Uint16(tlvs[2:4]))
+		if 4+n > len(tlvs) {
+			return ""
+		}
+		if typ == peerUpInfoTableName {
+			return string(tlvs[4 : 4+n])
+		}
+		tlvs = tlvs[4+n:]
+	}
+	return ""
 }
 
 // negotiateAddPath works out, from the ADD-PATH capabilities in the OPEN the

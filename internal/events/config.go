@@ -155,6 +155,16 @@ func buildTrigger(tc config.TriggerConfig) (Trigger, error) {
 	case "cache_unhealthy":
 		return &CacheUnhealthyTrigger{}, nil
 
+	case "rib":
+		if len(tc.RIBs) == 0 {
+			return nil, fmt.Errorf("rib trigger requires at least one rib")
+		}
+		ribs, err := types.ParseRIBSet(tc.RIBs)
+		if err != nil {
+			return nil, fmt.Errorf("rib trigger: %w", err)
+		}
+		return &RIBTrigger{RIBs: ribs}, nil
+
 	case "compound":
 		if len(tc.Triggers) == 0 {
 			return nil, fmt.Errorf("compound trigger requires at least one sub-trigger")

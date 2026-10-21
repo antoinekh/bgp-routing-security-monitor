@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nokia/bgp-routing-security-monitor/internal/config"
@@ -102,10 +103,13 @@ type Client struct {
 	fullSyncPending bool  // true between Reset Query send and EndOfData receive
 	configVersion   uint8 // configured starting version; reset to this on each session
 	protoVersion    uint8 // RTR protocol version (0, 1, or 2)
-	onUpdate        func(*store.Delta)
-	onSync          func()
-	readyOnce       sync.Once
-	ready           chan struct{}
+	// sessionVersion is protoVersion as of the last session established,
+	// for ProtocolVersion; 0 before the first.
+	sessionVersion atomic.Uint32
+	onUpdate       func(*store.Delta)
+	onSync         func()
+	readyOnce      sync.Once
+	ready          chan struct{}
 
 	// negotiatedVersion is the version the next session opens at. It
 	// starts at configVersion and is lowered only when the cache rejects a
@@ -246,6 +250,11 @@ func (c *Client) recorder() *store.DeltaRecorder {
 func (c *Client) SetOnUpdate(fn func(*store.Delta)) {
 	c.onUpdate = fn
 }
+
+// ProtocolVersion returns the RTR protocol version of the cache's current (or
+// last) session: 2 means its data includes ASPA. 0 before any session. Safe
+// from any goroutine; from the OnSync callback it is the synced session's.
+func (c *Client) ProtocolVersion() uint8 { return uint8(c.sessionVersion.Load()) }
 
 // SetOnSync sets a callback invoked after every completed sync (End of
 // Data), whether or not the data changed. For a sync that changed the data
@@ -749,6 +758,7 @@ func (c *Client) sessionEstablished(version uint8) {
 		c.protoVersion = version
 		c.negotiatedVersion = version
 	}
+	c.sessionVersion.Store(uint32(c.protoVersion))
 	c.log.Info("RTR session established", "transport", c.transport, "protocol_version", c.protoVersion)
 	metrics.RTRProtocolVersion.WithLabelValues(c.address).Set(float64(c.protoVersion))
 	if c.protoVersion < 2 {

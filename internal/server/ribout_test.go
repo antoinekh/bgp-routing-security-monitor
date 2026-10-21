@@ -62,7 +62,7 @@ func TestAdjRIBOutKeptApart(t *testing.T) {
 	}
 
 	s.updateRouteMetrics()
-	if got := gaugeValue(t, "raven_routes_total", map[string]string{"posture": "origin-only", "afi": "ipv4"}); got != 1 {
+	if got := gaugeValue(t, "raven_routes_total", map[string]string{"posture": "origin-only", "afi": "ipv4", "rib": "adj-rib-in-pre"}); got != 1 {
 		t.Errorf("raven_routes_total{origin-only,ipv4} = %v, want 1 (inbound only)", got)
 	}
 	if got := gaugeValue(t, "raven_adj_rib_out_routes_total", map[string]string{"posture": "origin-only", "afi": "ipv4"}); got != 1 {

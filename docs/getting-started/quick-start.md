@@ -84,14 +84,19 @@ Point your router's BMP configuration at RAVEN's BMP listener.
 **FRR example:**
 
 ```text
-router bgp 65000
-bmp targets raven
-address 192.0.2.10 port 11019
-monitor ipv4 unicast pre-policy
-monitor ipv6 unicast pre-policy
-exit
+router bgp 64496
+ bmp targets raven
+  bmp monitor ipv4 unicast pre-policy
+  bmp monitor ipv6 unicast pre-policy
+  bmp connect 192.0.2.10 port 11019 min-retry 1000 max-retry 5000
+ exit
 exit
 ```
+
+To validate the routes the router selected rather than every route it
+received, monitor its Loc-RIB instead of, or as well as, pre-policy
+(`bmp monitor ipv4 unicast loc-rib`); see
+[Loc-RIB Monitoring](../user-guide/loc-rib.md).
 
 **SR Linux example:**
 
@@ -124,20 +129,22 @@ raven status
 ```text
 RAVEN dev  uptime 4m12s
 
-Route Table: 1160117 routes received (Adj-RIB-In pre-policy)
+Route Table: 1160117 routes in the default view (adj-rib-in-pre + loc-rib)
+  secured              10214
+  path-only            742
   origin-only          601877
   unverified           540112
-  secured              10214
-  origin-invalid       6872
-  path-only            742
   path-suspect         300
+  origin-invalid       6872
+By RIB:
+  adj-rib-in-pre       1160117
 
 RPKI: 786344 VRPs (serial 4821)
 
 BMP Peers: 2
-  ROUTER  PEER          ASN    STATE  ROUTES
-  edge1   198.51.100.1  64496  up     948213
-  edge1   2001:db8::1   64496  up     211904
+  ROUTER  PEER          TYPE    ASN    STATE  ROUTES
+  edge1   198.51.100.1  global  64496  up     948213
+  edge1   2001:db8::1   global  64496  up     211904
 ```
 
 Each row under **BMP Peers** is one BGP session on your router, which BMP

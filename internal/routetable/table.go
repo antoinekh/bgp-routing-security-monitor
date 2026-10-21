@@ -14,8 +14,9 @@ import (
 
 const defaultShards = 256
 
-// Table is RAVEN's internal route table — an annotated Adj-RIB-In.
-// It stores every route from every peer with validation annotations.
+// Table is RAVEN's internal route table: every route of every monitored
+// router, in each RIB it is reported in (Adj-RIB-In, Loc-RIB, Adj-RIB-Out),
+// with validation annotations.
 //
 // Architecture: hybrid BART prefix index + sharded flat map (see ARCHITECTURE.md §2.3).
 type Table struct {
@@ -40,8 +41,9 @@ type Table struct {
 	asnMu  sync.RWMutex
 	asnIdx map[uint32]keySet
 
-	// Secondary index: security posture -> route keys, of Adj-RIB-In
-	// pre-policy routes only (see Insert)
+	// Secondary index: security posture -> route keys, of the default
+	// view's routes only (types.DefaultView: Adj-RIB-In pre-policy and
+	// Loc-RIB; see Insert)
 	postureMu  sync.RWMutex
 	postureIdx map[types.SecurityPosture]keySet
 }
@@ -78,12 +80,23 @@ type shard struct {
 	perPeer map[types.PeerRef]*types.RIBCounts
 }
 
-// ownerKey is an owner index entry: a BMP session and one peer it reports.
-// The peer includes the router, so unowned routes (session 0) of the same
-// peer address on two routers are two entries.
+// ownerKey is an owner index entry: a BMP session and one peer it reports,
+// with the peer's Loc-RIB routes apart from its other RIBs. The peer
+// includes the router, so unowned routes (session 0) of the same peer
+// address on two routers are two entries.
 type ownerKey struct {
 	session uint64
 	peer    types.PeerRef
+	// locRIB is set for Loc-RIB routes. A Loc-RIB instance's Peer Down
+	// removes only these, a BGP peer's only the others, so neither can
+	// take the other's routes even if they share a peer address.
+	locRIB bool
+}
+
+// ownerKeyOf is the owner index entry of a route of peer in RIB rib, owned
+// by session.
+func ownerKeyOf(session uint64, peer types.PeerRef, rib types.RIBType) ownerKey {
+	return ownerKey{session: session, peer: peer, locRIB: rib == types.LocRIB}
 }
 
 // routeSet is keyed by pointer rather than RouteKey: 8 bytes per route
@@ -93,7 +106,7 @@ type routeSet map[*types.Route]struct{}
 
 // own indexes r under its owner. The caller holds s.mu.
 func (s *shard) own(r *types.Route) {
-	k := ownerKey{session: r.OwnerSession, peer: r.Peer()}
+	k := ownerKeyOf(r.OwnerSession, r.Peer(), r.RIBType)
 	set := s.owned[k]
 	if set == nil {
 		set = make(routeSet)
@@ -105,7 +118,7 @@ func (s *shard) own(r *types.Route) {
 // disown drops r from the owner index. It is a no-op for a route a Removal
 // has already detached. The caller holds s.mu.
 func (s *shard) disown(r *types.Route) {
-	k := ownerKey{session: r.OwnerSession, peer: r.Peer()}
+	k := ownerKeyOf(r.OwnerSession, r.Peer(), r.RIBType)
 	if set, ok := s.owned[k]; ok {
 		delete(set, r)
 		if len(set) == 0 {
@@ -121,12 +134,20 @@ type Filter struct {
 	OriginASN uint32
 	Posture   string
 	AFI       string // "ipv4" | "ipv6" | ""
+	// RIBs are the RIBs listed; zero is the default view
+	// (types.DefaultView). Without one, a route a router reports in
+	// several RIBs was listed, and counted, once per RIB.
+	RIBs types.RIBSet
 }
 
 // ListRoutes returns routes matching the given filter.
 // Used by the what-if simulator and ASPA recommender.
 func (t *Table) ListRoutes(ctx context.Context, f Filter) ([]types.Route, error) {
 	var ptrs []*types.Route
+	ribs := f.RIBs
+	if ribs == 0 {
+		ribs = types.DefaultView
+	}
 
 	switch {
 	case f.PeerAddr != "":
@@ -134,19 +155,25 @@ func (t *Table) ListRoutes(ctx context.Context, f Filter) ([]types.Route, error)
 		if err != nil {
 			return nil, fmt.Errorf("invalid peer addr: %w", err)
 		}
-		ptrs = t.GetByPeer(addr)
+		ptrs = t.GetByPeerIn(addr, ribs)
 	case f.Prefix != "":
 		p, err := netip.ParsePrefix(f.Prefix)
 		if err != nil {
 			return nil, fmt.Errorf("invalid prefix: %w", err)
 		}
-		ptrs = t.GetByPrefix(p)
+		ptrs = t.GetByPrefixIn(p, ribs)
 	case f.OriginASN != 0:
-		ptrs = t.GetByOriginASN(f.OriginASN)
+		ptrs = t.GetByOriginASNIn(f.OriginASN, ribs)
+	case f.Posture != "" && PostureIndexed(ribs):
+		ptrs = t.GetByPostureIn(types.SecurityPosture(f.Posture), ribs)
 	case f.Posture != "":
-		ptrs = t.GetByPosture(types.SecurityPosture(f.Posture))
+		for _, r := range t.AllIn(ribs) {
+			if r.SecurityPosture == types.SecurityPosture(f.Posture) {
+				ptrs = append(ptrs, r)
+			}
+		}
 	default:
-		ptrs = t.All()
+		ptrs = t.AllIn(ribs)
 	}
 
 	// Apply AFI filter
@@ -228,10 +255,10 @@ func (t *Table) Insert(route *types.Route) {
 	}
 	t.asnMu.Unlock()
 
-	// Update posture index: Adj-RIB-In pre-policy routes only, the view
-	// posture counts and raven_routes_total report. It used to take every
-	// RIB, so a router sending pre- and post-policy was counted twice.
-	if key.RIBType == types.AdjRIBInPre {
+	// Update posture index: the default view's routes only, the view the
+	// status posture counts report. It used to take every RIB, so a router
+	// sending pre- and post-policy was counted twice.
+	if types.DefaultView.Has(key.RIBType) {
 		t.postureMu.Lock()
 		t.unindexPostureExcept(key, route.SecurityPosture)
 		if route.SecurityPosture != "" {
@@ -356,8 +383,8 @@ func (t *Table) withdrawOne(key types.RouteKey, pred func(*types.Route) bool) bo
 
 // WithdrawAllFromPeer removes, at once, what a peer-down from BMP session
 // session removes; see DetachPeer.
-func (t *Table) WithdrawAllFromPeer(peer types.PeerRef, session uint64) int {
-	return t.DetachPeer(peer, session).Apply()
+func (t *Table) WithdrawAllFromPeer(peer types.PeerRef, session uint64, scope types.RIBType) int {
+	return t.DetachPeer(peer, session, scope).Apply()
 }
 
 // WithdrawSession removes, at once, what the end of BMP session session
@@ -377,11 +404,16 @@ func (t *Table) WithdrawSession(session uint64) int {
 // The peer includes its router, so the unowned routes it takes are that
 // router's alone: a peer-down on one router never removes another router's
 // routes from the same peer address.
-func (t *Table) DetachPeer(peer types.PeerRef, session uint64) *Removal {
+//
+// scope is the withdrawal's RIBType (see types.Withdrawal): LocRIB takes
+// the peer's Loc-RIB routes only, a Loc-RIB instance going down; any other
+// RIB type takes its Adj-RIB-In and Adj-RIB-Out routes only, a BGP peer
+// going down.
+func (t *Table) DetachPeer(peer types.PeerRef, session uint64, scope types.RIBType) *Removal {
 	peer = types.NewPeerRef(peer.Router, peer.Distinguisher, peer.Addr)
-	keys := []ownerKey{{session: session, peer: peer}}
+	keys := []ownerKey{ownerKeyOf(session, peer, scope)}
 	if session != 0 {
-		keys = append(keys, ownerKey{peer: peer})
+		keys = append(keys, ownerKeyOf(0, peer, scope))
 	}
 	rm := &Removal{t: t}
 	for i := range t.shards {
@@ -535,7 +567,7 @@ func (t *Table) Replace(old, updated *types.Route) bool {
 	if s.routes[key] != old {
 		return false
 	}
-	set := s.owned[ownerKey{session: old.OwnerSession, peer: key.Peer}]
+	set := s.owned[ownerKeyOf(old.OwnerSession, key.Peer, key.RIBType)]
 	if _, indexed := set[old]; !indexed {
 		return false
 	}
@@ -547,7 +579,7 @@ func (t *Table) Replace(old, updated *types.Route) bool {
 	// unindex it in between and leave updated's posture listed. Lock order
 	// shard → postureMu; no reader holds an index lock while taking a
 	// shard lock.
-	if updated.SecurityPosture != old.SecurityPosture && key.RIBType == types.AdjRIBInPre {
+	if updated.SecurityPosture != old.SecurityPosture && types.DefaultView.Has(key.RIBType) {
 		t.postureMu.Lock()
 		t.unindexPostureExcept(key, updated.SecurityPosture)
 		if updated.SecurityPosture != "" {
@@ -656,53 +688,70 @@ func (t *Table) Get(key types.RouteKey) *types.Route {
 	return s.routes[key]
 }
 
-// GetByPrefix returns the Adj-RIB-In pre-policy routes to exactly prefix.
+// GetByPrefix returns the default view's routes (types.DefaultView) to
+// exactly prefix.
 func (t *Table) GetByPrefix(prefix netip.Prefix) []*types.Route {
-	return t.GetByPrefixIn(prefix, types.AdjRIBInPre)
+	return t.GetByPrefixIn(prefix, types.DefaultView)
 }
 
-// GetByPrefixIn returns the routes of one RIB to exactly prefix.
-func (t *Table) GetByPrefixIn(prefix netip.Prefix, rib types.RIBType) []*types.Route {
+// GetByPrefixIn returns the routes of the RIBs ribs to exactly prefix.
+func (t *Table) GetByPrefixIn(prefix netip.Prefix, ribs types.RIBSet) []*types.Route {
 	t.prefixMu.RLock()
 	idx, _ := t.prefixIdx.Get(prefix)
 	keys := slices.Clone(idx) // the list is changed in place; see prefixMu
 	t.prefixMu.RUnlock()
-	return t.resolveKeys(keys, rib)
+	return t.resolveKeys(keys, ribs)
 }
 
-// GetByOriginASN returns the Adj-RIB-In pre-policy routes originated by asn.
+// GetByOriginASN returns the default view's routes originated by asn.
 func (t *Table) GetByOriginASN(asn uint32) []*types.Route {
-	return t.GetByOriginASNIn(asn, types.AdjRIBInPre)
+	return t.GetByOriginASNIn(asn, types.DefaultView)
 }
 
-// GetByOriginASNIn returns the routes of one RIB originated by asn.
-func (t *Table) GetByOriginASNIn(asn uint32, rib types.RIBType) []*types.Route {
+// GetByOriginASNIn returns the routes of the RIBs ribs originated by asn.
+func (t *Table) GetByOriginASNIn(asn uint32, ribs types.RIBSet) []*types.Route {
 	t.asnMu.RLock()
 	keys := t.asnIdx[asn].keys()
 	t.asnMu.RUnlock()
-	return t.resolveKeys(keys, rib)
+	return t.resolveKeys(keys, ribs)
 }
 
-// GetByPosture returns the Adj-RIB-In pre-policy routes with a posture; the
-// posture index holds no other RIB.
+// PostureIndexed reports whether the posture index holds every route of
+// ribs: they are all in the default view.
+func PostureIndexed(ribs types.RIBSet) bool { return ribs&^types.DefaultView == 0 }
+
+// GetByPosture returns the default view's routes with a posture.
 func (t *Table) GetByPosture(posture types.SecurityPosture) []*types.Route {
+	return t.GetByPostureIn(posture, types.DefaultView)
+}
+
+// GetByPostureIn returns the routes of the RIBs ribs with a posture. The
+// posture index holds the default view only: ribs outside it return none
+// (see PostureIndexed).
+func (t *Table) GetByPostureIn(posture types.SecurityPosture, ribs types.RIBSet) []*types.Route {
 	t.postureMu.RLock()
 	keys := t.postureIdx[posture].keys()
 	t.postureMu.RUnlock()
-	return t.resolveKeys(keys, types.AdjRIBInPre)
+	return t.resolveKeys(keys, ribs)
 }
 
-// GetByPeer returns the pre-policy routes from a peer address, on every
+// GetByPeer returns the default view's routes from a peer address, on every
 // router and in every instance. An IPv4 peer matches in either its plain or
 // its IPv4-mapped IPv6 form.
 func (t *Table) GetByPeer(peerAddr netip.Addr) []*types.Route {
+	return t.GetByPeerIn(peerAddr, types.DefaultView)
+}
+
+// GetByPeerIn returns the routes of the RIBs ribs from a peer address, as
+// GetByPeer.
+func (t *Table) GetByPeerIn(peerAddr netip.Addr, ribs types.RIBSet) []*types.Route {
 	peerAddr = peerAddr.Unmap()
 	var routes []*types.Route
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
 		for key, route := range s.routes {
-			if key.Peer.Addr == peerAddr && route.RIBType == types.AdjRIBInPre {
+			if key.Peer.Addr == peerAddr && ribs.Has(key.RIBType) {
 				routes = append(routes, route)
 			}
 		}
@@ -725,20 +774,25 @@ func (t *Table) All() []*types.Route {
 	return routes
 }
 
-// AllPrePolicy returns only Adj-RIB-In Pre-Policy routes — the default
-// operator view showing what routers received before import filtering.
-func (t *Table) AllPrePolicy() []*types.Route {
-	return t.AllOfRIB(types.AdjRIBInPre)
+// AllDefaultView returns the default view's routes (types.DefaultView):
+// what the routers received before import policy, and what they selected.
+func (t *Table) AllDefaultView() []*types.Route {
+	return t.AllIn(types.DefaultView)
 }
 
 // AllOfRIB returns the routes of one RIB type.
 func (t *Table) AllOfRIB(rib types.RIBType) []*types.Route {
+	return t.AllIn(types.RIBSetOf(rib))
+}
+
+// AllIn returns the routes of the RIBs ribs.
+func (t *Table) AllIn(ribs types.RIBSet) []*types.Route {
 	var routes []*types.Route
 	for i := range t.shards {
 		s := &t.shards[i]
 		s.mu.RLock()
-		for _, route := range s.routes {
-			if route.RIBType == rib {
+		for key, route := range s.routes {
+			if ribs.Has(key.RIBType) {
 				routes = append(routes, route)
 			}
 		}
@@ -854,7 +908,8 @@ func (t *Table) evictStale(keys []types.RouteKey) int {
 	return evicted
 }
 
-// CountByPosture returns route counts grouped by security posture.
+// CountByPosture returns the default view's route counts grouped by
+// security posture.
 func (t *Table) CountByPosture() map[types.SecurityPosture]uint64 {
 	t.postureMu.RLock()
 	defer t.postureMu.RUnlock()
@@ -877,11 +932,11 @@ func (t *Table) getShard(key types.RouteKey) *shard {
 	return &t.shards[h.Sum32()%uint32(len(t.shards))]
 }
 
-func (t *Table) resolveKeys(keys []types.RouteKey, rib types.RIBType) []*types.Route {
+func (t *Table) resolveKeys(keys []types.RouteKey, ribs types.RIBSet) []*types.Route {
 	routes := make([]*types.Route, 0, len(keys))
 	for _, key := range keys {
 		// The prefix and ASN indexes hold keys of every RIB.
-		if key.RIBType != rib {
+		if !ribs.Has(key.RIBType) {
 			continue
 		}
 		s := t.getShard(key)
