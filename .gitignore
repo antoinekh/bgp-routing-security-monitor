@@ -41,7 +41,7 @@ raven.global.yaml
 raven.global.yaml
 internal/rtr/store/testdata/vrps-real.json
 
-# Documentation site (mkdocs build output and tooling)
+# Documentation site (zensical build output and tooling)
 site/
 .DS_Store
 *.swp
